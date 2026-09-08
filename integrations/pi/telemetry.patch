@@ -1,0 +1,207 @@
+diff --git a/Makefile b/Makefile
+index d0a489d..590fd19 100644
+--- a/Makefile
++++ b/Makefile
+@@ -26,6 +26,8 @@ usb-replay: usb_replay.o host-raw-gadget.o udp_server.o usb_capture.o
+ 	$(CXX) $(CFLAGS) $(CXXFLAGS) -c $<
+ 
+ test:
++	$(CXX) -std=c++17 -Wall -Wextra -Werror -I. tests/telemetry_test.cpp -o tests/telemetry-test
++	./tests/telemetry-test
+ 	$(CXX) -std=c++17 -Wall -Wextra -Werror -I. tests/protocol_test.cpp -o tests/protocol-test
+ 	./tests/protocol-test
+ 	$(CXX) -std=c++17 -Wall -Wextra -I. tests/udp_test.cpp udp_server.cpp usb_capture.cpp -pthread -ljsoncpp -o tests/udp-test
+diff --git a/USAGE.md b/USAGE.md
+index 3385c5c..13aa003 100644
+--- a/USAGE.md
++++ b/USAGE.md
+@@ -1,5 +1,34 @@
+ # UDP mouse control
+ 
++## Receiver telemetry extension (UPS1/UPT1)
++
++This checkout adds optional status subscriptions for the Windows YOLO receiver.
++Existing UPX1 commands and ASCII behavior are unchanged. A subscription does not
++acquire or renew mouse-command ownership. The receiver requires this extension
++for activation from the physical mouse.
++
++Send 24 bytes to the same UDP port:
++
++`UPS1 | reserved:u32be=0 | receiver_session:u64be | increasing_token:u64be`
++
++Session/token must be nonzero. Renew every 20 ms; the subscription expires after
++100 ms. One subscriber endpoint is allowed; competing endpoints receive `busy`.
++The UDP worker publishes a status change on its next iteration (poll <=2 ms),
++on renewal, and otherwise every 10 ms. USB forwarding never sends telemetry.
++
++The 56-byte reply is:
++
++`UPT1 | ready:u8 | physical_buttons:u8 | reserved:u16=0 | receiver_session:u64be | server_session:u64be | token:u64be | sequence:u32be | xmin:i32be | xmax:i32be | ymin:i32be | ymax:i32be | reserved:u32=0`
++
++The receiver rejects old sequences, mismatched sessions, and stale echoed tokens.
++The button mask reports only physical buttons. `ready=0` represents a mouse that
++has not been learned or is disconnected. Like `+state`, status reflects processed
++reports, not proof of host USB delivery. Tokens provide freshness correlation,
++not authentication. The `USB_PROXY_PEER` restriction also applies to subscriptions.
++
++`make test` includes the telemetry codec test and real UDP server subscription,
++physical-button update, and expiry checks. Run these on Linux/Pi before deploying.
++
+ ## Start and connect
+ 
+ Build and start the Pi proxy as shown in [README.md](README.md). UDP listens on port **12345** only with `--enable_injection`. `USB_PROXY_BIND` selects the local IPv4 address (default `0.0.0.0`). `USB_PROXY_PEER` optionally restricts control to one source IPv4 address. This is an unauthenticated LAN protocol; the IP restriction is not cryptographic authentication.
+diff --git a/telemetry_protocol.h b/telemetry_protocol.h
+new file mode 100644
+index 0000000..8cc264f
+--- /dev/null
++++ b/telemetry_protocol.h
+@@ -0,0 +1,32 @@
++#pragma once
++#include <array>
++#include <cstdint>
++#include <cstring>
++#include <algorithm>
++// Versioned status-only extension. Existing UPX1 and ASCII commands are unchanged.
++namespace proxy_telemetry {
++inline uint32_t u32(const uint8_t* p){return uint32_t(p[0])<<24|uint32_t(p[1])<<16|uint32_t(p[2])<<8|p[3];}
++inline uint64_t u64(const uint8_t* p){return uint64_t(u32(p))<<32|u32(p+4);}
++inline void put32(uint8_t* p,uint32_t v){for(int i=3;i>=0;--i){p[i]=uint8_t(v);v>>=8;}}
++inline void put64(uint8_t* p,uint64_t v){put32(p,uint32_t(v>>32));put32(p+4,uint32_t(v));}
++struct Snapshot {
++    bool ready=false;uint8_t physical=0;int xmin=0,xmax=0,ymin=0,ymax=0;
++    bool operator==(const Snapshot& b)const{return ready==b.ready&&physical==b.physical&&xmin==b.xmin&&xmax==b.xmax&&ymin==b.ymin&&ymax==b.ymax;}
++};
++struct Subscription {
++    uint64_t client=0,token=0,last_ns=0;uint32_t sequence=0;
++    bool accept(const uint8_t* p,size_t n,uint64_t now){
++        if(n!=24||std::memcmp(p,"UPS1",4)||u32(p+4))return false;
++        auto c=u64(p+8),t=u64(p+16);if(!c||!t)return false;
++        if(c==client&&now-last_ns<=100000000&&t<=token)return false;
++        if(c!=client)sequence=0;
++        client=c;token=t;last_ns=now;return true;
++    }
++    bool alive(uint64_t now)const{return client&&now>=last_ns&&now-last_ns<=100000000;}
++    std::array<uint8_t,56> packet(uint64_t server,const Snapshot& s){
++        std::array<uint8_t,56> p{};std::memcpy(p.data(),"UPT1",4);p[4]=s.ready;p[5]=s.physical;
++        put64(p.data()+8,client);put64(p.data()+16,server);put64(p.data()+24,token);put32(p.data()+32,sequence++);
++        put32(p.data()+36,uint32_t(s.xmin));put32(p.data()+40,uint32_t(s.xmax));put32(p.data()+44,uint32_t(s.ymin));put32(p.data()+48,uint32_t(s.ymax));return p;
++    }
++};
++}
+diff --git a/tests/telemetry_test.cpp b/tests/telemetry_test.cpp
+new file mode 100644
+index 0000000..19f6e73
+--- /dev/null
++++ b/tests/telemetry_test.cpp
+@@ -0,0 +1,8 @@
++#include "telemetry_protocol.h"
++#include <cassert>
++#include <iostream>
++int main(){using namespace proxy_telemetry;std::array<uint8_t,24> request{};std::memcpy(request.data(),"UPS1",4);put64(request.data()+8,9);put64(request.data()+16,123);
++    Subscription sub;assert(sub.accept(request.data(),24,1000));assert(sub.alive(1000));assert(!sub.accept(request.data(),24,2000));assert(!sub.alive(100001001));
++    Snapshot physical{true,2,-127,127,-32768,32767};auto p=sub.packet(7,physical);assert(!std::memcmp(p.data(),"UPT1",4));assert(p[4]==1&&p[5]==2);assert(u64(p.data()+8)==9&&u64(p.data()+16)==7&&u64(p.data()+24)==123);assert(u32(p.data()+36)==uint32_t(-127));assert(u32(p.data()+32)==0);assert(u32(sub.packet(7,physical).data()+32)==1);
++    request[4]=1;assert(!sub.accept(request.data(),24,2000));request[4]=0;put64(request.data()+16,124);assert(sub.accept(request.data(),24,2000));auto not_ready=sub.packet(7,{});assert(not_ready[4]==0&&not_ready[5]==0);std::cout<<"telemetry protocol tests passed\n";
++}
+diff --git a/tests/udp_test.cpp b/tests/udp_test.cpp
+index 0e54468..d5a765e 100644
+--- a/tests/udp_test.cpp
++++ b/tests/udp_test.cpp
+@@ -2,6 +2,7 @@
+ #include "udp_server.h"
+ #include <arpa/inet.h>
+ #include <thread>
++#include "telemetry_protocol.h"
+ 
+ // Exercises the real UDP server and endpoint merger without USB hardware.
+ int main() {
+@@ -60,6 +61,21 @@ int main() {
+     {std::lock_guard<std::mutex> lock(mutex);queue.front().injection_deadline_ns=1;}
+     auto expired=pop();assert(expired.data[1]==0 && expired.data[0]==1);
+     assert(command("+release")=="ok");assert(pop().data[0]==0);
++    std::array<uint8_t,24> watch{};std::memcpy(watch.data(),"UPS1",4);
++    proxy_telemetry::put64(watch.data()+8,123);proxy_telemetry::put64(watch.data()+16,456);
++    assert(send(fd,watch.data(),watch.size(),0)==ssize_t(watch.size()));
++    std::array<uint8_t,56> status{};
++    assert(recv(fd,status.data(),status.size(),0)==56);
++    assert(!std::memcmp(status.data(),"UPT1",4)&&status[4]==1);
++    assert(proxy_telemetry::u64(status.data()+8)==123&&proxy_telemetry::u64(status.data()+24)==456);
++    physical.data[0]=2;assert(merge_mouse_report(0x81,physical));
++    bool observed=false;
++    for(int i=0;i<10&&!observed;++i){assert(recv(fd,status.data(),status.size(),0)==56);observed=status[5]==2;}
++    assert(observed); // Physical hold appears in telemetry; no injected hold is added.
++    std::this_thread::sleep_for(std::chrono::milliseconds(150));
++    while(recv(fd,status.data(),status.size(),MSG_DONTWAIT)>0){}
++    timeval short_timeout{0,30000};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&short_timeout,sizeof(short_timeout));
++    assert(recv(fd,status.data(),status.size(),0)<0); // Subscription expires without renewal.
+     server.stop();close(fd);unregister_mouse_endpoint(&info);
+     puts("UDP integration: splitting, buttons, timers, watchdog, sequencing and freshness passed");
+ }
+diff --git a/udp_server.cpp b/udp_server.cpp
+index f656aa0..f8e7ced 100644
+--- a/udp_server.cpp
++++ b/udp_server.cpp
+@@ -8,6 +8,8 @@
+ #include <sstream>
+ #include <cstdlib>
+ #include <array>
++#include <random>
++#include "telemetry_protocol.h"
+ 
+ namespace {
+ using Clock=std::chrono::steady_clock;
+@@ -78,6 +80,13 @@ std::string state() {
+         std::to_string(e.profile.x.maximum)+" "+std::to_string(e.profile.y.minimum)+" "+
+         std::to_string(e.profile.y.maximum);
+ }
++proxy_telemetry::Snapshot telemetry_snapshot() {
++    std::lock_guard<std::mutex> lock(registry_mutex);
++    auto it=endpoints.find(selected);
++    if(it==endpoints.end()||it->second.latest.empty())return {};
++    auto& e=it->second;
++    return {true,e.physical,e.profile.x.minimum,e.profile.x.maximum,e.profile.y.minimum,e.profile.y.maximum};
++}
+ }
+ // Caller holds registry_mutex. Invalidate reports encoded for the previous layout.
+ static void invalidate_interface(int number) {
+@@ -167,12 +176,29 @@ void UdpServer::stop() {
+ }
+ void UdpServer::join(){if(server_thread.joinable())server_thread.join();}
+ void UdpServer::server_loop() {
++    std::random_device random;
++    const uint64_t telemetry_session=(uint64_t(random())<<32|random())|1;
++    proxy_telemetry::Subscription subscription;
++    proxy_telemetry::Snapshot previous_snapshot;
++    sockaddr_in subscriber{};
++    uint64_t last_telemetry=0;
+     uint8_t requested_buttons=0;
+     sockaddr_in owner{};bool owned=false,have_sequence=false;uint32_t last_sequence=0;
+     auto last=Clock::now();std::array<Clock::time_point,8> release_at{};
+     in_addr allowed{};const char* peer=std::getenv("USB_PROXY_PEER");
+     if(peer&&inet_pton(AF_INET,peer,&allowed)!=1){fprintf(stderr,"Invalid USB_PROXY_PEER\n");return;}
+     while(running) {
++        // Network publication lives on this worker, never on the USB writer.
++        // A physical state change is observed on the next loop (poll <= 2 ms).
++        auto telemetry_now=now_ns();
++        if(subscription.alive(telemetry_now)) {
++            auto snapshot=telemetry_snapshot();
++            if(!(snapshot==previous_snapshot)||telemetry_now-last_telemetry>=10000000) {
++                auto packet=subscription.packet(telemetry_session,snapshot);
++                sendto(sockfd,packet.data(),packet.size(),MSG_DONTWAIT,reinterpret_cast<sockaddr*>(&subscriber),sizeof(subscriber));
++                previous_snapshot=snapshot;last_telemetry=telemetry_now;
++            }
++        }
+         if(!ready()) {requested_buttons=0;release_at={};owned=false;have_sequence=false;}
+         auto now=Clock::now();
+         uint8_t desired=requested_buttons;
+@@ -195,6 +221,11 @@ void UdpServer::server_loop() {
+         if(n<=0||n>int(sizeof(data)))continue;
+         if(peer&&from.sin_addr.s_addr!=allowed.s_addr)continue;
+         auto reply=[&](const std::string& s){sendto(sockfd,s.data(),s.size(),MSG_DONTWAIT,reinterpret_cast<sockaddr*>(&from),length);};
++        if(n>=4&&std::memcmp(data,"UPS1",4)==0) {
++            if(subscription.alive(now_ns())&&(subscriber.sin_addr.s_addr!=from.sin_addr.s_addr||subscriber.sin_port!=from.sin_port)){reply("busy");continue;}
++            if(subscription.accept(data,size_t(n),now_ns())) {subscriber=from;last_telemetry=0;}
++            continue; // Does not acquire or renew the movement ownership lease.
++        }
+         std::string text(reinterpret_cast<char*>(data),n);
+         while(!text.empty()&&(text.back()=='\n'||text.back()=='\r'))text.pop_back();
+         if(text=="+state") {reply(state());continue;}

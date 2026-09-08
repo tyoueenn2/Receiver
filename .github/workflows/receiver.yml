@@ -1,0 +1,21 @@
+name: Windows receiver checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  windows-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cmake --preset windows-tests
+      - run: cmake --build --preset windows-tests
+      - run: ctest --preset windows-tests
+      - run: python tests/integration_test.py build/tests/Release/receiver_headless.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-build-no-tensorrt
+          path: build/tests/Release/*.exe
