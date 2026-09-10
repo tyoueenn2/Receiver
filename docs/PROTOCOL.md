@@ -90,3 +90,24 @@ The UDP worker publishes on a state change on its next iteration (its poll timeo
 The receiver accepts only its configured Pi endpoint, its own session, increasing snapshot sequences, and tokens it issued in the past 50 ms. Older tokens cannot roll state backward. Changing Pi server epoch requires a newer token. Activation requires both the snapshot receipt and its token to remain within 50 ms, ready=true, GUI armed, and the selected physical button held. This limits delayed heartbeat replay without comparing Pi and PC clocks.
 
 UPT1 capability is mandatory for v1 mouse-driven activation. The receiver does not silently fall back to uncorrelated `+state` polling. Existing `+state` and MAKCU-inspired ASCII commands are unchanged. MAKCU serial framing and MAKCU V2 binary packets are not used.
+
+## UPS2 / UPT2: physical motion for direction-based assistance
+
+UPS2 has the same 24-byte layout and ownership/freshness rules as UPS1, with magic `UPS2`. The receiver requests it while direction-based assistance is enabled; otherwise it uses UPS1. The updated proxy preserves byte-for-byte UPT1 responses to UPS1 clients. No UPX1 change is required.
+
+UPT2 is 88 bytes. Bytes 0..55 have the UPT1 layout, except magic `UPT2`. The additional network-byte-order fields are:
+
+| Offset | Bytes | Field |
+| --- | --- | --- |
+| 56 | 8 | Mouse endpoint/layout generation, unsigned |
+| 64 | 8 | Pi monotonic snapshot time in nanoseconds, unsigned |
+| 72 | 4 | Cumulative physical X counts modulo 2^32 |
+| 76 | 4 | Cumulative physical Y counts modulo 2^32 |
+| 80 | 4 | Microseconds since last nonzero physical motion, saturated at 0xffffffff; 0xffffffff if none |
+| 84 | 4 | Reserved = 0 |
+
+Counters are updated only while processing matching physical reports, before synthetic button merging. Injected reports never increment them. A new endpoint/layout generation invalidates the velocity baseline. Snapshots atomically read counts and the Pi timestamp under the existing registry lock. Counter changes alone do not increase the heartbeat frequency; button changes still publish promptly. The packet uses fixed storage and all publication remains on the UDP worker.
+
+The receiver subtracts cumulative counts modulo 2^32 and divides by the difference between Pi snapshot times. Packet loss therefore does not lose movement counts; reordered/duplicate telemetry is rejected by the existing gate. No cross-machine clock comparison is needed for velocity. Velocity is exponentially averaged over the configured interval, set to stationary when the reported motion age exceeds that interval, and invalidated after a 50 ms reception gap, a server/generation change, a non-increasing sample time, or an excessive sample discontinuity. Two accepted snapshots are needed after a reset. Both the telemetry receipt and echoed-token age must still pass the original 50 ms freshness gate.
+
+Direction-based assistance requires valid UPT2 motion data and pauses when it is unavailable. Button-only UPT1 remains sufficient when this feature is off. The old proxy may reject UPS2 as an unknown command; install the motion update and restart the receiver.

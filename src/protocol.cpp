@@ -165,15 +165,17 @@ std::optional<int64_t> ClockSync::age_upper(int64_t capture, int64_t now) const 
         return {};
     return int64_t(age);
 }
-std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token) {
+std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token, bool motion) {
     std::array<uint8_t, 24> p{};
-    std::memcpy(p.data(), "UPS1", 4);
+    std::memcpy(p.data(), motion ? "UPS2" : "UPS1", 4);
     put64(p.data() + 8, client);
     put64(p.data() + 16, token);
     return p;
 }
 std::optional<Telemetry> parse_telemetry(Bytes p) {
-    if (p.size() != 56 || std::memcmp(p.data(), "UPT1", 4) || p[4] > 1 || p[6] || p[7] || be32(p.data() + 52))
+    bool v2 = p.size() == 88 && !std::memcmp(p.data(), "UPT2", 4);
+    if ((!v2 && (p.size() != 56 || std::memcmp(p.data(), "UPT1", 4))) || p[4] > 1 || p[6] || p[7] ||
+        be32(p.data() + 52))
         return {};
     Telemetry t;
     t.ready = p[4] != 0;
@@ -182,6 +184,18 @@ std::optional<Telemetry> parse_telemetry(Bytes p) {
     t.server = be64(p.data() + 16);
     t.token = be64(p.data() + 24);
     t.sequence = be32(p.data() + 32);
+    if (v2) {
+        if (be32(p.data() + 84))
+            return {};
+        t.has_motion = true;
+        t.motion_generation = be64(p.data() + 56);
+        t.sample_ns = be64(p.data() + 64);
+        t.total_x = be32(p.data() + 72);
+        t.total_y = be32(p.data() + 76);
+        t.motion_age_us = be32(p.data() + 80);
+        if (t.ready && (!t.motion_generation || !t.sample_ns))
+            return {};
+    }
     auto signed32 = [](const uint8_t* b) {
         uint32_t u = be32(b);
         return u <= 0x7fffffffu ? int(u) : int(int64_t(u) - 0x100000000ll);

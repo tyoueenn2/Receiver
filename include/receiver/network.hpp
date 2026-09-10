@@ -10,6 +10,8 @@ struct Address {
 Address address(const std::string& ip, int port);
 class UdpSocket {
     uintptr_t socket_ = ~uintptr_t(0);
+    void* readable_ = nullptr;
+    friend class ControlWake;
 
   public:
     UdpSocket(const std::string& ip, int port);
@@ -18,6 +20,18 @@ class UdpSocket {
     UdpSocket& operator=(const UdpSocket&) = delete;
     int receive(std::span<uint8_t> buffer, Address& from, int timeout_ms);
     bool send(Bytes data, const Address& to);
+};
+// Windows event-driven control wake: new inference, socket input, or mouse messages.
+class ControlWake {
+    void* event_ = nullptr;
+
+  public:
+    ControlWake();
+    ~ControlWake();
+    ControlWake(const ControlWake&) = delete;
+    ControlWake& operator=(const ControlWake&) = delete;
+    void notify() noexcept;
+    void wait(UdpSocket* socket, bool mouse_messages);
 };
 uint64_t random_id();
 } // namespace receiver

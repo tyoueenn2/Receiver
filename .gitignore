@@ -8,6 +8,10 @@
 __pycache__/
 *.csv
 *.log
+gui-smoke.bmp
+imgui.ini
 
 # Include the verified sample export; generated/custom engines stay local.
 !/models/yolo11n.onnx
+
+/test-results/

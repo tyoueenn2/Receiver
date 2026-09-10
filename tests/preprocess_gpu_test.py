@@ -1,5 +1,6 @@
 """Execute the production kernel via the CUDA driver and compare with a CPU reference."""
 import argparse
+import subprocess
 import ctypes as c
 import sys
 from pathlib import Path
@@ -9,7 +10,11 @@ from validate_gpu import preprocess
 
 
 def main():
-    p = argparse.ArgumentParser(); p.add_argument('ptx'); a = p.parse_args()
+    p = argparse.ArgumentParser(); p.add_argument('ptx', nargs='?', default='preprocess.ptx')
+    p.add_argument('--nvrtc'); a = p.parse_args()
+    if a.nvrtc:
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1]/'tools/check_cuda_kernel.py'),
+                        '--nvrtc', a.nvrtc, '--arch', 'compute_75', '--output', a.ptx], check=True)
     cuda = c.WinDLL('nvcuda.dll')
     def call(name, types, *args):
         f = getattr(cuda, name); f.argtypes = types; f.restype = c.c_int

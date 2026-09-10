@@ -5,6 +5,7 @@ import secrets
 import socket
 import threading
 import time
+import struct
 from wire import MOVE, SUBSCRIBE, TELEMETRY, newer
 
 
@@ -14,6 +15,9 @@ class MockPi:
         self.sock.bind(('127.0.0.1', port)); self.sock.settimeout(.002)
         self.physical, self.ready = physical, True
         self.telemetry_enabled = True
+        self.motion_enabled = True
+        self.motion_x = self.motion_y = 0.0  # Physical counts/second, independently simulated.
+        self.motion_generation = 1
         self.commands, self.transitions = [], []
         self.stop_event = threading.Event()
         self.session = secrets.randbits(64) or 1
@@ -28,19 +32,22 @@ class MockPi:
     def run(self):
         subscriber = None; client = token = 0; renewed = published = 0
         seq = 0; previous = None; owner = None; lease = 0; move_seq = None
+        motion = False; total_x = total_y = 0.0
+        motion_at = time.perf_counter(); last_motion = 0
         while not self.stop_event.is_set():
             now = time.perf_counter()
             if owner and now - lease > .25:
                 owner = None; move_seq = None
             try:
                 data, source = self.sock.recvfrom(2048)
-                if len(data) == SUBSCRIBE.size and data[:4] == b'UPS1':
+                if len(data) == SUBSCRIBE.size and data[:4] in (b'UPS1', b'UPS2'):
                     _, reserved, c, t = SUBSCRIBE.unpack(data)
                     if not reserved and c and t and (subscriber is None or source == subscriber or now - renewed > .1):
                         if c != client or now - renewed > .1 or t > token:
                             if c != client:
                                 seq = 0
                             client, token, subscriber, renewed, published = c, t, source, now, 0
+                            motion = data[:4] == b'UPS2' and self.motion_enabled
                 elif len(data) == MOVE.size and data[:4] == b'UPX1':
                     _, ms, dx, dy, wheel, pan, buttons, reserved = MOVE.unpack(data)
                     if owner is not None and owner != source:
@@ -56,10 +63,20 @@ class MockPi:
             except (socket.timeout, ConnectionResetError):
                 pass
             now = time.perf_counter()
+            total_x += self.motion_x * (now - motion_at)
+            total_y += self.motion_y * (now - motion_at)
+            if self.motion_x or self.motion_y:
+                last_motion = now
+            motion_at = now
             state = (self.ready, self.physical)
             if subscriber and self.telemetry_enabled and now - renewed <= .1 and (now - published >= .01 or state != previous):
-                self.sock.sendto(TELEMETRY.pack(b'UPT1', int(self.ready), self.physical, 0, client, self.session, token,
-                                              seq, -127, 127, -127, 127, 0), subscriber)
+                packet = TELEMETRY.pack(b'UPT2' if motion else b'UPT1', int(self.ready), self.physical, 0, client, self.session, token,
+                                        seq, -127, 127, -127, 127, 0)
+                if motion:
+                    age = min(0xffffffff, int((now - last_motion) * 1e6)) if last_motion else 0xffffffff
+                    packet += struct.pack('!QQIIII', self.motion_generation, time.perf_counter_ns(), int(total_x) & 0xffffffff,
+                                          int(total_y) & 0xffffffff, age, 0)
+                self.sock.sendto(packet, subscriber)
                 seq = (seq + 1) & 0xffffffff; published = now; previous = state
 
 
@@ -68,10 +85,13 @@ def main():
     p.add_argument('--port', type=int, default=12345); p.add_argument('--buttons', type=int, default=2)
     p.add_argument('--seconds', type=float, default=30); p.add_argument('--log', default='mock_commands.json')
     p.add_argument('--release-after', type=float, default=-1)
+    p.add_argument('--motion-x', type=float, default=0, help='Simulated physical horizontal counts/sec')
+    p.add_argument('--motion-y', type=float, default=0, help='Simulated physical vertical counts/sec')
     a = p.parse_args()
     if not 0 <= a.buttons <= 255:
         p.error('Button mask must be 0..255')
     pi = MockPi(a.port, a.buttons).start(); started = time.perf_counter()
+    pi.motion_x, pi.motion_y = a.motion_x, a.motion_y
     try:
         while time.perf_counter() - started < a.seconds:
             if a.release_after >= 0 and time.perf_counter() - started >= a.release_after:

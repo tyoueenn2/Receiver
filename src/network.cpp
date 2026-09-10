@@ -71,6 +71,8 @@ UdpSocket::~UdpSocket() {
         return;
 #ifdef _WIN32
     closesocket(Native(socket_));
+    if (readable_)
+        WSACloseEvent(readable_);
 #else
     close(Native(socket_));
 #endif
@@ -107,6 +109,54 @@ bool UdpSocket::send(Bytes p, const Address& a) {
     sa.sin_port = htons(a.port);
     return sendto(Native(socket_), reinterpret_cast<const char*>(p.data()), int(p.size()), 0,
                   reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == int(p.size());
+}
+ControlWake::ControlWake() {
+#ifdef _WIN32
+    event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!event_)
+        throw std::runtime_error("Control event creation failed");
+#endif
+}
+ControlWake::~ControlWake() {
+#ifdef _WIN32
+    if (event_)
+        CloseHandle(event_);
+#endif
+}
+void ControlWake::notify() noexcept {
+#ifdef _WIN32
+    SetEvent(event_);
+#endif
+}
+void ControlWake::wait(UdpSocket* socket, bool mouse_messages) {
+#ifdef _WIN32
+    HANDLE events[2] = {event_, nullptr};
+    DWORD count = 1;
+    if (socket) {
+        if (!socket->readable_) {
+            socket->readable_ = WSACreateEvent();
+            if (!socket->readable_ || WSAEventSelect(Native(socket->socket_), socket->readable_, FD_READ))
+                throw std::runtime_error("Control socket event setup failed");
+        }
+        events[count++] = socket->readable_;
+    }
+    // Timeout is housekeeping only. Inference, telemetry and mouse messages wake immediately.
+    DWORD result = mouse_messages
+                       ? MsgWaitForMultipleObjectsEx(count, events, 10, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+                       : WaitForMultipleObjects(count, events, FALSE, 10);
+    if (result == WAIT_FAILED)
+        throw std::runtime_error("Control event wait failed");
+    if (socket && result == WAIT_OBJECT_0 + 1) {
+        WSANETWORKEVENTS network{};
+        if (WSAEnumNetworkEvents(Native(socket->socket_), socket->readable_, &network))
+            throw std::runtime_error("Control socket event read failed");
+        if (network.iErrorCode[FD_READ_BIT])
+            throw std::runtime_error("Control socket read failed");
+    }
+#else
+    (void)socket;
+    (void)mouse_messages;
+#endif
 }
 uint64_t random_id() {
     std::random_device r;

@@ -1,5 +1,13 @@
 # Validation record — 2026-09-08
 
+## Interface update — 2026-09-10
+
+Humanization additions: the new controller/protocol tests pass for all five movement styles, directional symmetry and mode reversal, custom left/right ratios, stationary/slow-input blending, counter wrap, baseline resets, malformed UPT2, missing motion, movement caps, zero-strength output, dead-zone behavior, and old/new profile loading. The real headless receiver passed additional loopback tests: toward/away mean corrections were approximately 6.4/19.2 counts with a 50% effect, reversed by the mode switch; stationary output was approximately 12.8. These are deterministic synthetic-input output checks, not GPU latency measurements. Missing/stale motion telemetry, a generation restart, and physical release behaved as expected. The existing core and pipeline integration tests still pass. The Humanization page also passes the framebuffer smoke check and was visually reviewed.
+
+The Pi codec tests pass locally for unchanged UPT1 and new UPT2 framing. Both the complete telemetry patch and the upgrade from the earlier button-only patch are checked for clean application. The Linux UDP/USB test for excluding injected motion from physical counters is implemented but still requires Linux/Pi execution; no physical Pi deployment has been performed.
+
+The Windows GUI was rebuilt locally with guided Setup, Detection, Mouse, and Saved settings pages. Each page passed the existing framebuffer smoke check with live synthetic pictures, synchronized timing, a simulated Pi, and no commands sent while disarmed. Rendered screenshots were reviewed for readable labels and layout. A new demo launcher starts both local test peers and opens practice mode with the preview enabled. Native Windows model/settings file dialogs are included; exhaustive manual interaction and deployment GPU validation remain outstanding.
+
 ## Implemented and locally verified
 
 Development host: Windows, Intel Core i7-1165G7, NVIDIA GeForce MX450, NVIDIA driver 592.82. This is not the planned RTX 3060 Ti deployment system.
@@ -27,3 +35,19 @@ Development host: Windows, Intel Core i7-1165G7, NVIDIA GeForce MX450, NVIDIA dr
 Real target-PC screen capture is not implemented; a documented protocol and synthetic/raw-file sender are included. No code has been deployed to the Pi and no system CUDA/Visual Studio installation has been performed. The Pi changes are based on commit `c3c09153feabe4be2eb3a711fe3c3e957f6eb794` and are supplied as `integrations/pi/telemetry.patch` for the separate proxy repository.
 
 All zero-millisecond GPU entries in simulation CSV files mean the inference backend was bypassed. They are not performance claims. The lack of UPX1 success ACK means no software-only receiver test can establish USB delivery latency.
+
+## 2026-09-10: additional controls, local mouse and Test Hub
+
+- Release Windows build without TensorRT succeeded; all three CTest suites passed (including 76,864 core checks).
+- All seven default Test Hub entries passed through the same background process runner used by the GUI. The six GUI pages rendered their own hidden framebuffer; the Test Hub screenshot was visually reviewed.
+- Prediction methods, prediction resets/limits, sticky distance, dynamic FOV, EMA response, local injected-event exclusion, and profile round-tripping passed deterministic checks.
+- The actual Windows mouse reader started successfully without sending movement. A separate local-backend application session received synthetic frames without a Pi, remained disarmed, and recorded zero submitted corrections.
+- Local cursor injection/feel was deliberately left for explicit manual activation. RTX 3060 Ti TensorRT performance, physical Pi/USB operation, and deployment behavior remain unvalidated by these checks. Optional model/CUDA entries do not count as passing unless their prerequisites are supplied and the checks actually run.
+
+### Steady demo and local pacing update
+
+The demo now defaults to stationary simulated motion; four-second direction cycling requires --cycle-motion. A crosshair/bullseye image matches the fixed detection. Movement status and submitted-correction count are visible in practice mode. The local worker now waits on a high-resolution timer or pending Windows mouse messages instead of sleeping between polls. All seven Test Hub checks passed. A 200-sample read-only wait/poll measurement on this PC was p50 1.671 ms, p95 1.865 ms, maximum 2.215 ms. This measures reader cadence only; no actual cursor movement or complete pipeline continuity was measured. Stale-frame gating remains unchanged.
+
+### Event-driven control optimization
+
+Replaced Windows control-thread timed polling with notifications for new detection results, telemetry, and local mouse messages. Added inference_to_control timing to CSV and GUI. All seven Test Hub checks passed after this change. Final 120-setting loopback receiver-to-submission p95 was 2.5916 ms versus 14.5460 ms before; handoff p95 was 0.0431 ms. See BENCHMARK.md for sample counts, throughput limits and scope. No deployment-GPU or actual mouse-delivery claim follows from these simulated measurements.

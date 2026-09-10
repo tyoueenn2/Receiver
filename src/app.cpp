@@ -1,4 +1,5 @@
 #include "receiver/app.hpp"
+#include "receiver/local_mouse.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -24,15 +25,16 @@ void App::fail(const std::string& error) {
     result_.reset();
     stop_ = true;
     cv_.notify_all();
+    control_wake_.notify();
 }
 void App::start(const Settings& settings, bool simulated) {
     stop();
     validate(settings);
     address(settings.bind_ip, settings.frame_port);
     auto sender = address(settings.sender_ip, 0);
-    auto pi = address(settings.pi_ip, settings.pi_port);
+    auto pi = address(settings.mouse_backend == 1 ? "127.0.0.1" : settings.pi_ip, settings.pi_port);
     auto local = address("127.0.0.1", 0);
-    if (simulated && (sender.ip != local.ip || pi.ip != local.ip))
+    if (simulated && (sender.ip != local.ip || (settings.mouse_backend == 0 && pi.ip != local.ip)))
         throw std::runtime_error("Simulation requires both sender and Pi to be 127.0.0.1");
     {
         std::lock_guard lock(mutex_);
@@ -83,6 +85,7 @@ void App::stop() {
         result_.reset();
     }
     cv_.notify_all();
+    control_wake_.notify();
     for (auto* t : {&receive_thread_, &inference_thread_, &pi_thread_})
         if (t->joinable())
             t->join();
@@ -107,6 +110,7 @@ void App::arm(bool enabled) {
     ++epoch_;
     result_.reset();
     stats_.active = false;
+    control_wake_.notify();
 }
 void App::configure(const Settings& s) {
     validate(s);
@@ -114,9 +118,10 @@ void App::configure(const Settings& s) {
     if (s.bind_ip != settings_.bind_ip || s.sender_ip != settings_.sender_ip || s.pi_ip != settings_.pi_ip ||
         s.frame_port != settings_.frame_port || s.pi_port != settings_.pi_port ||
         s.model != settings_.model || s.metadata != settings_.metadata ||
-        s.input_size != settings_.input_size)
+        s.input_size != settings_.input_size || s.mouse_backend != settings_.mouse_backend)
         throw std::runtime_error("Stop and restart to change networking or model");
     settings_ = s;
+    control_wake_.notify();
     ++epoch_;
     result_.reset();
     if (!s.preview)
@@ -285,7 +290,8 @@ void App::inference_loop() {
             stats_.inference.add(infer);
             stats_.postprocess.add(double(done - post_start) / 1e6);
             if (epoch == epoch_ && !stop_) {
-                result_ = Result{frame, std::move(detections), epoch, ++result_id_, deadline};
+                result_ = Result{frame, std::move(detections), epoch, ++result_id_, deadline, done};
+                control_wake_.notify();
                 if (cfg.preview && done - last_preview >= 33'333'333) {
                     preview_ = {frame, result_->detections, {}};
                     last_preview = done;
@@ -301,38 +307,73 @@ void App::pi_loop() {
         initial = settings_;
     }
     UdpSocket socket("0.0.0.0", 0);
-    auto pi = address(initial.pi_ip, initial.pi_port);
+    auto pi = address(initial.mouse_backend == 1 ? "127.0.0.1" : initial.pi_ip, initial.pi_port);
     const uint64_t client = random_id();
     TelemetryGate gate;
     gate.reset(client);
     uint64_t token = random_id(), last_result = 0, last_epoch = 0;
     uint32_t sequence = uint32_t(random_id());
     int64_t renewal = 0;
+    std::unique_ptr<LocalMouse> local_mouse;
+    if (initial.mouse_backend == 1)
+        local_mouse = std::make_unique<LocalMouse>();
+    auto input_fresh = [&](int64_t at) { return local_mouse ? local_mouse->fresh(at) : gate.fresh(at); };
     Controller controller;
+    MotionTracker motion_tracker;
     bool was_active = false;
     std::array<uint8_t, 2048> bytes{};
     while (!stop_) {
+        control_wake_.wait(local_mouse ? nullptr : &socket, bool(local_mouse));
+        if (stop_)
+            break;
         auto now = now_ns();
 #ifdef _WIN32
         if (GetAsyncKeyState(VK_DELETE) & 0x8000)
             arm(false);
 #endif
-        if (now - renewal >= 20'000'000) {
-            auto p = subscribe(client, ++token);
+        if (!local_mouse && now - renewal >= 20'000'000) {
+            bool need_motion;
+            {
+                std::lock_guard lock(mutex_);
+                need_motion = settings_.direction.enabled;
+            }
+            auto p = subscribe(client, ++token, need_motion);
             gate.issue(token, now);
             if (!socket.send(p, pi))
                 throw std::runtime_error("Pi subscription send failed");
             renewal = now;
         }
         Address from;
-        int n = socket.receive(bytes, from, 1);
+        int n = 0;
+        if (local_mouse) {
+            gate.state = local_mouse->poll();
+            float window;
+            {
+                std::lock_guard lock(mutex_);
+                window = settings_.direction.window_ms;
+            }
+            motion_tracker.observe(gate.state, now_ns(), window);
+
+        } else
+#ifdef _WIN32
+            n = socket.receive(bytes, from, 0);
+#else
+            n = socket.receive(bytes, from, 1);
+#endif
         now = now_ns();
         bool proxy_error = false;
         if (n > 0 && from == pi) {
-            if (n >= 4 && !std::memcmp(bytes.data(), "UPT1", 4)) {
+            if (n >= 4 && (!std::memcmp(bytes.data(), "UPT1", 4) || !std::memcmp(bytes.data(), "UPT2", 4))) {
                 if (!gate.accept(Bytes(bytes.data(), size_t(n)), now)) {
                     std::lock_guard lock(mutex_);
                     ++stats_.telemetry_rejected;
+                } else {
+                    float window;
+                    {
+                        std::lock_guard lock(mutex_);
+                        window = settings_.direction.window_ms;
+                    }
+                    motion_tracker.observe(gate.state, now, window);
                 }
             } else {
                 std::string reply(reinterpret_cast<char*>(bytes.data()), size_t(n));
@@ -347,9 +388,15 @@ void App::pi_loop() {
             }
         }
         std::lock_guard lock(mutex_);
-        bool active = stats_.armed && !proxy_error && gate.fresh(now) &&
-                      (gate.state.physical & (1u << (settings_.activation_button - 1)));
-        stats_.pi_ready = gate.fresh(now);
+        auto physical_motion = motion_tracker.estimate(now);
+        stats_.motion_available = input_fresh(now) && physical_motion.available;
+        stats_.mouse_speed = stats_.motion_available ? std::hypot(physical_motion.x, physical_motion.y) : 0;
+        bool motion_ok = !settings_.direction.enabled || stats_.motion_available;
+        bool active = stats_.armed && !proxy_error && input_fresh(now) && motion_ok &&
+                      ((gate.state.physical & (1u << (settings_.activation_button - 1))) ||
+                       (settings_.secondary_button &&
+                        (gate.state.physical & (1u << (settings_.secondary_button - 1)))));
+        stats_.pi_ready = input_fresh(now);
         stats_.physical = gate.state.physical;
         if (active != was_active) {
             ++epoch_;
@@ -359,15 +406,18 @@ void App::pi_loop() {
         }
         stats_.active = active;
         stats_.status = !stats_.error.empty() ? "Error - stop and restart"
-                        : !gate.fresh(now)    ? "Waiting for fresh Pi telemetry (extension required)"
+                        : !input_fresh(now)   ? "Waiting for fresh Pi telemetry (extension required)"
                         : !stats_.armed       ? "Disarmed"
-                        : !active             ? "Armed - hold activation button"
-                                              : "Active - waiting for fresh detection";
+                        : !motion_ok ? "Waiting for physical mouse motion telemetry (UPS2 update required)"
+                        : !active    ? "Armed - hold activation button"
+                                     : "Active - waiting for fresh detection";
         if (!active || epoch_ != last_epoch) {
+            stats_.assist_strength = 0;
             controller.reset();
             last_epoch = epoch_;
         }
         if (active && result_ && (!result_->deadline || now > result_->deadline)) {
+            stats_.assist_strength = 0;
             controller.reset();
             stats_.status = "Active - waiting for fresh capture";
         }
@@ -381,8 +431,11 @@ void App::pi_loop() {
             ++stats_.stale;
             continue;
         }
-        auto correction = controller.update(r.detections, r.frame->header.width, r.frame->header.height,
-                                            settings_, gate.state, now);
+        stats_.control_handoff.add(double(now_ns() - r.completed_ns) / 1e6);
+        auto correction =
+            controller.update(r.detections, r.frame->header.width, r.frame->header.height, settings_,
+                              gate.state, now, physical_motion, r.frame->header.capture_ns);
+        stats_.assist_strength = correction.strength;
         if (preview_.frame && preview_.frame->header.sequence == r.frame->header.sequence)
             preview_.correction = correction;
         if (!correction.target) {
@@ -392,15 +445,17 @@ void App::pi_loop() {
         if (correction.dx || correction.dy) {
             // Serialize final gating and send against disarm/configuration changes.
             auto send_at = now_ns();
-            if (send_at > r.deadline || !gate.fresh(send_at)) {
+            if (send_at > r.deadline || !input_fresh(send_at)) {
                 controller.reset();
                 ++stats_.stale;
                 continue;
             }
             auto packet = movement(sequence++, correction.dx, correction.dy);
-            if (!socket.send(packet, pi)) {
+            if (!(local_mouse ? local_mouse->send(correction.dx, correction.dy) : socket.send(packet, pi))) {
                 stats_.armed = false;
-                stats_.error = "Pi command send failed";
+                stats_.error = local_mouse ? "Windows blocked local mouse output. Use a normal desktop "
+                                             "window at the same privilege level."
+                                           : "Pi command send failed";
                 ++epoch_;
                 controller.reset();
                 continue;
@@ -423,6 +478,7 @@ void App::export_metrics(const std::string& path) const {
         throw std::runtime_error("Cannot write metrics");
     f << "stage,samples,p50_ms,p95_ms,p99_ms\n";
     for (auto pair : {std::pair{"reassembly", &s.reassembly},
+                      {"inference_to_control", &s.control_handoff},
                       {"copies_preprocess", &s.upload},
                       {"inference", &s.inference},
                       {"postprocess", &s.postprocess},

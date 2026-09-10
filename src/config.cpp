@@ -6,13 +6,22 @@
 #include <stdexcept>
 namespace receiver {
 using nlohmann::json;
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HumanizationSettings, enabled, path, curve, duration_ms,
+                                                exponent, adaptive_distance, jitter, jitter_interval_ms,
+                                                noise, noise_period_ms, ema_enabled, ema_alpha)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(TrackingSettings, prediction, dynamic_fov, prediction_method,
+                                                fov_button, lead_ms, lead_multiplier, velocity_smoothing_ms,
+                                                max_lead, sticky_distance, held_radius)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(DirectionSettings, enabled, mode, strength, slow_strength,
+                                                slow_speed, window_ms, left_strength, right_strength)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Settings, version, bind_ip, sender_ip, pi_ip, model, metadata,
                                                 frame_port, pi_port, input_size, confidence, nms_iou,
                                                 fov_radius, reference_x, reference_y, classes,
                                                 highest_confidence, persistence, preview, persistence_iou,
                                                 aim_x, aim_y, offset_x, offset_y, gain_x, gain_y,
                                                 smoothing_ms, deadzone, max_step, activation_button,
-                                                max_age_ms)
+                                                max_age_ms, humanization, direction, tracking, mouse_backend,
+                                                secondary_button)
 void validate(const Settings& s) {
     auto range = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
     if (s.version != 1)
@@ -32,6 +41,23 @@ void validate(const Settings& s) {
     for (int c : s.classes)
         if (c < 0 || c > 9999)
             throw std::runtime_error("Invalid class ID");
+    const auto& h = s.humanization;
+    const auto& d = s.direction;
+    const auto& t = s.tracking;
+    if (s.mouse_backend < 0 || s.mouse_backend > 1 || s.secondary_button < 0 || s.secondary_button > 8 ||
+        t.prediction_method < 0 || t.prediction_method > 2 || t.fov_button < 1 || t.fov_button > 8 ||
+        !range(t.lead_ms, 0, 300) || !range(t.lead_multiplier, 0, 5) ||
+        !range(t.velocity_smoothing_ms, 1, 200) || !range(t.max_lead, 0, 500) ||
+        !range(t.sticky_distance, 0, 500) || !range(t.held_radius, 1, 2048) || !range(h.ema_alpha, .01f, 1))
+        throw std::runtime_error("Tracking or mouse-backend settings are outside their allowed range");
+    if (h.path < 0 || h.path > 4 || !range(h.curve, 0, 1) || !range(h.duration_ms, 10, 1000) ||
+        !range(h.exponent, 1, 5) || !range(h.adaptive_distance, 1, 1024) || !range(h.jitter, 0, 20) ||
+        !range(h.jitter_interval_ms, 8, 250) || !range(h.noise, 0, 20) || !range(h.noise_period_ms, 10, 1000))
+        throw std::runtime_error("Humanization settings are outside their allowed range");
+    if (d.mode < 0 || d.mode > 2 || !range(d.strength, 0, 1) || !range(d.slow_strength, 0, 2) ||
+        !range(d.slow_speed, 1, 2000) || !range(d.window_ms, 5, 100) || !range(d.left_strength, 0, 2) ||
+        !range(d.right_strength, 0, 2))
+        throw std::runtime_error("Direction assistance settings are outside their allowed range");
 }
 Settings load_settings(const std::string& path) {
     std::ifstream f(path);

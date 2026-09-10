@@ -35,7 +35,21 @@ class Sender:
         c = 3 if fmt == 1 else 4
         for y in range(height):
             for x in range(width):
-                color = (x * 255 // width, y * 255 // height, 80)
+                # Normalized geometry matches the fixed simulated detection box.
+                u,v=(x+.5)/width,(y+.5)/height
+                color=(18,25,36)
+                if x % max(1,width//10)==0 or y % max(1,height//10)==0:
+                    color=(28,39,53)
+                # Center reference and a guide pointing toward the target.
+                if .51<u<.68 and abs(v-.5)<.004:
+                    color=(76,112,130)
+                distance=((u-.7)**2+(v-.5)**2)**.5
+                if distance<.095: color=(38,180,160)
+                if distance<.073: color=(20,53,62)
+                if distance<.044: color=(38,180,160)
+                if distance<.019: color=(245,185,73)
+                if (abs(u-.5)<.003 and abs(v-.5)<.035) or (abs(v-.5)<.003 and abs(u-.5)<.035):
+                    color=(233,238,244)
                 rgb[(y * width + x) * c:(y * width + x + 1) * c] = bytes(color if c == 3 else (color[2], color[1], color[0], 255))
         return bytes(rgb)
 

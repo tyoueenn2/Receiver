@@ -23,8 +23,10 @@ struct Stats {
     uint8_t physical = 0;
     double clock_uncertainty_ms = 0, frame_age_ms = 0;
     double gpu_free_mib = 0, gpu_total_mib = 0;
+    bool motion_available = false;
+    double mouse_speed = 0, assist_strength = 0;
     std::string status = "Stopped", backend = "Not loaded", error;
-    Samples reassembly, upload, inference, postprocess, submit, receiver_total, capture_age;
+    Samples reassembly, upload, inference, postprocess, submit, receiver_total, capture_age, control_handoff;
 };
 struct Preview {
     std::shared_ptr<const Frame> frame;
@@ -36,10 +38,11 @@ class App {
         std::shared_ptr<const Frame> frame;
         std::vector<Detection> detections;
         uint64_t epoch = 0, id = 0;
-        int64_t deadline = 0;
+        int64_t deadline = 0, completed_ns = 0;
     };
     mutable std::mutex mutex_;
     std::condition_variable cv_;
+    ControlWake control_wake_;
     Settings settings_;
     Stats stats_;
     std::atomic<bool> stop_{true};

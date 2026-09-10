@@ -6,7 +6,21 @@ C++20 / Windows 11 receiver for raw UDP frames, YOLO11 TensorRT inference, and r
 
 The exported sample `models/yolo11n.onnx` and its manifest are included in this directory. This is the standard COCO detection model, not a model trained for a particular application. Real desktop capture on the target PC is intentionally outside this first delivery.
 
-## Quick hardware-free test
+## Try the interface
+
+After building the app or unpacking a test build, install Python 3.12 or newer and double-click **Start Demo.cmd**. This opens the app with example pictures and a simulated mouse device already connected. Close the app to stop the demo helpers.
+
+- **Setup** explains how to connect devices or try practice mode.
+- **Detection** controls which object is selected and where to point within its box.
+- **Mouse** controls the named button to hold and output limits.
+- **Humanization** contains sensitivity, smoothing, movement styles, jitter, and configurable direction-based strength. See [control details](docs/HUMANIZATION.md).
+- **Saved settings** opens and saves setup files using Windows file pickers.
+
+Use **Show preview** to see the picture. **Enable practice movement** sends commands only to the simulator; it never moves your actual mouse. The simulated device holds the right button for you. **Turn movement off** or **Delete** disables movement. Practice uses a fixed example detection, not YOLO inference. Technical settings and performance numbers are in expandable sections.
+
+From a terminal, the same demo is `py tools/ui_demo.py`; use `--exe path/to/receiver.exe` for a custom build location.
+
+## Headless hardware-free test
 
 Install Python 3.12 or newer. From the receiver directory, open three terminals:
 
@@ -24,7 +38,7 @@ py tools/test_sender.py --width 320 --height 320 --fps 120 --seconds 60
 
 For a source build, executables are under `build/tests/Release/` instead. The mock Pi reports a held right button by default and records received commands in `mock_commands.json`. It never accesses USB or moves the local mouse. Simulation refuses any sender/Pi IP other than `127.0.0.1`.
 
-For the GUI, run `receiver.exe`, check **Loopback simulation**, then **Start receiver**. Enable **Detection preview** to inspect frames. Output stays disarmed until **Arm mouse output** is selected. **Delete** disarms immediately when processed by the Pi worker. A synthetic test detection appears in simulation; it is not YOLO inference.
+For manual GUI startup, run `receiver.exe`, choose **Practice on this computer**, then **Start practice** while the two test peers are running. Test builds default to practice mode; production GPU builds also offer a two-computer setup.
 
 ## Production build on the RTX 3060 Ti PC
 
@@ -102,3 +116,9 @@ This compares preprocessing plus inference against ONNX Runtime CPU FP32. Review
 - Profiles never store an armed state. The headless `--arm` option is an explicit per-run choice. The GUI always starts disarmed.
 
 See [benchmark procedure](docs/BENCHMARK.md), [validation record](docs/VALIDATION.md), and [third-party notices](docs/THIRD_PARTY.md).
+
+## Local mouse and automated checks
+
+The Mouse page offers a **Local Windows mouse** connection for manual testing. It starts disarmed and requires a held physical activation button. Humanization includes three prediction methods, lead controls, sticky distance, dynamic FOV, and EMA response. See [Humanization](docs/HUMANIZATION.md).
+
+Open **Test Hub** to run individual or selected checks, inspect results, and save logs automatically. The demo launcher fills in Python automatically. See [Test Hub requirements](docs/TEST_HUB.md).

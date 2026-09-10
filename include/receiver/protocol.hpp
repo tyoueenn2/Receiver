@@ -105,8 +105,11 @@ struct Telemetry {
     bool ready = false;
     uint8_t physical = 0;
     int xmin = 0, xmax = 0, ymin = 0, ymax = 0;
+    bool has_motion = false;
+    uint64_t motion_generation = 0, sample_ns = 0;
+    uint32_t total_x = 0, total_y = 0, motion_age_us = 0;
 };
-std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token);
+std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token, bool motion = false);
 std::optional<Telemetry> parse_telemetry(Bytes bytes);
 std::array<uint8_t, 16> movement(uint32_t sequence, int dx, int dy);
 class TelemetryGate {
