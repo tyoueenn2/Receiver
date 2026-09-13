@@ -100,18 +100,64 @@ class ClockSync {
     }
 };
 struct Telemetry {
+    enum class Kind : uint8_t { upt1, upt2_public, upt2_legacy, upt3 };
+    Kind kind = Kind::upt1;
     uint64_t client = 0, server = 0, token = 0;
     uint32_t sequence = 0;
     bool ready = false;
-    uint8_t physical = 0;
+    uint8_t physical = 0, applied_persistent = 0, scheduled = 0;
     int xmin = 0, xmax = 0, ymin = 0, ymax = 0;
     bool has_motion = false;
+    bool motion_counters_64 = false;
+    uint32_t endpoint_poll_us = 0, motion_age_us = 0;
     uint64_t motion_generation = 0, sample_ns = 0;
-    uint32_t total_x = 0, total_y = 0, motion_age_us = 0;
+    int64_t total_x = 0, total_y = 0;
+    int16_t last_physical_dx = 0, last_physical_dy = 0;
+    uint32_t accepted_click_total = 0, completed_click_total = 0;
+    uint16_t active_sequences = 0, queued_sequences = 0;
+    uint32_t physical_reports_received = 0, physical_reports_submitted = 0;
+    uint16_t output_queue_depth = 0, pending_synthetic_depth = 0;
+    uint32_t superseded_synthetic = 0, writer_failures = 0;
 };
-std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token, bool motion = false);
+enum class SubscriptionVersion : uint8_t { v1 = 1, v2 = 2, v3 = 3 };
+std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token,
+                                  SubscriptionVersion version = SubscriptionVersion::v1);
+inline std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token, bool motion) {
+    return subscribe(client, token, motion ? SubscriptionVersion::v2 : SubscriptionVersion::v1);
+}
 std::optional<Telemetry> parse_telemetry(Bytes bytes);
-std::array<uint8_t, 16> movement(uint32_t sequence, int dx, int dy);
+// UPX1 carries a complete synthetic-button snapshot. Physical buttons never belong here.
+std::array<uint8_t, 16> movement(uint32_t sequence, int dx, int dy, int wheel, int pan,
+                                 uint8_t injected_buttons);
+enum class ClickStatus : uint8_t {
+    accepted = 1,
+    duplicate = 2,
+    completed = 3,
+    busy = 4,
+    queue_full = 5,
+    unsupported_button = 6,
+    invalid = 7,
+    cancelled = 8,
+    button_active = 9,
+    not_ready = 10,
+    stale_command = 11,
+};
+enum class ClickOperation : uint8_t { schedule = 1, release_all = 2 };
+struct ClickCommand {
+    ClickOperation operation = ClickOperation::schedule;
+    uint64_t client = 0, command = 0;
+    uint8_t button = 0;
+    uint32_t count = 0, press_us = 0, interval_us = 0;
+};
+struct ClickAck {
+    ClickStatus status = ClickStatus::invalid;
+    uint8_t button = 0;
+    uint64_t client = 0, command = 0, server = 0;
+    uint32_t accepted_clicks = 0, completed_clicks = 0;
+    uint16_t queue_depth = 0;
+};
+std::array<uint8_t, 40> encode_click_request(const ClickCommand& command);
+std::optional<ClickAck> parse_click_ack(Bytes bytes);
 class TelemetryGate {
     uint64_t client_ = 0, server_ = 0;
     uint32_t sequence_ = 0;

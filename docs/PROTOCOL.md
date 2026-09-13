@@ -1,113 +1,224 @@
-# Network protocol v1
+# Receiver network protocols
 
-All integers are network byte order. One message per datagram. These are unauthenticated LAN protocols; only configured peers are accepted by the receiver. Never pack native C++ structs directly onto the wire. Reference encoders are in `tools/wire.py`.
+All integers are in network byte order. Signed integers use two's-complement representation. One message occupies one UDP datagram; native C/C++ structs are never serialized directly. These are unauthenticated LAN protocols, and Receiver accepts packets only from its configured peers.
 
-## UVF1: raw frames, default UDP port 5000
+## UVF1 raw frames and clock synchronization
+
+UVF1 uses the existing 48-byte header followed by raw RGB24 or BGRA32 data:
 
 | Offset | Bytes | Field |
-|---|---:|---|
+|---:|---:|---|
 | 0 | 4 | ASCII `UVF1` |
-| 4 | 1 | Version = 1 |
-| 5 | 1 | Format: 1 = RGB24, 2 = BGRA32 |
-| 6 | 2 | Header length = 48 |
-| 8 | 8 | Nonzero sender session ID |
-| 16 | 4 | Frame sequence, modulo 2^32 |
-| 20 | 8 | Capture timestamp in sender monotonic nanoseconds |
+| 4 | 1 | Version 1 |
+| 5 | 1 | Format: 1 RGB24, 2 BGRA32 |
+| 6 | 2 | Header length 48 |
+| 8 | 8 | Nonzero sender session |
+| 16 | 4 | Frame sequence modulo 2^32 |
+| 20 | 8 | Sender monotonic capture time, ns |
 | 28 | 2 | Width |
 | 30 | 2 | Height |
 | 32 | 4 | Complete raw frame length |
-| 36 | 2 | Fragment index, zero-based |
+| 36 | 2 | Fragment index |
 | 38 | 2 | Fragment count |
 | 40 | 4 | Payload byte offset |
-| 44 | 2 | Fragment payload stride |
-| 46 | 2 | Reserved = 0 |
+| 44 | 2 | Fragment stride |
+| 46 | 2 | Reserved, zero |
 | 48 | variable | Raw image bytes |
 
-Rows are tightly packed, top-to-bottom, left-to-right. BGRA alpha is ignored. Width and height each range from 1 to 1024. Frame length must equal width × height × channels. Payload stride is 1024–1352; default 1352 gives a 1,400-byte UDP payload including this header. Fragment count is `ceil(frame_length / stride)`, offset is `index * stride`, and only the final fragment may be shorter than stride. The final fragment must have its exact remaining length. No compression, IP fragmentation dependency, FEC, or retransmission is used.
+Rows are tightly packed. Width and height are 1–1024. The raw length must match the dimensions and channel count. Fragment stride is 1024–1352, metadata must agree across a frame, incomplete frames expire after 20 ms, and frame/session sequence comparisons use the unsigned half-range rule.
 
-Metadata must agree across every fragment of a frame. Identical duplicates are ignored; a conflicting duplicate or conflicting metadata invalidates the in-flight assembly. Incomplete frames expire 20 ms after their first received fragment. Up to three incomplete frames are retained; the oldest assembly is evicted when a fourth arrives. Completing a newer frame retires older assemblies and suppresses subsequently received older/duplicate frame IDs. Sequence comparison uses the unsigned half-range rule; a sender must not jump by 2^31 or more within a session.
+The existing auxiliary datagrams are unchanged:
 
-Start each sender process with a fresh random session ID and send a hello every 50 ms:
+- `UVH1 | reserved:u32=0 | sender_session:u64` (16 bytes), sent every 50 ms.
+- `UVC1 | reserved:u32=0 | sender_session:u64 | t0:u64` (24 bytes).
+- `UVS1 | reserved:u32=0 | sender_session:u64 | t0:u64 | t1:u64 | t2:u64` (40 bytes).
 
-`UVH1 | reserved:u32=0 | session:u64` (16 bytes)
+The receiver bounds sender clock offset using `[t2-t3, t1-t0]`, rejects malformed or over-50-ms exchanges, and expires synchronization after two seconds. Fresh-frame, sender ownership, activation, and stale-frame rules are unchanged.
 
-Frames are accepted only after a hello from the configured sender IP. The active sender endpoint includes its UDP source port. A different endpoint may take over after no hello has been seen for 100 ms. A session change flushes incomplete/pending frames, sync, preview, and controller state; recently retired sessions are rejected. Use one socket for hello, frames, and timestamp exchange.
+## UPX1 movement and persistent synthetic buttons
 
-## Clock exchange and capture age
-
-Receiver request, 24 bytes:
-
-`UVC1 | reserved:u32=0 | sender_session:u64 | t0:u64`
-
-Sender reply, 40 bytes:
-
-`UVS1 | reserved:u32=0 | sender_session:u64 | t0:u64 | t1:u64 | t2:u64`
-
-`t0` is the receiver's request timestamp, echoed unchanged. `t1` is the sender timestamp immediately after receiving the request; `t2` is the sender timestamp immediately before replying. The receiver records `t3` on receipt. The sender clock offset relative to the receiver lies in `[t2-t3, t1-t0]`, without assuming symmetric transit. A request is sent every 250 ms; only its matching reply is accepted. Exchanges with negative/impossible durations or RTT over 50 ms are rejected. Sync expires after two seconds.
-
-The upper capture-age estimate is `receiver_now - capture_timestamp + offset_upper`, expanded by a 200 ppm relative-clock-drift allowance and 0.1 ms timestamp margin. Timestamps must come from the same monotonic clock as the sender's sync responses. Stamp actual capture time, not packet-send time. Sleep/resume or clock discontinuities require a new sender session. The bound assumes the stated drift envelope and correct sender timestamps; it is not a hardware measurement.
-
-Unsynchronized frames can be inferred/previewed but cannot produce movement. Capture age and receiver-local age are both checked before command submission. Default maximum age is 50 ms (configurable 1–250 ms).
-
-## UPX1: existing proxy mouse commands, UDP port 12345
-
-The receiver uses the proxy's unchanged 16-byte format:
-
-`UPX1 | sequence:u32 | dx:i16 | dy:i16 | wheel:i8 | pan:i8 | injected_buttons:u8 | reserved:u8=0`
-
-This application always sends wheel, pan, and injected buttons as zero. X/Y are calibrated relative HID counts. It clamps each correction to both the configured cap and native axis limits reported by telemetry. It sends each processed correction at most once and does not resend trajectories after packet loss.
-
-The proxy's movement owner is the source IP and UDP port, with a 250 ms lease. Binary commands receive no success ACK. Error strings and `busy` disarm the receiver. Existing proxy behavior includes duplicate/older sequence rejection within a lease, replacement of eligible queued corrections, and 25 ms age expiry measured from Pi enqueue. That expiry does not cover network transit, USB kernel blocking, or reports already sent.
-
-## UPS1/UPT1: compatible Pi telemetry extension
-
-UPS1 subscription/renewal, 24 bytes:
-
-`UPS1 | reserved:u32=0 | receiver_session:u64 | token:u64`
-
-Both session and token are nonzero. Receiver session changes on each receiver start. Tokens increase within a session. Renew every 20 ms; the subscription expires after 100 ms. One subscriber is allowed; another endpoint receives `busy` while a subscription is alive. Subscribing never acquires or renews movement ownership. It uses the same existing Pi command port.
-
-UPT1 snapshot, 56 bytes:
+UPX1 is exactly 16 bytes:
 
 | Offset | Bytes | Field |
-|---|---:|---|
+|---:|---:|---|
+| 0 | 4 | ASCII `UPX1` |
+| 4 | 4 | Sequence modulo 2^32 |
+| 8 | 2 | Relative X, signed |
+| 10 | 2 | Relative Y, signed |
+| 12 | 1 | Wheel, signed |
+| 13 | 1 | Horizontal pan, signed |
+| 14 | 1 | Complete persistent injected-button mask |
+| 15 | 1 | Reserved, zero |
+
+Button usages 1–8 map to bits `1 << (usage - 1)`. The mask is Receiver's entire desired persistent synthetic state, never a delta. Every ordinary movement takes a fresh snapshot and repeats it. Physical UPT buttons are never copied or ORed into the mask; the Pi independently merges physical, persistent, and scheduled-click state.
+
+Every datagram receives a fresh sequence number, including button transitions, zero-motion releases, held-button heartbeats, and release snapshots. Zero is valid after `0xffffffff`. X/Y and wheel/pan are clamped only to their wire/HID limits and the existing movement policy.
+
+Button transitions are sent with zero movement when no correction is ready. A nonzero persistent mask is refreshed by a zero-motion heartbeat every 75 ms from the Pi-output worker. A zero mask with no transition or release pending has no heartbeat.
+
+## UPC1 request version 2
+
+Receiver emits only the public 40-byte version-2 request. The obsolete private 32-byte request is neither emitted nor accepted.
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 0 | 4 | ASCII `UPC1` |
+| 4 | 1 | Version 2 |
+| 5 | 1 | Operation: 1 Schedule, 2 ReleaseAll |
+| 6 | 1 | HID usage 1–8; zero for ReleaseAll |
+| 7 | 1 | Reserved, zero |
+| 8 | 8 | Nonzero random client session |
+| 16 | 8 | Nonzero monotonically increasing command ID |
+| 24 | 4 | Click count |
+| 28 | 4 | Press duration, microseconds |
+| 32 | 4 | Release-completion-to-next-press gap, microseconds |
+| 36 | 4 | Reserved, zero |
+
+Schedule validation is usage 1–8, count 1–10,000, positive press duration no greater than five seconds, press duration not below the UPT3 endpoint poll interval, and interval zero through 60 seconds. ReleaseAll uses zero for usage, count, and both durations. Version-2 scheduling is rejected locally unless valid, ready UPT3 endpoint timing is known.
+
+Timing is writer-relative: press duration begins only after the Pi USB writer successfully completes the press report, and the interval begins after successful release completion. The Pi maintains scheduled buttons independently of UPX1 persistent state, so movement and hold heartbeats cannot cancel a schedule. A click on a persistently held same button is rejected; different-button holds and schedules may coexist.
+
+## UPA1 response version 2
+
+UPA1 is exactly 48 bytes. The obsolete 32-byte response is rejected as malformed.
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 0 | 4 | ASCII `UPA1` |
+| 4 | 1 | Version 2 |
+| 5 | 1 | Status |
+| 6 | 1 | Button usage |
+| 7 | 1 | Reserved, zero |
+| 8 | 8 | Client session |
+| 16 | 8 | Command ID |
+| 24 | 4 | Accepted clicks for this command |
+| 28 | 4 | Completed clicks for this command |
+| 32 | 8 | Nonzero Pi server epoch |
+| 40 | 2 | Scheduler queue depth |
+| 42 | 2 | Reserved, zero |
+| 44 | 4 | Reserved, zero |
+
+Statuses are 1 Accepted, 2 Duplicate, 3 Completed, 4 Busy, 5 QueueFull, 6 UnsupportedButton, 7 Invalid, 8 Cancelled, 9 ButtonActive, 10 NotReady, and 11 StaleCommand.
+
+Receiver constructs immutable request bytes once. Before acceptance, no-response retries use the same bytes and ID after 50 ms. QueueFull retains the same command and backs off 25 ms, 50 ms, then 75 ms capped. After Accepted or Duplicate, Receiver continues same-ID status/lease requests at least every 75 ms until terminal. Command N+1 is not transmitted before N is known Accepted, Duplicate, or Completed. Duplicate/reordered responses cannot double-count transitions, and aggregate telemetry counters are never used to infer command completion.
+
+Responses are accepted only from the configured Pi endpoint, for version 2, the current client session, a known already-sent ID, and the telemetry-confirmed server epoch. Completed means the final release completed successfully in the Pi USB writer. Busy, UnsupportedButton, ButtonActive, NotReady, Invalid, StaleCommand, and Cancelled terminate a Schedule command according to their status; partial Cancelled counts are preserved. A non-Completed response to ReleaseAll never opens its release fence and the immutable same-ID request remains eligible for retry. Invalid, StaleCommand, malformed responses, and impossible per-command counts additionally trigger Receiver's fail-closed Pi protocol path.
+
+Status labels have exact scopes:
+
+- **Submitted locally**: placed in Receiver's bounded local queue.
+- **Accepted by Pi**: confirmed stored idempotently by the Pi.
+- **Completed by USB writer**: final release reported successfully completed by the Pi writer.
+- None alone proves that the physical USB link delivered the report or that the destination application consumed it.
+
+## Release fence
+
+Manual ReleaseAll, GUI disarm, shutdown, sender loss/restart, stale or invalid Pi telemetry, Pi socket/protocol error, GPU/inference failure, restart-required configuration change, server-epoch change, and existing fail-closed transitions use the same manager routine. It immediately clears manual/scoped desired ownership, invalidates guards, cancels local clicks, records the reason, wakes the worker, and enqueues a higher-ID version-2 ReleaseAll.
+
+The worker sends ReleaseAll before normal work and retries its immutable bytes until valid Completed, a confirmed epoch change, or connection loss. It also sends three best-effort UPX1 zero-motion, zero-wheel, zero-pan, zero-mask snapshots with fresh sequence numbers. Later presses remain behind the fence. Shutdown gives the worker up to 100 ms to deliver and retry this work. A UPA1 Completed response is the only evidence used to label ReleaseAll completed by the writer; the three UPX1 snapshots are not scheduled-click completion proof. If the socket is unavailable, desired local state remains zero and the Pi's 250 ms watchdog is the final fallback.
+
+## UPS1, UPS2, and UPS3 subscriptions
+
+All subscriptions are 24 bytes:
+
+`magic[4] | reserved:u32=0 | receiver_session:u64 | token:u64`
+
+Both IDs are nonzero. Receiver renews every 20 ms. The Pi subscription lifetime remains 100 ms, while Receiver requires both receipt and echoed-token freshness within 50 ms. At startup, configuration reprobe, or confirmed epoch change, Receiver probes UPS3 for 100 ms; if unavailable it probes UPS2 when direction assistance is enabled, otherwise it selects UPS1. After an unsuccessful UPS2 probe it selects UPS1. Expected unknown/unsupported replies during probing are ignored. Once selected, only that version is renewed until the next reprobe.
+
+## UPT1 compatibility
+
+UPT1 remains exactly 56 bytes:
+
+| Offset | Bytes | Field |
+|---:|---:|---|
 | 0 | 4 | ASCII `UPT1` |
-| 4 | 1 | Ready, 0 or 1 |
-| 5 | 1 | Physical mouse button mask |
-| 6 | 2 | Reserved = 0 |
-| 8 | 8 | Receiver session from UPS1 |
-| 16 | 8 | Random Pi server session |
-| 24 | 8 | Latest accepted subscription token |
-| 32 | 4 | Snapshot sequence, modulo 2^32 |
+| 4 | 1 | Ready flag |
+| 5 | 1 | Physical button mask only |
+| 6 | 2 | Reserved, zero |
+| 8 | 8 | Receiver session |
+| 16 | 8 | Pi server epoch |
+| 24 | 8 | Echoed token |
+| 32 | 4 | Telemetry sequence modulo 2^32 |
 | 36 | 4 | Native X minimum, signed |
 | 40 | 4 | Native X maximum, signed |
 | 44 | 4 | Native Y minimum, signed |
 | 48 | 4 | Native Y maximum, signed |
-| 52 | 4 | Reserved = 0 |
+| 52 | 4 | Reserved, zero |
 
-The UDP worker publishes on a state change on its next iteration (its poll timeout is at most 2 ms), on renewal, and otherwise every 10 ms. The USB writer never performs telemetry network I/O. State is the proxy's processed physical report, not proof of host delivery.
+UPT1 is sufficient for button activation when direction assistance is disabled. Receiver does not fall back to uncorrelated `+state` polling.
 
-The receiver accepts only its configured Pi endpoint, its own session, increasing snapshot sequences, and tokens it issued in the past 50 ms. Older tokens cannot roll state backward. Changing Pi server epoch requires a newer token. Activation requires both the snapshot receipt and its token to remain within 50 ms, ready=true, GUI armed, and the selected physical button held. This limits delayed heartbeat replay without comparing Pi and PC clocks.
+## UPT2 compatibility
 
-UPT1 capability is mandatory for v1 mouse-driven activation. The receiver does not silently fall back to uncorrelated `+state` polling. Existing `+state` and MAKCU-inspired ASCII commands are unchanged. MAKCU serial framing and MAKCU V2 binary packets are not used.
-
-## UPS2 / UPT2: physical motion for direction-based assistance
-
-UPS2 has the same 24-byte layout and ownership/freshness rules as UPS1, with magic `UPS2`. The receiver requests it while direction-based assistance is enabled; otherwise it uses UPS1. The updated proxy preserves byte-for-byte UPT1 responses to UPS1 clients. No UPX1 change is required.
-
-UPT2 is 88 bytes. Bytes 0..55 have the UPT1 layout, except magic `UPT2`. The additional network-byte-order fields are:
+The public UPT2 is 80 bytes. Bytes 0–55 use the UPT1 layout with magic `UPT2`; its extension is:
 
 | Offset | Bytes | Field |
-| --- | --- | --- |
-| 56 | 8 | Mouse endpoint/layout generation, unsigned |
-| 64 | 8 | Pi monotonic snapshot time in nanoseconds, unsigned |
-| 72 | 4 | Cumulative physical X counts modulo 2^32 |
-| 76 | 4 | Cumulative physical Y counts modulo 2^32 |
-| 80 | 4 | Microseconds since last nonzero physical motion, saturated at 0xffffffff; 0xffffffff if none |
-| 84 | 4 | Reserved = 0 |
+|---:|---:|---|
+| 56 | 8 | Mouse endpoint/layout generation |
+| 64 | 8 | Pi monotonic sample time, ns |
+| 72 | 2 | Last physical relative X, signed |
+| 74 | 2 | Last physical relative Y, signed |
+| 76 | 4 | Physical motion age, microseconds; `0xffffffff` if none |
 
-Counters are updated only while processing matching physical reports, before synthetic button merging. Injected reports never increment them. A new endpoint/layout generation invalidates the velocity baseline. Snapshots atomically read counts and the Pi timestamp under the existing registry lock. Counter changes alone do not increase the heartbeat frequency; button changes still publish promptly. The packet uses fixed storage and all publication remains on the UDP worker.
+The last-delta fields support diagnostics but are not loss/reorder-safe velocity. Receiver never uses this 80-byte format as reliable direction input.
 
-The receiver subtracts cumulative counts modulo 2^32 and divides by the difference between Pi snapshot times. Packet loss therefore does not lose movement counts; reordered/duplicate telemetry is rejected by the existing gate. No cross-machine clock comparison is needed for velocity. Velocity is exponentially averaged over the configured interval, set to stationary when the reported motion age exceeds that interval, and invalidated after a 50 ms reception gap, a server/generation change, a non-increasing sample time, or an excessive sample discontinuity. Two accepted snapshots are needed after a reset. Both the telemetry receipt and echoed-token age must still pass the original 50 ms freshness gate.
+Receiver also accepts its legacy 88-byte cumulative UPT2. Bytes 0–55 again match UPT1 except for the magic:
 
-Direction-based assistance requires valid UPT2 motion data and pauses when it is unavailable. Button-only UPT1 remains sufficient when this feature is off. The old proxy may reject UPS2 as an unknown command; install the motion update and restart the receiver.
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 56 | 8 | Mouse endpoint/layout generation |
+| 64 | 8 | Pi monotonic sample time, ns |
+| 72 | 4 | Cumulative physical X modulo 2^32 |
+| 76 | 4 | Cumulative physical Y modulo 2^32 |
+| 80 | 4 | Physical motion age, microseconds; `0xffffffff` if none |
+| 84 | 4 | Reserved, zero |
+
+Packet length distinguishes the two formats. The 88-byte cumulative counters can drive direction assistance. They contain physical movement only and use modulo-2^32 differences.
+
+## UPT3 full telemetry
+
+UPT3 is exactly 128 bytes:
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 0 | 4 | ASCII `UPT3` |
+| 4 | 1 | Ready flag |
+| 5 | 1 | Physical button mask only |
+| 6 | 1 | Applied persistent injected mask |
+| 7 | 1 | Applied scheduled-click mask |
+| 8 | 8 | Receiver session |
+| 16 | 8 | Pi server epoch |
+| 24 | 8 | Echoed token |
+| 32 | 4 | Telemetry sequence modulo 2^32 |
+| 36 | 4 | Native X minimum, signed |
+| 40 | 4 | Native X maximum, signed |
+| 44 | 4 | Native Y minimum, signed |
+| 48 | 4 | Native Y maximum, signed |
+| 52 | 4 | Endpoint poll interval, microseconds |
+| 56 | 8 | Mouse endpoint/layout generation |
+| 64 | 8 | Pi monotonic sample time, ns |
+| 72 | 8 | Cumulative physical X, signed |
+| 80 | 8 | Cumulative physical Y, signed |
+| 88 | 4 | Physical motion age, microseconds; `0xffffffff` if none |
+| 92 | 4 | Epoch accepted-click total |
+| 96 | 4 | Epoch completed-click total |
+| 100 | 2 | Active sequence count |
+| 102 | 2 | Queued sequence count |
+| 104 | 4 | Physical reports received |
+| 108 | 4 | Physical reports submitted |
+| 112 | 2 | Endpoint/output queue depth |
+| 114 | 2 | Pending synthetic-item depth |
+| 116 | 4 | Superseded synthetic movement count |
+| 120 | 4 | USB writer failure count |
+| 124 | 4 | Reserved, zero |
+
+Receiver validates exact size, reserved bytes, session/token/epoch, readiness-dependent endpoint and generation values, axis ranges, monotonic sequence/sample time, and consistent counters before use. Duplicate/reordered telemetry is rejected by the modulo-2^32 half-range rule.
+
+Direction tracking uses differences between cumulative signed 64-bit physical counters. Server-epoch or layout-generation changes reset the baseline; non-increasing sample time, reception gaps, excessive sample gaps, discontinuities, and stale motion age invalidate or pause assistance. Two accepted samples are required after reset. Injected movement is never mixed into physical direction calculations.
+
+A telemetry-confirmed server-epoch change discards old pending state, increments the reset metric, clears persistent desired state, treats old ReleaseAll work as fenced by the restart, rotates to a new nonzero random click-client session with command numbering reset, starts a new ReleaseAll fence, and reprobes UPS3. Old click commands are never resubmitted, and delayed old-session/old-epoch responses are ignored.
+
+## Socket ownership and test scope
+
+One long-lived nonblocking UDP socket carries UPS subscriptions, UPT telemetry, UPX1, UPC1, ReleaseAll, and UPA1. This preserves the source IP/port used by the Pi ownership lease. Inference, control, GUI, and API callers only validate/enqueue and wake the worker; they do not sleep or perform socket I/O.
+
+The deterministic tests use an independent fake Pi/proxy and virtual-time state-machine checks. They validate Receiver framing, ordering, retry, freshness, state separation, and status accounting. They do not establish Raspberry Pi, Raw Gadget, real-mouse, physical USB, GPU, or destination-application reliability.

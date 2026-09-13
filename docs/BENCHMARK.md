@@ -34,7 +34,7 @@ The profile must contain the real sender and Pi addresses. Movement still requir
 
 Also record expired/evicted incomplete frames, invalid/duplicate packets, replaced pending frames, stale results, pool drops, and GPU free/total memory at initialization. The host frame pool is fixed at 28 MiB; CUDA staging, input/output, TensorRT workspace, and optional preview add memory on top.
 
-For actual capture-to-USB or capture-to-visible-motion latency, instrument the capture sender and Pi or use an external high-speed camera/logic analyzer. UPX1 does not acknowledge USB delivery. A local timing result cannot establish that latency.
+For actual capture-to-USB or capture-to-visible-motion latency, instrument the capture sender and Pi or use an external high-speed camera/logic analyzer. UPX1 does not acknowledge USB delivery. UPC1 “Accepted” stops at idempotent Pi storage and UPA1 “Completed” reports successful final-release completion in the USB writer; neither establishes physical-link delivery or destination-application consumption. A local timing result cannot establish that latency.
 
 ## Regression expectations
 

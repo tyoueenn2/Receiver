@@ -1,13 +1,15 @@
 #include "receiver/network.hpp"
-#include <random>
 #include <stdexcept>
 #ifdef _WIN32
 #include <winsock2.h>
+#include <windows.h>
+#include <bcrypt.h>
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -159,8 +161,26 @@ void ControlWake::wait(UdpSocket* socket, bool mouse_messages) {
 #endif
 }
 uint64_t random_id() {
-    std::random_device r;
-    uint64_t v = uint64_t(r()) << 32 | r();
-    return v ? v : 1;
+    uint64_t value = 0;
+#ifdef _WIN32
+    if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value), sizeof(value),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
+        throw std::runtime_error("OS random generator failed");
+#else
+    if (getrandom(&value, sizeof(value), 0) != sizeof(value))
+        throw std::runtime_error("OS random generator failed");
+#endif
+    // A zero draw is valid random output but not a valid wire session; drawing again avoids bias.
+    while (!value) {
+#ifdef _WIN32
+        if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&value), sizeof(value),
+                            BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
+            throw std::runtime_error("OS random generator failed");
+#else
+        if (getrandom(&value, sizeof(value), 0) != sizeof(value))
+            throw std::runtime_error("OS random generator failed");
+#endif
+    }
+    return value;
 }
 } // namespace receiver

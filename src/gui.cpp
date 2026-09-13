@@ -277,8 +277,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     receiver::TestHub test_hub;
     receiver::TestOptions test_options;
     test_options.python = receiver::TestHub::find_python();
-    std::vector<bool> test_selection(12, false);
-    for (int i = 0; i < 7; ++i)
+    std::vector<bool> test_selection(13, false);
+    for (int i = 0; i < 8; ++i)
         test_selection[i] = true;
     int selected_test = 0;
     bool show_hub = false;
@@ -708,7 +708,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     if (d.enabled) {
                         if (!stats.motion_available)
                             hint("Waiting for physical movement data. The Pi needs the updated "
-                                 "motion-telemetry patch. Assistance pauses until this data is ready.");
+                                 "public proxy with cumulative UPT3 telemetry (or legacy 88-byte UPT2). "
+                                 "Assistance pauses until this data is ready.");
                         else
                             ImGui::Text("Physical mouse speed: %.0f units/s", stats.mouse_speed);
                         if (stats.active)
@@ -1079,6 +1080,56 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 ImGui::Text("Last picture age bound: %.2f ms", stats.frame_age_ms);
                 ImGui::Text("Commands sent: %llu | Physical buttons: 0x%02x",
                             static_cast<unsigned long long>(stats.sent), stats.physical);
+                ImGui::Text("Desired persistent: 0x%02x", stats.injection.persistent_mask);
+                if (stats.pi_ready && stats.injection.has_upt3) {
+                    ImGui::Text("Pi applied persistent: 0x%02x | Pi scheduled: 0x%02x | Poll: %u us",
+                                stats.injection.pi_applied_persistent_mask,
+                                stats.injection.pi_scheduled_mask,
+                                stats.injection.endpoint_poll_us);
+                } else {
+                    ImGui::TextUnformatted("Pi applied/scheduled state: unavailable (fresh UPT3 required)");
+                }
+                ImGui::Text("Pending click commands: %llu",
+                            static_cast<unsigned long long>(stats.injection.pending_clicks));
+                ImGui::Text("Submitted locally: %llu | Accepted by Pi: %llu | Completed by USB writer: %llu",
+                            static_cast<unsigned long long>(stats.injection.click_submitted),
+                            static_cast<unsigned long long>(stats.injection.click_accepted),
+                            static_cast<unsigned long long>(stats.injection.click_completed));
+                ImGui::Text("Rejected before acceptance: %llu | Accepted then cancelled/failed: %llu",
+                            static_cast<unsigned long long>(stats.injection.click_rejected_before_acceptance),
+                            static_cast<unsigned long long>(stats.injection.click_accepted_failed));
+                ImGui::Text("Click retries: %llu | Response timeouts: %llu | QueueFull: %llu",
+                            static_cast<unsigned long long>(stats.injection.click_retries),
+                            static_cast<unsigned long long>(stats.injection.click_timeouts),
+                            static_cast<unsigned long long>(stats.injection.click_queue_full));
+                ImGui::Text("Release retries: %llu | Server-epoch resets: %llu",
+                            static_cast<unsigned long long>(stats.injection.release_retries),
+                            static_cast<unsigned long long>(stats.injection.click_epoch_resets));
+                ImGui::Text("Last release: %s | ReleaseAll: %s", stats.injection.last_release_reason.c_str(),
+                            stats.injection.last_release_all_state.c_str());
+                if (stats.pi_ready && stats.injection.has_upt3) {
+                    ImGui::Text("Pi click totals accepted/completed: %u/%u | Active/queued sequences: %u/%u",
+                                stats.injection.pi_accepted_click_total,
+                                stats.injection.pi_completed_click_total,
+                                stats.injection.pi_active_sequences,
+                                stats.injection.pi_queued_sequences);
+                    ImGui::Text("Pi output/pending depths: %u/%u | Physical reports received/submitted: %u/%u",
+                                stats.injection.pi_output_queue_depth,
+                                stats.injection.pi_pending_synthetic_depth,
+                                stats.injection.pi_physical_reports_received,
+                                stats.injection.pi_physical_reports_submitted);
+                    ImGui::Text("Pi superseded movement: %u | USB writer failures: %u",
+                                stats.injection.pi_superseded_synthetic,
+                                stats.injection.pi_writer_failures);
+                }
+                for (const auto& command : stats.injection.commands) {
+                    ImGui::Text("Command %llu (%s, button %u): %s [accepted %u, completed %u/%u]",
+                                static_cast<unsigned long long>(command.id),
+                                command.operation == receiver::ClickOperation::release_all ? "ReleaseAll" : "click",
+                                unsigned(command.button), receiver::local_command_state_name(command.state),
+                                command.accepted_clicks, command.completed_clicks,
+                                command.requested_clicks);
+                }
                 ImGui::Text("Frame pool: 28 MiB | GPU free at load: %.0f / %.0f MiB", stats.gpu_free_mib,
                             stats.gpu_total_mib);
                 ImGui::Text("Expired: %llu | Replaced: %llu | Stale: %llu",

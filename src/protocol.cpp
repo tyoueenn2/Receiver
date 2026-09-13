@@ -165,36 +165,83 @@ std::optional<int64_t> ClockSync::age_upper(int64_t capture, int64_t now) const 
         return {};
     return int64_t(age);
 }
-std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token, bool motion) {
+std::array<uint8_t, 24> subscribe(uint64_t client, uint64_t token, SubscriptionVersion version) {
     std::array<uint8_t, 24> p{};
-    std::memcpy(p.data(), motion ? "UPS2" : "UPS1", 4);
+    const char* magic = version == SubscriptionVersion::v3 ? "UPS3"
+                        : version == SubscriptionVersion::v2 ? "UPS2"
+                                                             : "UPS1";
+    std::memcpy(p.data(), magic, 4);
     put64(p.data() + 8, client);
     put64(p.data() + 16, token);
     return p;
 }
 std::optional<Telemetry> parse_telemetry(Bytes p) {
-    bool v2 = p.size() == 88 && !std::memcmp(p.data(), "UPT2", 4);
-    if ((!v2 && (p.size() != 56 || std::memcmp(p.data(), "UPT1", 4))) || p[4] > 1 || p[6] || p[7] ||
-        be32(p.data() + 52))
+    const bool v1 = p.size() == 56 && !std::memcmp(p.data(), "UPT1", 4);
+    const bool v2_public = p.size() == 80 && !std::memcmp(p.data(), "UPT2", 4);
+    const bool v2_legacy = p.size() == 88 && !std::memcmp(p.data(), "UPT2", 4);
+    const bool v3 = p.size() == 128 && !std::memcmp(p.data(), "UPT3", 4);
+    if ((!v1 && !v2_public && !v2_legacy && !v3) || p[4] > 1)
         return {};
     Telemetry t;
+    t.kind = v3 ? Telemetry::Kind::upt3
+                : v2_legacy ? Telemetry::Kind::upt2_legacy
+                : v2_public ? Telemetry::Kind::upt2_public
+                            : Telemetry::Kind::upt1;
     t.ready = p[4] != 0;
     t.physical = p[5];
+    if (v3) {
+        t.applied_persistent = p[6];
+        t.scheduled = p[7];
+    } else if (p[6] || p[7]) {
+        return {};
+    }
     t.client = be64(p.data() + 8);
     t.server = be64(p.data() + 16);
     t.token = be64(p.data() + 24);
     t.sequence = be32(p.data() + 32);
-    if (v2) {
+    if (v2_public) {
+        t.motion_generation = be64(p.data() + 56);
+        t.sample_ns = be64(p.data() + 64);
+        t.last_physical_dx = int16_t(be16(p.data() + 72));
+        t.last_physical_dy = int16_t(be16(p.data() + 74));
+        t.motion_age_us = be32(p.data() + 76);
+    } else if (v2_legacy) {
         if (be32(p.data() + 84))
             return {};
         t.has_motion = true;
         t.motion_generation = be64(p.data() + 56);
         t.sample_ns = be64(p.data() + 64);
-        t.total_x = be32(p.data() + 72);
-        t.total_y = be32(p.data() + 76);
+        t.total_x = int64_t(be32(p.data() + 72));
+        t.total_y = int64_t(be32(p.data() + 76));
         t.motion_age_us = be32(p.data() + 80);
-        if (t.ready && (!t.motion_generation || !t.sample_ns))
+    } else if (v3) {
+        auto signed64 = [](const uint8_t* b) {
+            const uint64_t u = be64(b);
+            return u <= uint64_t(std::numeric_limits<int64_t>::max())
+                       ? int64_t(u)
+                       : -1 - int64_t(~u);
+        };
+        t.endpoint_poll_us = be32(p.data() + 52);
+        t.motion_generation = be64(p.data() + 56);
+        t.sample_ns = be64(p.data() + 64);
+        t.total_x = signed64(p.data() + 72);
+        t.total_y = signed64(p.data() + 80);
+        t.motion_age_us = be32(p.data() + 88);
+        t.accepted_click_total = be32(p.data() + 92);
+        t.completed_click_total = be32(p.data() + 96);
+        t.active_sequences = be16(p.data() + 100);
+        t.queued_sequences = be16(p.data() + 102);
+        t.physical_reports_received = be32(p.data() + 104);
+        t.physical_reports_submitted = be32(p.data() + 108);
+        t.output_queue_depth = be16(p.data() + 112);
+        t.pending_synthetic_depth = be16(p.data() + 114);
+        t.superseded_synthetic = be32(p.data() + 116);
+        t.writer_failures = be32(p.data() + 120);
+        if (be32(p.data() + 124) || t.completed_click_total > t.accepted_click_total ||
+            t.physical_reports_submitted > t.physical_reports_received)
             return {};
+        t.has_motion = true;
+        t.motion_counters_64 = true;
     }
     auto signed32 = [](const uint8_t* b) {
         uint32_t u = be32(b);
@@ -209,15 +256,49 @@ std::optional<Telemetry> parse_telemetry(Bytes p) {
         return {};
     if (t.ready && (t.xmin == t.xmax || t.ymin == t.ymax))
         return {};
+    if ((v2_public || v2_legacy || v3) && t.ready && (!t.motion_generation || !t.sample_ns))
+        return {};
+    if (v1 && be32(p.data() + 52))
+        return {};
+    if ((v2_public || v2_legacy) && be32(p.data() + 52))
+        return {};
+    if (v3 && t.ready && !t.endpoint_poll_us)
+        return {};
     return t;
 }
-std::array<uint8_t, 16> movement(uint32_t sequence, int dx, int dy) {
+std::array<uint8_t, 16> movement(uint32_t sequence, int dx, int dy, int wheel, int pan,
+                                 uint8_t injected_buttons) {
     std::array<uint8_t, 16> p{};
     std::memcpy(p.data(), "UPX1", 4);
     put32(p.data() + 4, sequence);
     put16(p.data() + 8, uint16_t(std::clamp(dx, -32768, 32767)));
     put16(p.data() + 10, uint16_t(std::clamp(dy, -32768, 32767)));
+    p[12] = uint8_t(std::clamp(wheel, -128, 127));
+    p[13] = uint8_t(std::clamp(pan, -128, 127));
+    p[14] = injected_buttons;
     return p;
+}
+std::array<uint8_t, 40> encode_click_request(const ClickCommand& c) {
+    std::array<uint8_t, 40> p{};
+    std::memcpy(p.data(), "UPC1", 4);
+    p[4] = 2;
+    p[5] = uint8_t(c.operation);
+    p[6] = c.button;
+    put64(p.data() + 8, c.client);
+    put64(p.data() + 16, c.command);
+    put32(p.data() + 24, c.count);
+    put32(p.data() + 28, c.press_us);
+    put32(p.data() + 32, c.interval_us);
+    return p;
+}
+std::optional<ClickAck> parse_click_ack(Bytes p) {
+    if (p.size() != 48 || std::memcmp(p.data(), "UPA1", 4) || p[4] != 2 || p[5] < 1 || p[5] > 11 ||
+        p[6] > 8 || p[7] || !be64(p.data() + 8) || !be64(p.data() + 16) || !be64(p.data() + 32) ||
+        be16(p.data() + 42) || be32(p.data() + 44))
+        return {};
+    return ClickAck{ClickStatus(p[5]), p[6], be64(p.data() + 8), be64(p.data() + 16),
+                    be64(p.data() + 32), be32(p.data() + 24), be32(p.data() + 28),
+                    be16(p.data() + 40)};
 }
 void TelemetryGate::reset(uint64_t c) {
     client_ = c;

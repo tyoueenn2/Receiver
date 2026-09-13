@@ -23,13 +23,16 @@ void MotionTracker::observe(const Telemetry& t, int64_t now, float window_ms) {
         have_ = true;
         return;
     }
-    auto difference = [](uint32_t a, uint32_t b) {
-        uint32_t delta = a - b;
-        return delta <= 0x7fffffffu ? int64_t(delta) : int64_t(delta) - 0x100000000ll;
+    auto difference = [&](int64_t a, int64_t b) {
+        if (t.motion_counters_64)
+            return static_cast<long double>(a) - static_cast<long double>(b);
+        uint32_t delta = uint32_t(a) - uint32_t(b);
+        return static_cast<long double>(delta <= 0x7fffffffu ? int64_t(delta)
+                                                             : int64_t(delta) - 0x100000000ll);
     };
     double dt = double(t.sample_ns - previous_.sample_ns) / 1e9;
-    double x = difference(t.total_x, previous_.total_x) / dt;
-    double y = difference(t.total_y, previous_.total_y) / dt;
+    double x = double(difference(t.total_x, previous_.total_x) / dt);
+    double y = double(difference(t.total_y, previous_.total_y) / dt);
     // Discontinuities are not physical intent. Re-baseline without producing assistance.
     if (std::abs(x) > 10'000'000 || std::abs(y) > 10'000'000) {
         velocity_ = {};

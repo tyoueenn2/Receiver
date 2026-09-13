@@ -1,4 +1,5 @@
 #include "receiver/control.hpp"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <filesystem>
@@ -81,7 +82,57 @@ int main() {
         packet[84] = 1;
         CHECK(!parse_telemetry(packet));
         packet[84] = 0;
-        CHECK(!parse_telemetry(Bytes(packet.data(), 80)));
+        std::array<uint8_t, 80> public_v2{};
+        std::copy_n(packet.begin(), 72, public_v2.begin());
+        put16(public_v2.data() + 72, uint16_t(-12));
+        put16(public_v2.data() + 74, 34);
+        put32(public_v2.data() + 76, 500);
+        parsed = parse_telemetry(public_v2);
+        CHECK(parsed && parsed->kind == Telemetry::Kind::upt2_public && !parsed->has_motion);
+        CHECK(parsed->last_physical_dx == -12 && parsed->last_physical_dy == 34);
+        std::array<uint8_t, 128> packet3{};
+        std::memcpy(packet3.data(), "UPT3", 4);
+        packet3[4] = 1;
+        packet3[5] = 0xa4; // physical only
+        packet3[6] = 0x02; // applied persistent only
+        packet3[7] = 0x08; // scheduled only
+        put64(packet3.data() + 8, 1);
+        put64(packet3.data() + 16, 2);
+        put64(packet3.data() + 24, 3);
+        put32(packet3.data() + 32, 4);
+        put32(packet3.data() + 36, uint32_t(-127));
+        put32(packet3.data() + 40, 127);
+        put32(packet3.data() + 44, uint32_t(-127));
+        put32(packet3.data() + 48, 127);
+        put32(packet3.data() + 52, 1000);
+        put64(packet3.data() + 56, 8);
+        put64(packet3.data() + 64, 1'000'000);
+        put64(packet3.data() + 72, uint64_t(-9));
+        put64(packet3.data() + 80, 12);
+        put32(packet3.data() + 88, 100);
+        put32(packet3.data() + 92, 20);
+        put32(packet3.data() + 96, 19);
+        put16(packet3.data() + 100, 1);
+        put16(packet3.data() + 102, 2);
+        put32(packet3.data() + 104, 30);
+        put32(packet3.data() + 108, 29);
+        put16(packet3.data() + 112, 3);
+        put16(packet3.data() + 114, 4);
+        put32(packet3.data() + 116, 5);
+        put32(packet3.data() + 120, 6);
+        parsed = parse_telemetry(packet3);
+        CHECK(parsed && parsed->kind == Telemetry::Kind::upt3 && parsed->has_motion &&
+              parsed->motion_counters_64);
+        CHECK(parsed->physical == 0xa4 && parsed->applied_persistent == 2 && parsed->scheduled == 8);
+        CHECK(parsed->total_x == -9 && parsed->total_y == 12 && parsed->endpoint_poll_us == 1000);
+        CHECK(parsed->accepted_click_total == 20 && parsed->completed_click_total == 19 &&
+              parsed->writer_failures == 6);
+        packet3[127] = 1;
+        CHECK(!parse_telemetry(packet3));
+        packet3[127] = 0;
+        put32(packet3.data() + 96, 21);
+        CHECK(!parse_telemetry(packet3));
+        CHECK(subscribe(1, 2, SubscriptionVersion::v3)[3] == '3');
         Telemetry limits;
         limits.xmin = limits.ymin = -127;
         limits.xmax = limits.ymax = 127;

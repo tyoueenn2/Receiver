@@ -30,7 +30,8 @@ def main():
                 '--test-frame-port='+str(port),'--test-pi-port='+str(pi.sock.getsockname()[1])],timeout=20,
                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             assert result.returncode==0, f'{page}: GUI returned {result.returncode}'
-            assert not pi.commands, 'GUI unexpectedly started armed'
+            assert pi.commands and all(not c['dx'] and not c['dy'] and not c['buttons'] for c in pi.commands), \
+                'Disarmed GUI may emit only fail-safe shutdown release snapshots'
             assert Path('gui-smoke.bmp').stat().st_size>10000
             shutil.copyfile('gui-smoke.bmp','gui-smoke-'+page+'.bmp')
             print(page+': rendering, preview, sync, telemetry and disarmed startup passed.',flush=True)

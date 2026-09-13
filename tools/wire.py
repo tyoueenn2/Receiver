@@ -9,6 +9,9 @@ SYNC_REPLY = struct.Struct('!4sIQQQQ')
 SUBSCRIBE = struct.Struct('!4sIQQ')
 TELEMETRY = struct.Struct('!4sBBHQQQIiiiiI')
 MOVE = struct.Struct('!4sIhhbbBB')
+TELEMETRY3 = struct.Struct('!4sBBBBQQQIiiiiIQQqqIIIHHIIHHIII')
+CLICK_REQUEST = struct.Struct('!4sBBBBQQIIII')
+CLICK_ACK = struct.Struct('!4sBBBBQQIIQHHI')
 
 
 def fragments(pixels, width, height, session, sequence, stamp=None, pixel_format=1, datagram_size=1400):

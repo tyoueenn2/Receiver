@@ -58,9 +58,10 @@ int main() {
         CHECK(!newer(5, 5));
         CHECK(!newer(4, 5));
         CHECK(!newer(0x80000000, 0));
-        auto move = movement(0x12345678, -32768, 32767);
+        auto move = movement(0x12345678, -32768, 32767, -1, 1, 0xa5);
         CHECK(move[0] == 'U' && move[3] == '1' && move[4] == 0x12 && move[7] == 0x78 && move[8] == 0x80 &&
-              move[9] == 0 && move[10] == 0x7f && move[11] == 0xff && move[14] == 0 && move[15] == 0);
+              move[9] == 0 && move[10] == 0x7f && move[11] == 0xff && move[12] == 0xff &&
+              move[13] == 1 && move[14] == 0xa5 && move[15] == 0);
         Reassembler r;
         r.reset(7);
         auto p = packets(1);

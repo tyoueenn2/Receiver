@@ -1,5 +1,6 @@
 #pragma once
 #include "backend.hpp"
+#include "injection.hpp"
 #include "network.hpp"
 #include <atomic>
 #include <condition_variable>
@@ -17,7 +18,9 @@ struct Samples {
 };
 struct Stats {
     ReassemblyStats network;
-    uint64_t inferred = 0, sent = 0, replaced = 0, stale = 0, telemetry_rejected = 0;
+    InjectionMetrics injection;
+    uint64_t inferred = 0, sent = 0, synthetic_snapshots = 0, release_snapshots = 0,
+             hold_heartbeats = 0, replaced = 0, stale = 0, telemetry_rejected = 0;
     bool running = false, armed = false, active = false, synchronized = false, pi_ready = false;
     int width = 0, height = 0;
     uint8_t physical = 0;
@@ -43,9 +46,11 @@ class App {
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     ControlWake control_wake_;
+    InjectedButtonManager injected_;
     Settings settings_;
     Stats stats_;
     std::atomic<bool> stop_{true};
+    std::atomic<int64_t> sender_seen_{0};
     std::thread receive_thread_, inference_thread_, pi_thread_;
     std::shared_ptr<const Frame> latest_;
     std::optional<Result> result_;
@@ -56,9 +61,10 @@ class App {
     void receive_loop();
     void inference_loop();
     void pi_loop();
-    void fail(const std::string& error);
+    void fail(const std::string& error, ReleaseReason reason);
 
   public:
+    App();
     ~App() {
         stop();
     }
@@ -66,6 +72,14 @@ class App {
     void stop();
     void arm(bool enabled);
     void configure(const Settings& settings);
+    void button_down(int button);
+    void button_up(int button);
+    void set_button(int button, bool state);
+    void release_all();
+    InjectedButtonManager::Hold hold(int button);
+    uint64_t click(int button, uint32_t count = 1,
+                   std::chrono::microseconds press_duration = std::chrono::milliseconds(10),
+                   std::chrono::microseconds interval = std::chrono::milliseconds(10));
     Stats stats() const;
     Preview preview() const;
     void export_metrics(const std::string& path) const;

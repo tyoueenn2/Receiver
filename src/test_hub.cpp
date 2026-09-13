@@ -121,9 +121,11 @@ TestHub::TestHub() {
         {"Humanization checks", "Movement styles, direction strength, slow input, resets and limits."},
         {"Tracking and input checks",
          "Prediction methods, sticky distance, dynamic search area and injected-input filtering."},
+        {"Synthetic button and click checks",
+         "Version-2 framing, persistent holds, release fences, heartbeats, retries, ACK ordering and Pi restarts."},
         {"Local mouse startup", "Starts the Windows mouse reader briefly. Does not move or click the mouse."},
         {"Network pipeline",
-         "Runs a simulated sender and Pi through the real receiver, including disconnects."},
+         "Runs a sender and independent fake Pi through the real receiver, including clicks and disconnects."},
         {"Direction pipeline", "Checks direction ratios, missing motion data, release and recovery."},
         {"Interface pages", "Renders every page in a separate hidden test app and checks disarmed startup."},
         {"Model reference comparison",
@@ -203,43 +205,44 @@ void TestHub::work(std::vector<bool> selected, TestOptions o) {
             if (path.empty() || !std::filesystem::exists(wide(path)))
                 blocked = description;
         };
-        if (i < 4) {
+        if (i < 5) {
             const char* names[] = {"receiver_tests.exe", "receiver_humanization_tests.exe",
-                                   "receiver_tracking_tests.exe", "receiver_local_mouse_tests.exe"};
+                                   "receiver_tracking_tests.exe", "receiver_injection_tests.exe",
+                                   "receiver_local_mouse_tests.exe"};
             command = {(binaries_ / names[i]).string()};
             require(command[0], "This test executable is not included. Rebuild/package the test targets.");
-        } else if (i == 11)
-            blocked = "Run make test on the Pi with the included patch, then validate physical USB output. "
-                      "This Windows hub cannot perform that hardware check.";
+        } else if (i == 12)
+            blocked = "Run the authoritative public proxy's tests on the Pi, then validate physical USB "
+                      "output and destination behavior. This Windows hub cannot perform that hardware check.";
         else {
             require(o.python, "Choose a Python executable in Test settings.");
             command = {o.python};
             auto add = [&](std::initializer_list<std::string> args) { command.insert(command.end(), args); };
-            if (i == 4)
+            if (i == 5)
                 add({(root_ / "tests/integration_test.py").string(),
                      (binaries_ / "receiver_headless.exe").string()});
-            if (i == 5)
+            if (i == 6)
                 add({(root_ / "tests/direction_integration_test.py").string(),
                      (binaries_ / "receiver_headless.exe").string()});
-            if (i == 6)
+            if (i == 7)
                 add({(root_ / "tests/gui_smoke.py").string(), (binaries_ / "receiver.exe").string(),
                      "--all-pages"});
-            if (i == 7) {
+            if (i == 8) {
                 require(o.model, "Choose the YOLO11n ONNX model in Test settings.");
                 require(o.image, "Choose a test image with detectable objects in Test settings.");
                 add({(root_ / "tests/model_reference_test.py").string(), "--model", o.model, "--image",
                      o.image, "--decoder", (binaries_ / "receiver_decode.exe").string()});
             }
-            if (i == 8) {
+            if (i == 9) {
                 require(o.nvrtc, "Choose the CUDA NVRTC DLL in Test settings.");
                 add({(root_ / "tools/check_cuda_kernel.py").string(), "--nvrtc", o.nvrtc, "--output",
                      (output / "preprocess.ptx").string()});
             }
-            if (i == 9) {
+            if (i == 10) {
                 require(o.nvrtc, "Choose the CUDA NVRTC DLL in Test settings.");
                 add({(root_ / "tests/preprocess_gpu_test.py").string(), "--nvrtc", o.nvrtc});
             }
-            if (i == 10) {
+            if (i == 11) {
                 require((binaries_ / "receiver_verify.exe").string(),
                         "Requires a TensorRT build containing receiver_verify.exe.");
                 require(o.profile, "Choose a saved GPU profile in Test settings.");
@@ -263,7 +266,7 @@ void TestHub::work(std::vector<bool> selected, TestOptions o) {
         }
         auto began = std::chrono::steady_clock::now();
         auto log = output / (std::to_string(i + 1) + ".log");
-        int result = execute(command, i == 10 ? root_ : output, log, cancel_);
+        int result = execute(command, i == 11 ? root_ : output, log, cancel_);
         std::string details = log_text(log);
         if (result == -1)
             details = "Could not launch the test. Check the executable path.\n" + details;

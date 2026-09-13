@@ -25,7 +25,7 @@ multiplier = b + blend*(moving-b)
 
 The left/right mode uses `moving = 1 + k*max(c,0)*(side-1)`, where `side` blends the configured left and right multipliers using the target's horizontal direction. All multipliers remain between 0% and 200%. Angles assume positive physical X moves right and positive Y moves down in the target view; inverted/custom axis mappings require calibration outside this initial implementation. Counts/second depend on mouse DPI, so tune the slow threshold for your mouse.
 
-With the Pi connection, physical mouse data comes from the Pi's **UPS2/UPT2 extension**, never from corrections sent by Receiver. A first snapshot establishes the counter baseline; a second gives velocity. Missing, stale, discontinuous, or unavailable motion data pauses direction-enabled assistance. An old button-only Pi can still be used with direction-based help off. See [Pi installation](../integrations/pi/README.md).
+With the Pi connection, physical mouse data comes from cumulative **UPT3** counters or Receiver's legacy 88-byte cumulative UPT2, never from corrections sent by Receiver. The public 80-byte UPT2 exposes only the last physical delta and is intentionally not used as loss/reorder-safe direction input. A first cumulative snapshot establishes the counter baseline; a second gives velocity. Missing, stale, discontinuous, or unavailable motion data pauses direction-enabled assistance. UPT1/public-UPT2 button activation remains usable with direction-based help off. See [Pi compatibility](../integrations/pi/README.md).
 
 ## Movement styles
 
@@ -41,7 +41,7 @@ With the Pi connection, physical mouse data comes from the Pi's **UPS2/UPT2 exte
 
 **Small random variations** adds bounded jitter in mouse units at a configurable interval. Both jitter and smooth noise fade within 20 picture pixels of the aim point and are disabled inside the dead zone. No variation occurs without a current eligible target. Smoothing is time-based exponential averaging. Shaping state resets on target change, deactivation, stale input, and configuration changes; no future path points are queued. Direction strength is applied after shaping/smoothing and before the existing device/per-update caps. Zero strength clears fractional and smoothed leftovers.
 
-Aimmy's [movement settings](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/Class/Dictionary.cs) and [movement implementation](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/InputLogic/MouseManager.cs) informed the selection of sensitivity, jitter, smoothing, sticky targeting, and movement-style controls. This is an independent implementation; its numerical behavior is not a port of Aimmy. Smooth noise uses interpolated random values rather than a Perlin routine. Automatic clicking is not included.
+Aimmy's [movement settings](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/Class/Dictionary.cs) and [movement implementation](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/InputLogic/MouseManager.cs) informed the selection of sensitivity, jitter, smoothing, sticky targeting, and movement-style controls. This is an independent implementation; its numerical behavior is not a port of Aimmy. Smooth noise uses interpolated random values rather than a Perlin routine. The humanization controller does not trigger clicks automatically; scheduled clicks are available separately through Receiver's synthetic-button API.
 
 ## Practice and checks
 
