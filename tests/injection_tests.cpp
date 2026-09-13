@@ -1,4 +1,5 @@
 #include "receiver/injection.hpp"
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <iostream>
@@ -128,6 +129,9 @@ int main() {
             }
             buttons.mark_snapshot_sent(state.revision, 0, true);
         }
+        auto coalesced_release = buttons.due_requests(1);
+        CHECK(coalesced_release.size() == 1 && coalesced_release[0].release_all);
+        CHECK(buttons.metrics().commands.size() == 1);
 
         // Virtual-time heartbeat: exactly due at 75 ms, never due for an unchanged zero mask.
         buttons.reset(77);
@@ -244,6 +248,43 @@ int main() {
                                            clock + 2) == AckResult::handled);
         CHECK(buttons.metrics().click_accepted_failed == 1);
         clock += 1'000'000;
+
+        // ButtonActive can reject before acceptance or terminate an accepted sequence.
+        // A terminal response may be the first ACK Receiver sees, and partial progress
+        // must be retained without counting the command more than once.
+        auto interfered = buttons.click(5, 3, 2ms, 1ms);
+        CHECK(send_one(buttons, clock) == interfered);
+        const auto accepted_before_interference = buttons.metrics().click_accepted;
+        const auto failed_before_interference = buttons.metrics().click_accepted_failed;
+        CHECK(buttons.process_click_ack(
+                  ack(ClickStatus::button_active, 900, 77, interfered, 5, 3, 1),
+                  clock + 1) == AckResult::handled);
+        auto interference_metrics = buttons.metrics();
+        CHECK(interference_metrics.click_accepted == accepted_before_interference + 1 &&
+              interference_metrics.click_accepted_failed == failed_before_interference + 1);
+        const auto interfered_view = std::find_if(
+            interference_metrics.commands.begin(), interference_metrics.commands.end(),
+            [&](const CommandView& view) { return view.id == interfered; });
+        CHECK(interfered_view != interference_metrics.commands.end() &&
+              interfered_view->accepted_clicks == 3 && interfered_view->completed_clicks == 1 &&
+              interfered_view->state == LocalCommandState::interrupted);
+        CHECK(buttons.process_click_ack(
+                  ack(ClickStatus::button_active, 900, 77, interfered, 5, 3, 1),
+                  clock + 2) == AckResult::ignored);
+        clock += 1'000'000;
+
+        auto impossible_interference = buttons.click(5, 3, 2ms, 1ms);
+        CHECK(send_one(buttons, clock) == impossible_interference);
+        CHECK(buttons.process_click_ack(
+                  ack(ClickStatus::button_active, 900, 77, impossible_interference, 5, 2, 1),
+                  clock + 1) == AckResult::protocol_error);
+        CHECK(buttons.process_click_ack(
+                  ack(ClickStatus::button_active, 900, 77, impossible_interference, 5, 3, 3),
+                  clock + 2) == AckResult::protocol_error);
+        CHECK(buttons.process_click_ack(
+                  ack(ClickStatus::button_active, 900, 77, impossible_interference, 5, 0, 0),
+                  clock + 3) == AckResult::handled);
+        clock += 1'000'000;
         for (auto status : {ClickStatus::invalid, ClickStatus::stale_command}) {
             auto id = buttons.click(4, 1, 2ms, 0us);
             CHECK(send_one(buttons, clock) == id);
@@ -281,6 +322,59 @@ int main() {
                                            clock + 50'000'005) == AckResult::handled);
         CHECK(!buttons.snapshot().release_barrier && buttons.snapshot().wire_mask() == 0x20);
         CHECK(buttons.due_requests(clock + 100'000'000).empty());
+
+        // A terminally Cancelled ReleaseAll is cached forever by the audited Pi.
+        // Replace it atomically with one higher ID; ordinary loss still retries the
+        // exact replacement bytes, and delayed old replies cannot open the fence.
+        InjectedButtonManager cancelled_release(65);
+        auto starting = upt3(900);
+        starting.ready = false;
+        starting.endpoint_poll_us = 0;
+        cancelled_release.observe_telemetry(starting);
+        cancelled_release.release_all(ReleaseReason::disarm, true);
+        auto first_release = cancelled_release.due_requests(clock + 1);
+        CHECK(first_release.size() == 1 && first_release[0].release_all && first_release[0].id == 1);
+        CHECK(cancelled_release.process_click_ack(
+                  ack(ClickStatus::cancelled, 900, 65, first_release[0].id, 0, 0, 0),
+                  clock + 2) == AckResult::handled);
+        CHECK(cancelled_release.snapshot().release_barrier &&
+              cancelled_release.metrics().release_superseded == 1);
+        auto replacement = cancelled_release.due_requests(clock + 3);
+        CHECK(replacement.size() == 1 && replacement[0].release_all && replacement[0].id == 2 &&
+              replacement[0].bytes != first_release[0].bytes);
+
+        for (int i = 0; i < 100; ++i)
+            cancelled_release.release_all(ReleaseReason::pi_error, true);
+        CHECK(cancelled_release.snapshot().release_snapshot_batches == 1);
+        CHECK(cancelled_release.metrics().commands.size() == 2); // bounded history + one live replacement
+        CHECK(cancelled_release.due_requests(clock + 50'000'002).empty());
+        auto replacement_retry = cancelled_release.due_requests(clock + 50'000'003);
+        CHECK(replacement_retry.size() == 1 && replacement_retry[0].id == replacement[0].id &&
+              replacement_retry[0].bytes == replacement[0].bytes);
+        CHECK(cancelled_release.process_click_ack(
+                  ack(ClickStatus::completed, 900, 65, first_release[0].id, 0, 0, 0),
+                  clock + 50'000'004) == AckResult::ignored);
+        CHECK(cancelled_release.snapshot().release_barrier);
+        CHECK(cancelled_release.process_click_ack(
+                  ack(ClickStatus::accepted, 900, 65, replacement[0].id, 0, 0, 0),
+                  clock + 50'000'005) == AckResult::handled);
+        CHECK(cancelled_release.process_click_ack(
+                  ack(ClickStatus::duplicate, 900, 65, replacement[0].id, 0, 0, 0),
+                  clock + 50'000'006) == AckResult::handled);
+        CHECK(cancelled_release.process_click_ack(
+                  ack(ClickStatus::cancelled, 900, 65, replacement[0].id, 0, 0, 0),
+                  clock + 50'000'007) == AckResult::handled);
+        auto second_replacement = cancelled_release.due_requests(clock + 50'000'008);
+        CHECK(second_replacement.size() == 1 && second_replacement[0].id == 3);
+        CHECK(cancelled_release.process_click_ack(
+                  ack(ClickStatus::completed, 900, 65, replacement[0].id, 0, 0, 0),
+                  clock + 50'000'009) == AckResult::ignored);
+        CHECK(cancelled_release.snapshot().release_barrier);
+        CHECK(cancelled_release.process_click_ack(
+                  ack(ClickStatus::completed, 900, 65, second_replacement[0].id, 0, 0, 0),
+                  clock + 50'000'010) == AckResult::handled);
+        CHECK(!cancelled_release.snapshot().release_barrier &&
+              cancelled_release.metrics().release_superseded == 2);
 
         // An epoch change retires the old ReleaseAll retry and creates a new-session fence.
         InjectedButtonManager epoch_release(66);

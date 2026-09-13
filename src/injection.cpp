@@ -12,7 +12,8 @@ constexpr size_t max_pending_clicks = 32;
 constexpr size_t max_history = 32;
 bool terminal(LocalCommandState state) {
     return state == LocalCommandState::completed || state == LocalCommandState::rejected ||
-           state == LocalCommandState::cancelled || state == LocalCommandState::unknown;
+           state == LocalCommandState::cancelled || state == LocalCommandState::interrupted ||
+           state == LocalCommandState::superseded || state == LocalCommandState::unknown;
 }
 }
 bool injected_snapshot_due(const InjectionSnapshot& state, bool have_sent_revision,
@@ -52,6 +53,8 @@ const char* local_command_state_name(LocalCommandState state) {
     case LocalCommandState::completed: return "completed by USB writer";
     case LocalCommandState::rejected: return "rejected before acceptance";
     case LocalCommandState::cancelled: return "cancelled";
+    case LocalCommandState::interrupted: return "stopped by physical button";
+    case LocalCommandState::superseded: return "superseded by a higher-ID release";
     case LocalCommandState::unknown: return "accepted; completion unknown";
     case LocalCommandState::release_retrying: return "release not completed; retrying same ID";
     }
@@ -121,15 +124,16 @@ void InjectedButtonManager::begin_release_locked(ReleaseReason reason, bool forc
     last_release_ = reason;
     metrics_.last_release_reason = release_reason_name(reason);
     if (before || force_snapshots)
-        ++release_snapshot_batches_;
-    if (next_command_) {
+        release_snapshot_batches_ = 1;
+    const bool already_fenced = release_barrier_locked();
+    if (!already_fenced && next_command_) {
         ClickCommand command{ClickOperation::release_all, click_client_, allocate_command_locked(), 0, 0, 0, 0};
         PendingRequest pending;
         pending.command = command;
         pending.bytes = encode_click_request(command);
         requests_.push_back(pending);
         metrics_.last_release_all_state = local_command_state_name(LocalCommandState::queued);
-    } else {
+    } else if (!already_fenced) {
         metrics_.last_release_all_state = "command ID exhausted; existing fence retained";
     }
 }
@@ -444,31 +448,41 @@ AckResult InjectedButtonManager::process_click_ack(Bytes bytes, int64_t now) {
         const bool success = ack->status == ClickStatus::accepted ||
                              ack->status == ClickStatus::duplicate ||
                              ack->status == ClickStatus::completed;
+        const bool acceptance_terminal = ack->status == ClickStatus::cancelled ||
+                                         ack->status == ClickStatus::button_active;
+        const bool preaccept_only = ack->status == ClickStatus::busy ||
+                                    ack->status == ClickStatus::queue_full ||
+                                    ack->status == ClickStatus::unsupported_button ||
+                                    ack->status == ClickStatus::invalid ||
+                                    ack->status == ClickStatus::not_ready ||
+                                    ack->status == ClickStatus::stale_command;
         if (!release && success && ack->accepted_clicks != found->command.count)
             return AckResult::protocol_error;
         if (!release && ack->status == ClickStatus::completed &&
             ack->completed_clicks != found->command.count)
             return AckResult::protocol_error;
-        const bool zero_count_status = ack->status == ClickStatus::busy ||
-                                       ack->status == ClickStatus::queue_full ||
-                                       ack->status == ClickStatus::unsupported_button ||
-                                       ack->status == ClickStatus::invalid ||
-                                       ack->status == ClickStatus::button_active ||
-                                       ack->status == ClickStatus::not_ready ||
-                                       ack->status == ClickStatus::stale_command;
-        if (zero_count_status && (ack->accepted_clicks || ack->completed_clicks))
+        if (!release && preaccept_only && (ack->accepted_clicks || ack->completed_clicks))
+            return AckResult::protocol_error;
+        if (!release && acceptance_terminal && ack->accepted_clicks &&
+            (ack->accepted_clicks != found->command.count ||
+             ack->completed_clicks >= ack->accepted_clicks))
+            return AckResult::protocol_error;
+        if (!release && acceptance_terminal && found->accepted && !ack->accepted_clicks)
             return AckResult::protocol_error;
         if (ack->status == ClickStatus::queue_full && found->accepted)
             return AckResult::protocol_error;
-        found->accepted_clicks = ack->accepted_clicks;
-        found->completed_clicks = ack->completed_clicks;
+        const bool proves_acceptance = !release && ack->accepted_clicks == found->command.count;
+        if (proves_acceptance && !found->accepted) {
+            found->accepted = true;
+            ++metrics_.click_accepted;
+        }
+        found->accepted_clicks = std::max(found->accepted_clicks, ack->accepted_clicks);
+        found->completed_clicks = std::max(found->completed_clicks, ack->completed_clicks);
         switch (ack->status) {
         case ClickStatus::accepted:
         case ClickStatus::duplicate:
             if (!found->accepted) {
                 found->accepted = true;
-                if (!release)
-                    ++metrics_.click_accepted;
             }
             found->state = LocalCommandState::accepted;
             found->next_send = now + accepted_lease_ns;
@@ -476,8 +490,6 @@ AckResult InjectedButtonManager::process_click_ack(Bytes bytes, int64_t now) {
                 metrics_.last_release_all_state = local_command_state_name(LocalCommandState::accepted);
             break;
         case ClickStatus::completed:
-            if (!found->accepted && !release)
-                ++metrics_.click_accepted;
             if (!release)
                 ++metrics_.click_completed;
             else
@@ -507,8 +519,28 @@ AckResult InjectedButtonManager::process_click_ack(Bytes bytes, int64_t now) {
         case ClickStatus::stale_command:
         case ClickStatus::cancelled: {
             if (release) {
-                // A rejected ReleaseAll never opens the fence: safety requires the same
-                // immutable ID to remain live until Completed or a confirmed epoch reset.
+                if (ack->status == ClickStatus::cancelled && next_command_) {
+                    // Cancelled is terminal and cached by the Pi, so the immutable old ID
+                    // can never complete. Atomically replace it while the fence is held.
+                    // Same-session monotonic allocation guarantees a strictly higher ID.
+                    const auto old = *found;
+                    ClickCommand command{ClickOperation::release_all, click_client_,
+                                         allocate_command_locked(), 0, 0, 0, 0};
+                    if (command.command <= old.command.command)
+                        return AckResult::protocol_error;
+                    PendingRequest replacement;
+                    replacement.command = command;
+                    replacement.bytes = encode_click_request(command);
+                    remember_locked(old, LocalCommandState::superseded);
+                    *found = replacement;
+                    ++metrics_.release_superseded;
+                    metrics_.last_release_all_state =
+                        "terminal cancellation superseded; higher-ID release queued";
+                    wake = wake_;
+                    break;
+                }
+                // Nonterminal rejection/status responses and the practically unreachable
+                // exhausted-ID case remain fail-closed on the identical request.
                 found->state = LocalCommandState::release_retrying;
                 found->next_send = now + response_timeout_ns;
                 metrics_.last_release_all_state =
@@ -521,7 +553,9 @@ AckResult InjectedButtonManager::process_click_ack(Bytes bytes, int64_t now) {
                 ++metrics_.click_accepted_failed;
             else
                 ++metrics_.click_rejected_before_acceptance;
-            const auto terminal_state = ack->status == ClickStatus::cancelled
+            const auto terminal_state = ack->status == ClickStatus::button_active && found->accepted
+                                            ? LocalCommandState::interrupted
+                                        : ack->status == ClickStatus::cancelled
                                             ? LocalCommandState::cancelled
                                             : LocalCommandState::rejected;
             finish_locked(found, terminal_state);

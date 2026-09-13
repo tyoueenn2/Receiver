@@ -60,6 +60,33 @@ def main():
                 if 'Pi:' in output or 'Failed' in output:
                     raise AssertionError(output)
 
+    # The audited proxy's 80-byte UPT2 conflicts with the canonical layout and
+    # cannot be discriminated reliably. A proxy without UPT3 must fall directly
+    # to explicit button-only UPT1; Receiver must never request UPS2.
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        frame_port, pi_port = free_port(), free_port()
+        profile = root / 'settings.json'
+        profile.write_text(json.dumps(dict(frame_port=frame_port, pi_port=pi_port,
+            direction=dict(enabled=False))))
+        pi = MockPi(pi_port)
+        pi.upt3_enabled = False
+        pi.start()
+        sender = Sender(port=frame_port).start()
+        process = subprocess.Popen([args.executable, '--profile', str(profile), '--simulate', '--arm',
+            '--seconds', '2'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            wait_for(lambda: len(pi.commands) > 5, 'UPT1 fallback did not recover button-only output')
+            output = process.communicate(timeout=5)[0]
+            assert process.returncode == 0, output
+            assert b'UPS3' in pi.subscription_versions and b'UPS1' in pi.subscription_versions
+            assert b'UPS2' not in pi.subscription_versions
+            print('UPT3-unavailable negotiation fell directly to explicit UPT1 without ambiguous UPT2.')
+        finally:
+            if process.poll() is None:
+                process.terminate(); process.communicate(timeout=5)
+            sender.stop(); pi.stop()
+
 
 if __name__ == '__main__':
     main()

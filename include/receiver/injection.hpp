@@ -35,6 +35,8 @@ enum class LocalCommandState : uint8_t {
     completed,
     rejected,
     cancelled,
+    interrupted,
+    superseded,
     unknown,
     release_retrying,
 };
@@ -61,7 +63,7 @@ struct InjectionMetrics {
     uint64_t pending_clicks = 0, click_submitted = 0, click_accepted = 0, click_completed = 0,
              click_rejected_before_acceptance = 0, click_accepted_failed = 0, click_retries = 0,
              click_timeouts = 0, click_queue_full = 0, click_epoch_resets = 0,
-             release_retries = 0;
+             release_retries = 0, release_superseded = 0;
     uint32_t pi_accepted_click_total = 0, pi_completed_click_total = 0;
     uint16_t pi_active_sequences = 0, pi_queued_sequences = 0, pi_output_queue_depth = 0,
              pi_pending_synthetic_depth = 0;

@@ -1102,8 +1102,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                             static_cast<unsigned long long>(stats.injection.click_retries),
                             static_cast<unsigned long long>(stats.injection.click_timeouts),
                             static_cast<unsigned long long>(stats.injection.click_queue_full));
-                ImGui::Text("Release retries: %llu | Server-epoch resets: %llu",
+                ImGui::Text("Release retries: %llu | Superseded cancellations: %llu | Server-epoch resets: %llu",
                             static_cast<unsigned long long>(stats.injection.release_retries),
+                            static_cast<unsigned long long>(stats.injection.release_superseded),
                             static_cast<unsigned long long>(stats.injection.click_epoch_resets));
                 ImGui::Text("Last release: %s | ReleaseAll: %s", stats.injection.last_release_reason.c_str(),
                             stats.injection.last_release_all_state.c_str());

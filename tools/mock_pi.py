@@ -24,8 +24,11 @@ class MockPi:
         self.motion_generation = 1
         self.commands, self.transitions = [], []
         self.subscription_sources = []
+        self.subscription_versions = []
         self.click_requests, self.release_requests, self.clicks = [], [], {}
         self.click_response_override = None
+        self.release_cancel_count = 0
+        self.interfere_next_click = False
         self.stop_event = threading.Event()
         self.session = secrets.randbits(64) or 1
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -68,6 +71,7 @@ class MockPi:
                 data, source = self.sock.recvfrom(2048)
                 if len(data) == SUBSCRIBE.size and data[:4] in (b'UPS1', b'UPS2', b'UPS3'):
                     _, reserved, candidate, candidate_token = SUBSCRIBE.unpack(data)
+                    self.subscription_versions.append(data[:4])
                     supported = data[:4] != b'UPS3' or self.upt3_enabled
                     if not supported:
                         self.sock.sendto(b'error unknown command', source)
@@ -113,7 +117,8 @@ class MockPi:
                     elif not valid_header or not click_client or not command_id:
                         status = 7
                     elif key in self.clicks:
-                        status = 3 if self.clicks[key]['completed'] else 2
+                        status = (self.clicks[key].get('terminal_status', 3)
+                                  if self.clicks[key]['completed'] else 2)
                     elif operation == 2:
                         if button or count or press_us or interval_us:
                             status = 7
@@ -124,11 +129,16 @@ class MockPi:
                             scheduled = 0
                             self.release_requests.append(dict(time=now, client=click_client,
                                                               command=command_id, source=source))
+                            terminal_status = 8 if self.release_cancel_count else 3
+                            if self.release_cancel_count:
+                                self.release_cancel_count -= 1
                             self.clicks[key] = dict(source=source, button=0, count=0,
                                                     complete_at=now, completed=True,
-                                                    cancelled=False, release=True)
+                                                    cancelled=False, release=True,
+                                                    terminal_status=terminal_status,
+                                                    completed_clicks=0)
                             owner, lease = source, now
-                            status = 3
+                            status = terminal_status
                     elif not (1 <= button <= 8 and 1 <= count <= 10000 and
                               self.endpoint_poll_us <= press_us <= 5_000_000 and
                               interval_us <= 60_000_000):
@@ -139,7 +149,11 @@ class MockPi:
                         duration = (count * press_us + (count - 1) * interval_us) / 1_000_000
                         self.clicks[key] = dict(source=source, button=button, count=count,
                                                 complete_at=now + duration, completed=False,
-                                                cancelled=False, release=False)
+                                                cancelled=False, release=False,
+                                                interfere=self.interfere_next_click,
+                                                interfere_at=now + duration / 2,
+                                                completed_clicks=0)
+                        self.interfere_next_click = False
                         self.click_requests.append(dict(time=now, client=click_client,
                                                         command=command_id, button=button,
                                                         count=count, press_us=press_us,
@@ -150,7 +164,7 @@ class MockPi:
                         status = 1
                     click = self.clicks.get(key)
                     accepted = count if click and not click['release'] else 0
-                    completed = count if click and click['completed'] and not click['release'] else 0
+                    completed = click.get('completed_clicks', 0) if click and not click['release'] else 0
                     depth = len([x for x in self.clicks.values() if not x['completed']])
                     self.sock.sendto(self.ack(status, button, click_client, command_id, accepted,
                                               completed, self.session, depth), source)
@@ -170,10 +184,21 @@ class MockPi:
                     continue
                 if click['cancelled']:
                     click['completed'] = True
+                    click['terminal_status'] = 8
                     self.sock.sendto(self.ack(8, click['button'], key[0], key[1], click['count'],
-                                              0, self.session), click['source'])
+                                              click['completed_clicks'], self.session), click['source'])
+                elif click.get('interfere') and now >= click['interfere_at']:
+                    click['completed'] = True
+                    click['terminal_status'] = 9
+                    click['completed_clicks'] = max(0, click['count'] - 1)
+                    completed_total += click['completed_clicks']
+                    scheduled &= ~(1 << (click['button'] - 1))
+                    self.sock.sendto(self.ack(9, click['button'], key[0], key[1], click['count'],
+                                              click['completed_clicks'], self.session), click['source'])
                 elif now >= click['complete_at']:
                     click['completed'] = True
+                    click['terminal_status'] = 3
+                    click['completed_clicks'] = click['count']
                     completed_total += click['count']
                     scheduled &= ~(1 << (click['button'] - 1))
                     self.sock.sendto(self.ack(3, click['button'], key[0], key[1], click['count'],

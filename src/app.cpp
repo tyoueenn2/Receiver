@@ -409,7 +409,7 @@ void App::pi_loop() {
     bool was_active = false;
     ReleaseReason unsafe_reason = ReleaseReason::none;
     bool had_input = false;
-    enum class Probe { v3, v2, selected_v1, selected_v2, selected_v3 };
+    enum class Probe { v3, selected_v1, selected_v3 };
     Probe probe = Probe::v3;
     int64_t probe_started = now_ns(), shutdown_deadline = 0;
     bool last_direction = initial.direction.enabled;
@@ -442,11 +442,6 @@ void App::pi_loop() {
                 last_direction = need_motion;
             }
             if (probe == Probe::v3 && now - probe_started >= 100'000'000) {
-                probe = need_motion ? Probe::v2 : Probe::selected_v1;
-                probe_started = now;
-                renewal = 0;
-                gate.reset(client);
-            } else if (probe == Probe::v2 && now - probe_started >= 100'000'000) {
                 probe = Probe::selected_v1;
                 renewal = 0;
                 gate.reset(client);
@@ -454,8 +449,6 @@ void App::pi_loop() {
             if (!shutdown_deadline && now - renewal >= 20'000'000) {
                 const auto version = (probe == Probe::v3 || probe == Probe::selected_v3)
                                          ? SubscriptionVersion::v3
-                                     : (probe == Probe::v2 || probe == Probe::selected_v2)
-                                         ? SubscriptionVersion::v2
                                          : SubscriptionVersion::v1;
                 auto p = subscribe(client, ++token, version);
                 gate.issue(token, now);
@@ -488,46 +481,47 @@ void App::pi_loop() {
             if (n >= 4 && (!std::memcmp(bytes.data(), "UPT1", 4) ||
                            !std::memcmp(bytes.data(), "UPT2", 4) ||
                            !std::memcmp(bytes.data(), "UPT3", 4))) {
-                auto parsed = parse_telemetry(Bytes(bytes.data(), size_t(n)));
-                const bool expected = parsed &&
-                    ((probe == Probe::v3 && parsed->kind == Telemetry::Kind::upt3) ||
-                     (probe == Probe::v2 && (parsed->kind == Telemetry::Kind::upt2_public ||
-                                             parsed->kind == Telemetry::Kind::upt2_legacy)) ||
-                     (probe == Probe::selected_v1 && parsed->kind == Telemetry::Kind::upt1) ||
-                     (probe == Probe::selected_v2 && (parsed->kind == Telemetry::Kind::upt2_public ||
-                                                      parsed->kind == Telemetry::Kind::upt2_legacy)) ||
-                     (probe == Probe::selected_v3 && parsed->kind == Telemetry::Kind::upt3));
-                if (!parsed) {
-                    protocol_error = true;
-                    std::lock_guard lock(mutex_);
-                    ++stats_.telemetry_rejected;
-                    stats_.error = "Invalid Pi telemetry protocol";
-                    stats_.armed = false;
-                    ++epoch_;
-                    result_.reset();
-                } else if (!expected || !gate.accept(Bytes(bytes.data(), size_t(n)), now)) {
+                const bool wire_v1 = !std::memcmp(bytes.data(), "UPT1", 4);
+                const bool wire_v3 = !std::memcmp(bytes.data(), "UPT3", 4);
+                const bool expected_wire = ((probe == Probe::v3 || probe == Probe::selected_v3) && wire_v3) ||
+                                           (probe == Probe::selected_v1 && wire_v1);
+                if (!expected_wire) {
+                    // UPT2 has incompatible 80-byte layouts with no discriminator. Never
+                    // infer which one an unsolicited packet uses; UPT3 is authoritative.
                     std::lock_guard lock(mutex_);
                     ++stats_.telemetry_rejected;
                 } else {
-                    if (probe == Probe::v3)
-                        probe = Probe::selected_v3;
-                    else if (probe == Probe::v2)
-                        probe = Probe::selected_v2;
-                    const bool epoch_changed = injected_.observe_telemetry(gate.state);
-                    float window;
-                    {
+                    auto parsed = parse_telemetry(Bytes(bytes.data(), size_t(n)));
+                    if (!parsed) {
+                        protocol_error = true;
                         std::lock_guard lock(mutex_);
-                        window = settings_.direction.window_ms;
-                    }
-                    motion_tracker.observe(gate.state, now, window);
-                    had_input = true;
-                    if (epoch_changed) {
-                        probe = Probe::v3;
-                        probe_started = now;
-                        renewal = 0;
-                        gate.reset(client);
-                        motion_tracker.reset();
-                        had_input = false;
+                        ++stats_.telemetry_rejected;
+                        stats_.error = "Invalid Pi telemetry protocol";
+                        stats_.armed = false;
+                        ++epoch_;
+                        result_.reset();
+                    } else if (!gate.accept(Bytes(bytes.data(), size_t(n)), now)) {
+                        std::lock_guard lock(mutex_);
+                        ++stats_.telemetry_rejected;
+                    } else {
+                        if (probe == Probe::v3)
+                            probe = Probe::selected_v3;
+                        const bool epoch_changed = injected_.observe_telemetry(gate.state);
+                        float window;
+                        {
+                            std::lock_guard lock(mutex_);
+                            window = settings_.direction.window_ms;
+                        }
+                        motion_tracker.observe(gate.state, now, window);
+                        had_input = true;
+                        if (epoch_changed) {
+                            probe = Probe::v3;
+                            probe_started = now;
+                            renewal = 0;
+                            gate.reset(client);
+                            motion_tracker.reset();
+                            had_input = false;
+                        }
                     }
                 }
             } else if (n >= 4 && !std::memcmp(bytes.data(), "UPA1", 4)) {
@@ -546,7 +540,7 @@ void App::pi_loop() {
                 }
             } else {
                 std::string reply(reinterpret_cast<char*>(bytes.data()), size_t(n));
-                const bool expected_probe_error = (probe == Probe::v3 || probe == Probe::v2) &&
+                const bool expected_probe_error = probe == Probe::v3 &&
                     (reply.find("unknown") != std::string::npos ||
                      reply.find("unsupported") != std::string::npos ||
                      reply.find("invalid command") != std::string::npos);
@@ -757,6 +751,7 @@ void App::export_metrics(const std::string& path) const {
       << "\n# click_queue_full_backpressure_events," << s.injection.click_queue_full
       << "\n# click_server_epoch_resets," << s.injection.click_epoch_resets
       << "\n# release_all_retries," << s.injection.release_retries
+      << "\n# release_all_terminal_cancellations_superseded," << s.injection.release_superseded
       << "\n# last_release_reason," << s.injection.last_release_reason
       << "\n# last_release_all_state," << s.injection.last_release_all_state
       << "\n# pi_applied_persistent_mask," << unsigned(s.injection.pi_applied_persistent_mask)

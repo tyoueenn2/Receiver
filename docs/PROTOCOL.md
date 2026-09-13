@@ -102,7 +102,9 @@ Statuses are 1 Accepted, 2 Duplicate, 3 Completed, 4 Busy, 5 QueueFull, 6 Unsupp
 
 Receiver constructs immutable request bytes once. Before acceptance, no-response retries use the same bytes and ID after 50 ms. QueueFull retains the same command and backs off 25 ms, 50 ms, then 75 ms capped. After Accepted or Duplicate, Receiver continues same-ID status/lease requests at least every 75 ms until terminal. Command N+1 is not transmitted before N is known Accepted, Duplicate, or Completed. Duplicate/reordered responses cannot double-count transitions, and aggregate telemetry counters are never used to infer command completion.
 
-Responses are accepted only from the configured Pi endpoint, for version 2, the current client session, a known already-sent ID, and the telemetry-confirmed server epoch. Completed means the final release completed successfully in the Pi USB writer. Busy, UnsupportedButton, ButtonActive, NotReady, Invalid, StaleCommand, and Cancelled terminate a Schedule command according to their status; partial Cancelled counts are preserved. A non-Completed response to ReleaseAll never opens its release fence and the immutable same-ID request remains eligible for retry. Invalid, StaleCommand, malformed responses, and impossible per-command counts additionally trigger Receiver's fail-closed Pi protocol path.
+Responses are accepted only from the configured Pi endpoint, for version 2, the current client session, a known already-sent ID, and the telemetry-confirmed server epoch. Completed means the final release completed successfully in the Pi USB writer. A Schedule `ButtonActive` with zero accepted/completed counts is rejection before acceptance. `ButtonActive` with `accepted == requested` and `completed < accepted` is a legitimate post-acceptance termination caused by physical-button interference. `Cancelled` can likewise retain accepted and partial-completion counts. Receiver preserves the greatest observed progress, counts acceptance once even when the terminal response is the first ACK received, and records post-acceptance `ButtonActive` separately from pre-acceptance rejection. Partial accepted counts, completed greater than accepted, and a failed terminal status claiming every click completed are impossible and fail closed.
+
+Busy, QueueFull, UnsupportedButton, NotReady, Invalid, and StaleCommand are pre-acceptance statuses and require zero counts. Invalid, StaleCommand, malformed responses, and impossible per-command counts trigger Receiver's fail-closed Pi protocol path.
 
 Status labels have exact scopes:
 
@@ -113,9 +115,11 @@ Status labels have exact scopes:
 
 ## Release fence
 
-Manual ReleaseAll, GUI disarm, shutdown, sender loss/restart, stale or invalid Pi telemetry, Pi socket/protocol error, GPU/inference failure, restart-required configuration change, server-epoch change, and existing fail-closed transitions use the same manager routine. It immediately clears manual/scoped desired ownership, invalidates guards, cancels local clicks, records the reason, wakes the worker, and enqueues a higher-ID version-2 ReleaseAll.
+Manual ReleaseAll, GUI disarm, shutdown, sender loss/restart, stale or invalid Pi telemetry, Pi socket/protocol error, GPU/inference failure, restart-required configuration change, server-epoch change, and existing fail-closed transitions use the same manager routine. It immediately clears manual/scoped desired ownership, invalidates guards, cancels local clicks, records the reason, wakes the worker, and ensures one version-2 ReleaseAll is fenced. Repeated release triggers coalesce onto the existing obligation and at most one three-snapshot batch; they do not grow an unbounded release queue.
 
-The worker sends ReleaseAll before normal work and retries its immutable bytes until valid Completed, a confirmed epoch change, or connection loss. It also sends three best-effort UPX1 zero-motion, zero-wheel, zero-pan, zero-mask snapshots with fresh sequence numbers. Later presses remain behind the fence. Shutdown gives the worker up to 100 ms to deliver and retry this work. A UPA1 Completed response is the only evidence used to label ReleaseAll completed by the writer; the three UPX1 snapshots are not scheduled-click completion proof. If the socket is unavailable, desired local state remains zero and the Pi's 250 ms watchdog is the final fallback.
+The worker sends ReleaseAll before normal work. No-response timeouts and nonterminal Busy/QueueFull/NotReady responses retry the exact immutable bytes and ID. The audited Pi can cache a terminal `Cancelled` for a release that lost endpoint readiness. Retrying that ID can never succeed, so Receiver atomically replaces it under the still-closed fence with a same-session, strictly higher command ID. Only creation of that replacement supersedes the old obligation. Delayed replies for superseded IDs are ignored and cannot open the fence; only valid Completed for the current replacement can do so. A confirmed server-epoch change instead retires all old-session work and creates a new-session release fence.
+
+The worker also sends three best-effort UPX1 zero-motion, zero-wheel, zero-pan, zero-mask snapshots with fresh sequence numbers. Later presses remain behind the fence. Shutdown gives the worker up to 100 ms to deliver and retry this work. A UPA1 Completed response is the only evidence used to label ReleaseAll completed by the writer; the three UPX1 snapshots are not scheduled-click completion proof. If the socket is unavailable, desired local state remains zero and the Pi's 250 ms watchdog is the final fallback.
 
 ## UPS1, UPS2, and UPS3 subscriptions
 
@@ -123,7 +127,7 @@ All subscriptions are 24 bytes:
 
 `magic[4] | reserved:u32=0 | receiver_session:u64 | token:u64`
 
-Both IDs are nonzero. Receiver renews every 20 ms. The Pi subscription lifetime remains 100 ms, while Receiver requires both receipt and echoed-token freshness within 50 ms. At startup, configuration reprobe, or confirmed epoch change, Receiver probes UPS3 for 100 ms; if unavailable it probes UPS2 when direction assistance is enabled, otherwise it selects UPS1. After an unsuccessful UPS2 probe it selects UPS1. Expected unknown/unsupported replies during probing are ignored. Once selected, only that version is renewed until the next reprobe.
+Both IDs are nonzero. Receiver renews every 20 ms. The Pi subscription lifetime remains 100 ms, while Receiver requires both receipt and echoed-token freshness within 50 ms. At startup, configuration reprobe, or confirmed epoch change, Receiver probes UPS3 for 100 ms and then selects UPS1 if UPT3 is unavailable. Expected unknown/unsupported replies during the UPT3 probe are ignored. Once selected, only that version is renewed until the next reprobe. Receiver deliberately does not auto-negotiate UPT2 because deployed 80-byte encoders use conflicting layouts with no wire discriminator. Full scheduling and direction assistance therefore require UPT3; UPT1 is the explicit reduced-capability fallback.
 
 ## UPT1 compatibility
 
@@ -149,7 +153,7 @@ UPT1 is sufficient for button activation when direction assistance is disabled. 
 
 ## UPT2 compatibility
 
-The public UPT2 is 80 bytes. Bytes 0–55 use the UPT1 layout with magic `UPT2`; its extension is:
+The canonical UPT2 is 80 bytes. Bytes 0–55 use the UPT1 layout with magic `UPT2`; offsets 6–7 and 52–55 are reserved and zero. Its extension is:
 
 | Offset | Bytes | Field |
 |---:|---:|---|
@@ -159,7 +163,9 @@ The public UPT2 is 80 bytes. Bytes 0–55 use the UPT1 layout with magic `UPT2`;
 | 74 | 2 | Last physical relative Y, signed |
 | 76 | 4 | Physical motion age, microseconds; `0xffffffff` if none |
 
-The last-delta fields support diagnostics but are not loss/reorder-safe velocity. Receiver never uses this 80-byte format as reliable direction input.
+The last-delta fields support diagnostics but are not loss/reorder-safe velocity. The canonical decoder remains covered for explicit packet compatibility, but Receiver never auto-negotiates or uses this 80-byte format as reliable direction input.
+
+`usb-proxy-udp` revision `ef4abe246a614bd22cc21116fd14ecc885edbb60` emits a different 80-byte packet: persistent/scheduled masks at 6–7, physical deltas at 52/56, click counters at 60/64, active/queued counts at 68/70, and generation at 72. That layout is unsupported and representative golden packets are rejected. Because a quiet packet can overlap valid canonical values, packet contents cannot safely identify which same-size layout was intended. Receiver therefore does not guess or request UPT2 from this proxy; it uses that proxy's UPT3 implementation.
 
 Receiver also accepts its legacy 88-byte cumulative UPT2. Bytes 0–55 again match UPT1 except for the magic:
 
@@ -172,7 +178,7 @@ Receiver also accepts its legacy 88-byte cumulative UPT2. Bytes 0–55 again mat
 | 80 | 4 | Physical motion age, microseconds; `0xffffffff` if none |
 | 84 | 4 | Reserved, zero |
 
-Packet length distinguishes the two formats. The 88-byte cumulative counters can drive direction assistance. They contain physical movement only and use modulo-2^32 differences.
+Packet length distinguishes the two decoder formats. The 88-byte cumulative counters remain covered for legacy/offline compatibility and contain physical movement only using modulo-2^32 differences. They are not auto-negotiated; production direction assistance requires UPT3.
 
 ## UPT3 full telemetry
 
@@ -213,7 +219,7 @@ UPT3 is exactly 128 bytes:
 
 Receiver validates exact size, reserved bytes, session/token/epoch, readiness-dependent endpoint and generation values, axis ranges, monotonic sequence/sample time, and consistent counters before use. Duplicate/reordered telemetry is rejected by the modulo-2^32 half-range rule.
 
-Direction tracking uses differences between cumulative signed 64-bit physical counters. Server-epoch or layout-generation changes reset the baseline; non-increasing sample time, reception gaps, excessive sample gaps, discontinuities, and stale motion age invalidate or pause assistance. Two accepted samples are required after reset. Injected movement is never mixed into physical direction calculations.
+Direction tracking uses differences between UPT3 cumulative signed 64-bit physical counters. Server-epoch or layout-generation changes reset the baseline; non-increasing sample time, reception gaps, excessive sample gaps, discontinuities, and stale motion age invalidate or pause assistance. Two accepted samples are required after reset. Injected movement is never mixed into physical direction calculations.
 
 A telemetry-confirmed server-epoch change discards old pending state, increments the reset metric, clears persistent desired state, treats old ReleaseAll work as fenced by the restart, rotates to a new nonzero random click-client session with command numbering reset, starts a new ReleaseAll fence, and reprobes UPS3. Old click commands are never resubmitted, and delayed old-session/old-epoch responses are ignored.
 
