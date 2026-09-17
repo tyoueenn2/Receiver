@@ -6,7 +6,7 @@ import statistics
 import subprocess
 import tempfile
 import time
-from integration_test import MockPi, Sender, free_port, wait_for
+from integration_test import MockPi, Sender, free_port, wait_for, wait_until_quiet
 
 
 def main():
@@ -40,18 +40,18 @@ def main():
                 assert weak < still < strong, (mode, toward, away, still)
                 # A button-only Pi remains usable for legacy clients, but cannot drive this feature.
                 pi.motion_enabled = False
-                time.sleep(.12); count = len(pi.commands); time.sleep(.15)
-                assert len(pi.commands) == count, 'Missing physical motion data did not stop output'
+                count = wait_until_quiet(
+                    pi.commands, 'Missing physical motion data did not stop output')
                 pi.motion_enabled = True
                 wait_for(lambda: len(pi.commands) > count + 5, 'Motion capability did not recover')
                 pi.telemetry_enabled = False
-                time.sleep(.12); count = len(pi.commands); time.sleep(.15)
-                assert len(pi.commands) == count, 'Stale motion telemetry did not stop output'
+                count = wait_until_quiet(
+                    pi.commands, 'Stale motion telemetry did not stop output')
                 pi.telemetry_enabled = True; pi.motion_generation += 1
                 wait_for(lambda: len(pi.commands) > count + 5, 'Motion generation restart did not recover')
                 pi.physical = 0
-                time.sleep(.12); count = len(pi.commands); time.sleep(.15)
-                assert len(pi.commands) == count, 'Button release did not stop direction assistance'
+                wait_until_quiet(
+                    pi.commands, 'Button release did not stop direction assistance')
                 print(f'Mode {mode}: toward={toward:.2f}, away={away:.2f}, stationary={still:.2f}; missing/stale data, restart, release passed.')
             finally:
                 process.terminate()

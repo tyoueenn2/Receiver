@@ -25,10 +25,15 @@ class MockPi:
         self.commands, self.transitions = [], []
         self.subscription_sources = []
         self.subscription_versions = []
+        self.subscription_events = []
+        self.telemetry_events = []
         self.click_requests, self.release_requests, self.clicks = [], [], {}
         self.click_response_override = None
         self.release_cancel_count = 0
         self.interfere_next_click = False
+        self.upt3_packets_to_drop = 0
+        self.upt3_delay_s = 0.0
+        self.delayed_telemetry = []
         self.stop_event = threading.Event()
         self.session = secrets.randbits(64) or 1
         self.thread = threading.Thread(target=self.run, daemon=True)
@@ -72,6 +77,9 @@ class MockPi:
                 if len(data) == SUBSCRIBE.size and data[:4] in (b'UPS1', b'UPS2', b'UPS3'):
                     _, reserved, candidate, candidate_token = SUBSCRIBE.unpack(data)
                     self.subscription_versions.append(data[:4])
+                    self.subscription_events.append(dict(time=now, version=data[:4],
+                                                         client=candidate, token=candidate_token,
+                                                         source=source))
                     supported = data[:4] != b'UPS3' or self.upt3_enabled
                     if not supported:
                         self.sock.sendto(b'error unknown command', source)
@@ -179,6 +187,14 @@ class MockPi:
                 pass
 
             now = time.perf_counter()
+            for delayed in list(self.delayed_telemetry):
+                if now < delayed['send_at']:
+                    continue
+                self.delayed_telemetry.remove(delayed)
+                self.sock.sendto(delayed['packet'], delayed['source'])
+                self.telemetry_events.append(dict(time=now, version=b'UPT3',
+                                                  token=delayed['token'], delayed=True,
+                                                  dropped=False))
             for key, click in list(self.clicks.items()):
                 if click['completed'] or click['release']:
                     continue
@@ -232,7 +248,19 @@ class MockPi:
                         packet += struct.pack('!QQIIII', self.motion_generation,
                                               time.perf_counter_ns(), int(total_x) & 0xffffffff,
                                               int(total_y) & 0xffffffff, age, 0)
-                self.sock.sendto(packet, subscriber)
+                version = packet[:4]
+                if version == b'UPT3' and self.upt3_packets_to_drop:
+                    self.upt3_packets_to_drop -= 1
+                    self.telemetry_events.append(dict(time=now, version=version, token=token,
+                                                      delayed=False, dropped=True))
+                elif version == b'UPT3' and self.upt3_delay_s:
+                    self.delayed_telemetry.append(dict(send_at=now + self.upt3_delay_s,
+                                                       packet=packet, source=subscriber,
+                                                       token=token))
+                else:
+                    self.sock.sendto(packet, subscriber)
+                    self.telemetry_events.append(dict(time=now, version=version, token=token,
+                                                      delayed=False, dropped=False))
                 seq = (seq + 1) & 0xffffffff
                 published, previous = now, state
 

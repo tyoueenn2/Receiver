@@ -1,5 +1,13 @@
 # Validation record — 2026-09-13
 
+## Telemetry startup and recovery — 2026-09-14
+
+Receiver now performs version-bound, one-shot UPT3 upgrade probes while continuing normal UPT1 renewals. Failed attempts back off from 250 ms to a 4 s cap; the 50 ms probe-response window, configured peer endpoint, Receiver client session, server epoch, and requested protocol version are all validated before upgrade. Healthy UPT1 gate state is not reset by a background probe. A confirmed upgrade resets the physical-motion baseline and immediately refreshes scheduled-click endpoint timing. Confirmed peer loss returns to the 100 ms startup UPT3 probe, and the first restored UPT1 response accelerates another upgrade attempt. UPT2 negotiation remains disabled.
+
+The native non-GPU Windows build completed and all 5 CTest suites passed; the core executable reported 76,868 checks. The focused real-process loopback regression passed five scenarios: Pi startup 350 ms after Receiver; all initial UPT3 responses dropped before recovery; UPT3 enabled after established UPT1 fallback; a permanent UPT1-only peer retaining continuous movement while bounded probes continued; and delayed old-epoch UPT3 replies followed by a server restart, telemetry loss, and recovery. Direction output and a scheduled click both became available after a valid in-place UPT3 upgrade without restarting Receiver. Existing main network and direction integrations also passed.
+
+These are deterministic UDP loopback tests using `tools/mock_pi.py` and simulated inference. They do not validate TensorRT execution, RTX 3060 Ti performance, Raspberry Pi scheduling, physical USB/Raw Gadget behavior, a Logitech mouse, or LAN loss/latency.
+
 ## Release recovery and proxy interoperability audit — 2026-09-13
 
 The audited base is Receiver `196044f545fae032be0178ba0219c0117c2cde9a`; cross-project wire behavior was checked against `usb-proxy-udp` `ef4abe246a614bd22cc21116fd14ecc885edbb60`. Receiver does not vendor or patch the proxy.

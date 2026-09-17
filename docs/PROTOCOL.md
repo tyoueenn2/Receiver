@@ -127,7 +127,13 @@ All subscriptions are 24 bytes:
 
 `magic[4] | reserved:u32=0 | receiver_session:u64 | token:u64`
 
-Both IDs are nonzero. Receiver renews every 20 ms. The Pi subscription lifetime remains 100 ms, while Receiver requires both receipt and echoed-token freshness within 50 ms. At startup, configuration reprobe, or confirmed epoch change, Receiver probes UPS3 for 100 ms and then selects UPS1 if UPT3 is unavailable. Expected unknown/unsupported replies during the UPT3 probe are ignored. Once selected, only that version is renewed until the next reprobe. Receiver deliberately does not auto-negotiate UPT2 because deployed 80-byte encoders use conflicting layouts with no wire discriminator. Full scheduling and direction assistance therefore require UPT3; UPT1 is the explicit reduced-capability fallback.
+Both IDs are nonzero. Receiver renews the selected subscription every 20 ms. The Pi subscription lifetime remains 100 ms, while Receiver requires both receipt and an echoed token issued for that exact protocol version within 50 ms. A UPS1 token cannot validate UPT3, and a UPS3 token cannot validate UPT1. Packets must also come from the configured Pi endpoint, echo the current Receiver client session, and satisfy the server-epoch and sequence rules below.
+
+At startup or after confirmed peer loss/server-epoch change, Receiver probes UPS3 for 100 ms and then selects UPS1 if UPT3 is unavailable. While UPS1 is healthy, Receiver keeps renewing it and sends one-shot UPS3 upgrade probes in the background. A probe has a distinct token and a 50 ms response window; failed probes use bounded exponential backoff beginning at 250 ms and capped at 4 seconds. A probe does not reset the UPT1 gate, physical-button state, output flow, or release fence. When UPT1 first recovers after an outage, the next UPS3 attempt is accelerated. Specific unknown/unsupported replies are expected during probing and do not disable UPT1.
+
+Only a valid UPT3 response for the currently outstanding UPS3 token can upgrade a healthy UPT1 session. Delayed responses for older probes, wrong-version token echoes, unexpected peer/client packets, and unsolicited UPT3 packets are rejected. A confirmed upgrade switches renewals to UPS3, resets the physical-motion baseline before consuming the new cumulative sample, and refreshes UPT3 endpoint timing used by scheduled clicks. A server-epoch change still invokes the normal fail-closed release/session-rotation path before telemetry is re-established.
+
+Receiver deliberately does not auto-negotiate UPT2 because deployed 80-byte encoders use conflicting layouts with no wire discriminator. Full scheduling and direction assistance therefore require UPT3; UPT1 is the explicit reduced-capability fallback.
 
 ## UPT1 compatibility
 

@@ -409,10 +409,17 @@ void App::pi_loop() {
     bool was_active = false;
     ReleaseReason unsafe_reason = ReleaseReason::none;
     bool had_input = false;
-    enum class Probe { v3, selected_v1, selected_v3 };
-    Probe probe = Probe::v3;
+    enum class Probe { initial_v3, selected_v1, selected_v3 };
+    constexpr int64_t initial_probe_ns = 100'000'000;
+    constexpr int64_t upgrade_response_ns = 50'000'000;
+    constexpr int64_t upgrade_backoff_min_ns = 250'000'000;
+    constexpr int64_t upgrade_backoff_max_ns = 4'000'000'000;
+    Probe probe = Probe::initial_v3;
     int64_t probe_started = now_ns(), shutdown_deadline = 0;
-    bool last_direction = initial.direction.enabled;
+    int64_t next_upgrade_probe = 0, upgrade_deadline = 0;
+    int64_t upgrade_backoff = upgrade_backoff_min_ns;
+    uint64_t upgrade_token = 0;
+    bool last_direction = initial.direction.enabled, was_input_fresh = false;
     std::array<uint8_t, 2048> bytes{};
     while (true) {
         auto loop_start = now_ns();
@@ -433,28 +440,48 @@ void App::pi_loop() {
                 need_motion = settings_.direction.enabled;
             }
             if (need_motion != last_direction && !shutdown_deadline) {
-                probe = Probe::v3;
-                probe_started = now;
-                renewal = 0;
-                gate.reset(client);
                 motion_tracker.reset();
-                had_input = false;
+                if (need_motion && probe == Probe::selected_v1 && !upgrade_token) {
+                    next_upgrade_probe = now;
+                    upgrade_backoff = upgrade_backoff_min_ns;
+                }
                 last_direction = need_motion;
             }
-            if (probe == Probe::v3 && now - probe_started >= 100'000'000) {
+            if (probe == Probe::initial_v3 && now - probe_started >= initial_probe_ns) {
                 probe = Probe::selected_v1;
                 renewal = 0;
                 gate.reset(client);
+                upgrade_token = 0;
+                upgrade_deadline = 0;
+                next_upgrade_probe = now + upgrade_backoff_min_ns;
+                upgrade_backoff = upgrade_backoff_min_ns;
+            }
+            if (probe == Probe::selected_v1 && upgrade_token && now >= upgrade_deadline) {
+                upgrade_token = 0;
+                upgrade_deadline = 0;
+                next_upgrade_probe = now + upgrade_backoff;
+                upgrade_backoff = std::min(upgrade_backoff * 2, upgrade_backoff_max_ns);
             }
             if (!shutdown_deadline && now - renewal >= 20'000'000) {
-                const auto version = (probe == Probe::v3 || probe == Probe::selected_v3)
+                const auto version = (probe == Probe::initial_v3 || probe == Probe::selected_v3)
                                          ? SubscriptionVersion::v3
                                          : SubscriptionVersion::v1;
-                auto p = subscribe(client, ++token, version);
-                gate.issue(token, now);
+                const auto issued_token = ++token;
+                auto p = subscribe(client, issued_token, version);
+                gate.issue(issued_token, now, version);
                 if (!socket.send(p, pi))
                     throw std::runtime_error("Pi subscription send failed");
                 renewal = now;
+            }
+            if (!shutdown_deadline && probe == Probe::selected_v1 && !upgrade_token &&
+                next_upgrade_probe && now >= next_upgrade_probe) {
+                upgrade_token = ++token;
+                auto p = subscribe(client, upgrade_token, SubscriptionVersion::v3);
+                gate.issue(upgrade_token, now, SubscriptionVersion::v3);
+                if (!socket.send(p, pi))
+                    throw std::runtime_error("Pi UPT3 upgrade probe send failed");
+                upgrade_deadline = now + upgrade_response_ns;
+                next_upgrade_probe = 0;
             }
         }
         Address from;
@@ -483,45 +510,59 @@ void App::pi_loop() {
                            !std::memcmp(bytes.data(), "UPT3", 4))) {
                 const bool wire_v1 = !std::memcmp(bytes.data(), "UPT1", 4);
                 const bool wire_v3 = !std::memcmp(bytes.data(), "UPT3", 4);
-                const bool expected_wire = ((probe == Probe::v3 || probe == Probe::selected_v3) && wire_v3) ||
-                                           (probe == Probe::selected_v1 && wire_v1);
-                if (!expected_wire) {
+                auto parsed = parse_telemetry(Bytes(bytes.data(), size_t(n)));
+                const bool primary_wire =
+                    ((probe == Probe::initial_v3 || probe == Probe::selected_v3) && wire_v3) ||
+                    (probe == Probe::selected_v1 && wire_v1);
+                const bool optional_upgrade =
+                    parsed && probe == Probe::selected_v1 && wire_v3 && upgrade_token &&
+                    parsed->token == upgrade_token && now <= upgrade_deadline;
+                if (!parsed && primary_wire) {
+                    protocol_error = true;
+                    std::lock_guard lock(mutex_);
+                    ++stats_.telemetry_rejected;
+                    stats_.error = "Invalid Pi telemetry protocol";
+                    stats_.armed = false;
+                    ++epoch_;
+                    result_.reset();
+                } else if (!parsed || (!primary_wire && !optional_upgrade)) {
                     // UPT2 has incompatible 80-byte layouts with no discriminator. Never
-                    // infer which one an unsolicited packet uses; UPT3 is authoritative.
+                    // infer which one an unsolicited packet uses. Optional UPT3 upgrades
+                    // must echo the one currently outstanding version-bound probe token.
+                    std::lock_guard lock(mutex_);
+                    ++stats_.telemetry_rejected;
+                } else if (!gate.accept(Bytes(bytes.data(), size_t(n)), now)) {
                     std::lock_guard lock(mutex_);
                     ++stats_.telemetry_rejected;
                 } else {
-                    auto parsed = parse_telemetry(Bytes(bytes.data(), size_t(n)));
-                    if (!parsed) {
-                        protocol_error = true;
+                    if (probe == Probe::initial_v3 || optional_upgrade) {
+                        probe = Probe::selected_v3;
+                        renewal = 0;
+                        upgrade_token = 0;
+                        upgrade_deadline = 0;
+                        next_upgrade_probe = 0;
+                        upgrade_backoff = upgrade_backoff_min_ns;
+                        motion_tracker.reset();
+                    }
+                    const bool epoch_changed = injected_.observe_telemetry(gate.state);
+                    float window;
+                    {
                         std::lock_guard lock(mutex_);
-                        ++stats_.telemetry_rejected;
-                        stats_.error = "Invalid Pi telemetry protocol";
-                        stats_.armed = false;
-                        ++epoch_;
-                        result_.reset();
-                    } else if (!gate.accept(Bytes(bytes.data(), size_t(n)), now)) {
-                        std::lock_guard lock(mutex_);
-                        ++stats_.telemetry_rejected;
-                    } else {
-                        if (probe == Probe::v3)
-                            probe = Probe::selected_v3;
-                        const bool epoch_changed = injected_.observe_telemetry(gate.state);
-                        float window;
-                        {
-                            std::lock_guard lock(mutex_);
-                            window = settings_.direction.window_ms;
-                        }
-                        motion_tracker.observe(gate.state, now, window);
-                        had_input = true;
-                        if (epoch_changed) {
-                            probe = Probe::v3;
-                            probe_started = now;
-                            renewal = 0;
-                            gate.reset(client);
-                            motion_tracker.reset();
-                            had_input = false;
-                        }
+                        window = settings_.direction.window_ms;
+                    }
+                    motion_tracker.observe(gate.state, now, window);
+                    had_input = true;
+                    if (epoch_changed) {
+                        probe = Probe::initial_v3;
+                        probe_started = now;
+                        renewal = 0;
+                        gate.reset(client);
+                        motion_tracker.reset();
+                        had_input = false;
+                        upgrade_token = 0;
+                        upgrade_deadline = 0;
+                        next_upgrade_probe = 0;
+                        upgrade_backoff = upgrade_backoff_min_ns;
                     }
                 }
             } else if (n >= 4 && !std::memcmp(bytes.data(), "UPA1", 4)) {
@@ -540,7 +581,8 @@ void App::pi_loop() {
                 }
             } else {
                 std::string reply(reinterpret_cast<char*>(bytes.data()), size_t(n));
-                const bool expected_probe_error = probe == Probe::v3 &&
+                const bool expected_probe_error =
+                    (probe == Probe::initial_v3 || probe == Probe::selected_v1) &&
                     (reply.find("unknown") != std::string::npos ||
                      reply.find("unsupported") != std::string::npos ||
                      reply.find("invalid command") != std::string::npos);
@@ -557,6 +599,8 @@ void App::pi_loop() {
             }
         }
         const bool input_ok = input_fresh(now);
+        const bool peer_lost = !local_mouse && had_input && was_input_fresh && !input_ok;
+        const bool peer_recovered = !local_mouse && !was_input_fresh && input_ok;
         const auto seen = sender_seen_.load();
         const bool sender_ok = local_mouse || (seen && now >= seen && now - seen <= 100'000'000);
         bool have_error = false;
@@ -576,6 +620,27 @@ void App::pi_loop() {
         if (!shutdown_deadline && next_unsafe != ReleaseReason::none && next_unsafe != unsafe_reason)
             injected_.release_all(next_unsafe, true);
         unsafe_reason = next_unsafe;
+        if (!shutdown_deadline && peer_lost) {
+            // There is no healthy service to preserve now. Return to the short startup
+            // probe so a recovering/restarted peer gets an immediate UPT3 opportunity,
+            // then fall back to UPT1 again if it is still unavailable.
+            probe = Probe::initial_v3;
+            probe_started = now;
+            renewal = 0;
+            gate.reset(client);
+            motion_tracker.reset();
+            upgrade_token = 0;
+            upgrade_deadline = 0;
+            next_upgrade_probe = 0;
+            upgrade_backoff = upgrade_backoff_min_ns;
+        } else if (!shutdown_deadline && peer_recovered && probe == Probe::selected_v1 &&
+                   !upgrade_token) {
+            // A live UPT1 response proves the peer is back. Try UPT3 promptly without
+            // clearing the just-restored UPT1 state.
+            next_upgrade_probe = now;
+            upgrade_backoff = upgrade_backoff_min_ns;
+        }
+        was_input_fresh = input_ok;
 
         // Requests and snapshots use the same persistent socket. No state-manager mutex is
         // held across a socket operation, and ReleaseAll requests are always selected first.
@@ -654,7 +719,7 @@ void App::pi_loop() {
                         : !sender_ok          ? "Waiting for capture sender"
                         : !input_ok           ? "Waiting for fresh Pi telemetry"
                         : !stats_.armed       ? "Disarmed"
-                        : !motion_ok ? "Waiting for cumulative physical motion telemetry (UPT3 or legacy UPT2 required)"
+                        : !motion_ok ? "Waiting for cumulative physical motion telemetry (UPT3 required)"
                         : !active    ? "Armed - hold activation button"
                                      : "Active - waiting for fresh detection";
         if (!active || epoch_ != last_epoch) {

@@ -52,6 +52,26 @@ std::array<uint8_t, 56> status(uint64_t client, uint64_t token, uint32_t seq, ui
     put32(p.data() + 48, 127);
     return p;
 }
+std::array<uint8_t, 128> status3(uint64_t client, uint64_t token, uint32_t seq,
+                                 uint64_t server = 9) {
+    std::array<uint8_t, 128> p{};
+    std::memcpy(p.data(), "UPT3", 4);
+    p[4] = 1;
+    p[5] = 2;
+    put64(p.data() + 8, client);
+    put64(p.data() + 16, server);
+    put64(p.data() + 24, token);
+    put32(p.data() + 32, seq);
+    put32(p.data() + 36, uint32_t(-127));
+    put32(p.data() + 40, 127);
+    put32(p.data() + 44, uint32_t(-127));
+    put32(p.data() + 48, 127);
+    put32(p.data() + 52, 1000);
+    put64(p.data() + 56, 1);
+    put64(p.data() + 64, 1'000'000 + seq);
+    put32(p.data() + 88, 0xffffffff);
+    return p;
+}
 int main() {
     try {
         CHECK(newer(0, 0xffffffff));
@@ -178,6 +198,15 @@ int main() {
         CHECK(gate.accept(status(7, 102, 0, 10), 57'000'000));
         CHECK(gate.accept(status(7, 102, 1, 10, false), 58'000'000));
         CHECK(!gate.fresh(58'000'000));
+        // A token is bound to the requested telemetry version. Matching client/token
+        // values cannot turn an unsolicited packet into an in-place protocol upgrade.
+        gate.reset(7);
+        gate.issue(200, 60'000'000, SubscriptionVersion::v3);
+        CHECK(!gate.accept(status(7, 200, 0), 61'000'000));
+        CHECK(gate.accept(status3(7, 200, 0), 61'000'000));
+        gate.issue(201, 62'000'000, SubscriptionVersion::v1);
+        CHECK(!gate.accept(status3(7, 201, 1), 63'000'000));
+        CHECK(gate.accept(status(7, 201, 1), 63'000'000));
         Settings s;
         auto box = letterbox(320, 160, 320);
         CHECK(box.left == 0 && box.top == 80 && box.scale == 1);

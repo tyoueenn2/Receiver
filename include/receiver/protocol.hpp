@@ -159,17 +159,23 @@ struct ClickAck {
 std::array<uint8_t, 40> encode_click_request(const ClickCommand& command);
 std::optional<ClickAck> parse_click_ack(Bytes bytes);
 class TelemetryGate {
+    struct IssuedToken {
+        uint64_t token = 0;
+        int64_t time = 0;
+        SubscriptionVersion version = SubscriptionVersion::v1;
+    };
     uint64_t client_ = 0, server_ = 0;
     uint32_t sequence_ = 0;
     bool have_ = false;
     int64_t received_ = 0, issued_ = 0;
-    std::array<std::pair<uint64_t, int64_t>, 8> tokens_{};
+    std::array<IssuedToken, 8> tokens_{};
     size_t next_ = 0;
 
   public:
     Telemetry state;
     void reset(uint64_t client);
-    void issue(uint64_t token, int64_t time);
+    void issue(uint64_t token, int64_t time,
+               SubscriptionVersion version = SubscriptionVersion::v1);
     bool accept(Bytes bytes, int64_t time);
     bool fresh(int64_t time) const;
 };

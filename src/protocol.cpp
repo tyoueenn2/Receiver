@@ -309,17 +309,25 @@ void TelemetryGate::reset(uint64_t c) {
     next_ = 0;
     state = {};
 }
-void TelemetryGate::issue(uint64_t token, int64_t time) {
-    tokens_[next_++ % tokens_.size()] = {token, time};
+void TelemetryGate::issue(uint64_t token, int64_t time, SubscriptionVersion version) {
+    tokens_[next_++ % tokens_.size()] = {token, time, version};
 }
 bool TelemetryGate::accept(Bytes p, int64_t time) {
     auto t = parse_telemetry(p);
     if (!t || t->client != client_)
         return false;
+    const auto expected_version = t->kind == Telemetry::Kind::upt3
+                                      ? SubscriptionVersion::v3
+                                  : t->kind == Telemetry::Kind::upt2_public ||
+                                            t->kind == Telemetry::Kind::upt2_legacy
+                                      ? SubscriptionVersion::v2
+                                      : SubscriptionVersion::v1;
     int64_t issued = 0;
-    for (auto [token, at] : tokens_)
-        if (token && token == t->token && time >= at && time - at <= 50'000'000)
-            issued = at;
+    for (const auto& candidate : tokens_)
+        if (candidate.token && candidate.token == t->token &&
+            candidate.version == expected_version && time >= candidate.time &&
+            time - candidate.time <= 50'000'000)
+            issued = candidate.time;
     if (!issued || issued < issued_)
         return false;
     if (have_ && t->server == server_ && !newer(t->sequence, sequence_))

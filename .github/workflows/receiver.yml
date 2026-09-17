@@ -16,6 +16,7 @@ jobs:
       - run: ctest --preset windows-tests
       - run: python tests/integration_test.py build/tests/Release/receiver_headless.exe
       - run: python tests/direction_integration_test.py build/tests/Release/receiver_headless.exe
+      - run: python tests/telemetry_recovery_test.py build/tests/Release/receiver_headless.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows-test-build-no-tensorrt

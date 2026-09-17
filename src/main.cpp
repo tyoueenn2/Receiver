@@ -80,7 +80,8 @@ int main(int argc, char** argv) {
                 app.button_down(hold_button);
                 hold_sent = true;
             }
-            if (arm && s.pi_ready && s.synchronized && !click_sent && click.button) {
+            if (arm && s.pi_ready && s.synchronized && s.injection.has_upt3 &&
+                s.injection.endpoint_poll_us && !click_sent && click.button) {
                 app.click(click.button, uint32_t(click.count), std::chrono::milliseconds(click.press_ms),
                           std::chrono::milliseconds(click.interval_ms));
                 click_sent = true;

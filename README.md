@@ -66,6 +66,7 @@ cmake --preset windows-tests
 cmake --build --preset windows-tests
 ctest --preset windows-tests
 py tests/integration_test.py build/tests/Release/receiver_headless.exe
+py tests/telemetry_recovery_test.py build/tests/Release/receiver_headless.exe
 ```
 
 The headless networking/control code also has POSIX socket support for tests; the production GPU backend and GUI are Windows targets. Linux test configure: `cmake -S . -B build/tests -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF`.
@@ -82,7 +83,7 @@ The headless networking/control code also has POSIX socket support for tests; th
 
 The application sends **relative HID counts**, not absolute cursor coordinates. Tune X/Y gain against the target application's sensitivity. The default reference is the capture center, so a centered screen crop is the natural sender configuration. A different reference can be set in capture pixels. Input/model changes require restart; detection/control changes apply between frames and invalidate pending corrections.
 
-Receiver probes UPT3 first and explicitly falls back to UPT1. Full click scheduling and direction assistance require UPT3. Canonical 80-byte and legacy 88-byte UPT2 decoders remain regression-tested, but UPT2 is not auto-negotiated because the audited proxy has a conflicting same-size 80-byte layout that cannot be safely identified from all packet values. Physical UPT1/UPT2/UPT3 buttons are never copied or ORed into Receiver's persistent mask because the Pi merges physical, persistent, and scheduled state independently.
+Receiver probes UPT3 first and explicitly falls back to UPT1. While UPT1 remains usable, bounded background probes retry UPT3 with version-bound tokens; a valid upgrade restores direction assistance and click endpoint timing without restarting Receiver. Peer recovery accelerates a probe, and peer loss returns to the short startup probe without changing the persistent UDP source endpoint. Full click scheduling and direction assistance require UPT3. Canonical 80-byte and legacy 88-byte UPT2 decoders remain regression-tested, but UPT2 is not auto-negotiated because the audited proxy has a conflicting same-size 80-byte layout that cannot be safely identified from all packet values. Physical UPT1/UPT2/UPT3 buttons are never copied or ORed into Receiver's persistent mask because the Pi merges physical, persistent, and scheduled state independently.
 
 The C++ `App` API exposes `button_down`, `button_up`, `set_button`, `release_all`, scoped `hold`, and nonblocking `click`. The public click API uses `uint32_t` counts and `std::chrono::microseconds`; CLI values remain milliseconds and are converted safely. Persistent state changes send even with zero motion, every movement repeats the complete mask, and a nonzero mask receives a 75 ms heartbeat. The headless executable exposes `--hold-button`, `--release-after-ms`, and `--click BUTTON COUNT PRESS_MS INTERVAL_MS` for controlled integration testing. A click is queued locally without sleeping in inference or control; the Pi schedules its press/release reports under the idempotent 40/48-byte UPC1/UPA1 v2 protocol.
 
