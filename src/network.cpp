@@ -7,9 +7,11 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <cerrno>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/random.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -117,17 +119,27 @@ ControlWake::ControlWake() {
     event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!event_)
         throw std::runtime_error("Control event creation failed");
+#else
+    event_ = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (event_ < 0)
+        throw std::runtime_error("Control event creation failed");
 #endif
 }
 ControlWake::~ControlWake() {
 #ifdef _WIN32
     if (event_)
         CloseHandle(event_);
+#else
+    if (event_ >= 0)
+        close(event_);
 #endif
 }
 void ControlWake::notify() noexcept {
 #ifdef _WIN32
     SetEvent(event_);
+#else
+    const uint64_t value = 1;
+    (void)write(event_, &value, sizeof(value));
 #endif
 }
 void ControlWake::wait(UdpSocket* socket, bool mouse_messages) {
@@ -156,8 +168,24 @@ void ControlWake::wait(UdpSocket* socket, bool mouse_messages) {
             throw std::runtime_error("Control socket read failed");
     }
 #else
-    (void)socket;
     (void)mouse_messages;
+    pollfd events[2] = {{event_, POLLIN, 0}, {-1, POLLIN, 0}};
+    nfds_t count = 1;
+    if (socket) {
+        events[count].fd = Native(socket->socket_);
+        ++count;
+    }
+    int result;
+    do {
+        result = poll(events, count, 10);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0)
+        throw std::runtime_error("Control event wait failed");
+    if (events[0].revents & POLLIN) {
+        uint64_t value = 0;
+        while (read(event_, &value, sizeof(value)) == static_cast<ssize_t>(sizeof(value))) {
+        }
+    }
 #endif
 }
 uint64_t random_id() {

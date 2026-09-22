@@ -1,9 +1,22 @@
-name: Windows receiver checks
+name: Receiver checks
 on:
   push:
   pull_request:
   workflow_dispatch:
 jobs:
+  linux-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: cmake --preset linux-tests
+      - run: cmake --build --preset linux-tests
+      - run: ctest --preset linux-tests
+      - run: python tests/integration_test.py build/linux-tests/receiver_headless
+      - run: python tests/direction_integration_test.py build/linux-tests/receiver_headless
+      - run: python tests/telemetry_recovery_test.py build/linux-tests/receiver_headless
   windows-tests:
     runs-on: windows-2022
     steps:

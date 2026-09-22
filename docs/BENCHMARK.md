@@ -44,7 +44,7 @@ Memory must remain bounded under sustained overload. Frame loss must not produce
 
 Completed detection results now signal the movement worker directly. The same worker wakes for Pi socket input or local Windows mouse messages. Stop, failure, activation and configuration changes also notify it. The 10 ms timeout is only for housekeeping when no event arrives; fresh detections do not wait for that timeout. Latest-result replacement and stale-input gating remain unchanged. The POSIX test path retains its existing socket polling.
 
-This uses [Windows socket events](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaeventselect), acknowledged with WSAEnumNetworkEvents, and an auto-reset result notification. A new **inference_to_control** metric measures completed postprocessing through movement-worker handoff, including publication and lock/scheduler delay. Its GUI label is **Wake movement worker**. It is sampled for eligible new results while active; zero samples mean unavailable, not zero latency.
+On Windows this uses [Windows socket events](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaeventselect), acknowledged with WSAEnumNetworkEvents, and an auto-reset result notification. Linux headless builds use `eventfd` plus `poll` for the same inference/socket wake behavior. A new **inference_to_control** metric measures completed postprocessing through movement-worker handoff, including publication and lock/scheduler delay. Its GUI label is **Wake movement worker**. It is sampled for eligible new results while active; zero samples mean unavailable, not zero latency.
 
 ### Local before/after measurement, 2026-09-10
 

@@ -1,5 +1,6 @@
 #pragma once
 #include "control.hpp"
+#include <functional>
 #include <memory>
 namespace receiver {
 struct Inference {
@@ -16,5 +17,7 @@ class Backend {
         return {};
     }
 };
-std::unique_ptr<Backend> make_backend(const Settings& settings);
+using BackendProgress = std::function<void(const std::string&)>;
+std::unique_ptr<Backend> make_backend(const Settings& settings,
+                                      const BackendProgress& progress = {});
 } // namespace receiver

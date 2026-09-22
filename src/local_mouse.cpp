@@ -168,16 +168,6 @@ LocalMouse::LocalMouse() {
     throw std::runtime_error("Local mouse testing requires Windows");
 }
 LocalMouse::~LocalMouse() = default;
-void LocalMouse::wait() {
-    LARGE_INTEGER due;
-    due.QuadPart = -10000; // One millisecond, relative.
-    if (!SetWaitableTimer(impl_->timer, &due, 0, nullptr, nullptr, FALSE))
-        throw std::runtime_error("Windows local mouse timer failed");
-    // Pump input promptly even while waiting for the next control update.
-    if (MsgWaitForMultipleObjectsEx(1, &impl_->timer, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE) ==
-        WAIT_FAILED)
-        throw std::runtime_error("Windows local mouse wait failed");
-}
 void LocalMouse::wait() {}
 Telemetry LocalMouse::poll() {
     return {};
