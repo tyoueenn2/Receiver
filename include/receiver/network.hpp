@@ -21,9 +21,13 @@ class UdpSocket {
     int receive(std::span<uint8_t> buffer, Address& from, int timeout_ms);
     bool send(Bytes data, const Address& to);
 };
-// Windows event-driven control wake: new inference, socket input, or mouse messages.
+// Event-driven control wake: new inference, socket input, or local mouse messages.
 class ControlWake {
+#ifdef _WIN32
     void* event_ = nullptr;
+#else
+    int event_ = -1;
+#endif
 
   public:
     ControlWake();

@@ -314,7 +314,10 @@ void App::inference_loop() {
     }
     std::unique_ptr<Backend> backend;
     if (!simulated_)
-        backend = make_backend(initial);
+        backend = make_backend(initial, [this](const std::string& status) {
+            std::lock_guard lock(mutex_);
+            stats_.backend = status;
+        });
     {
         std::lock_guard lock(mutex_);
         stats_.backend =

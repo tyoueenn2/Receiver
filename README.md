@@ -1,8 +1,8 @@
 # UDP Vision Receiver
 
-C++20 / Windows 11 receiver for raw UDP frames, YOLO11 TensorRT inference, and relative mouse commands to a Raspberry Pi USB proxy. Includes a Dear ImGui/DirectX 11 GUI, a headless runner, a synthetic sender, and a loopback-only Pi simulator.
+C++20 receiver for raw UDP frames, YOLO11 TensorRT inference, and relative mouse commands to a Raspberry Pi USB proxy. The production headless runner supports Linux and Windows; the optional Dear ImGui/DirectX 11 GUI and local-mouse test backend remain Windows-only. A synthetic sender and loopback-only Pi simulator are included.
 
-**Delivery status:** the default Windows builds and CI artifacts are **test builds without TensorRT**. They support the GUI, network pipeline, and explicit simulation mode. The production TensorRT backend is implemented in source. Build it on the RTX 3060 Ti PC using the instructions below. See [validation results](docs/VALIDATION.md) for exactly what has been tested.
+**Delivery status:** the default CI builds are **test builds without TensorRT**. They exercise the Windows GUI plus the Linux and Windows headless network/control paths in explicit simulation mode. The production TensorRT 10 backend is implemented for both operating systems and requires a local CUDA/TensorRT installation. See [validation results](docs/VALIDATION.md) for exactly what has been tested on deployment hardware.
 
 The exported sample `models/yolo11n.onnx` and its manifest are included in this directory. This is the standard COCO detection model, not a model trained for a particular application. Real desktop capture on the target PC is intentionally outside this first delivery.
 
@@ -40,7 +40,25 @@ For a source build, executables are under `build/tests/Release/` instead. The mo
 
 For manual GUI startup, run `receiver.exe`, choose **Practice on this computer**, then **Start practice** while the two test peers are running. Test builds default to practice mode; production GPU builds also offer a two-computer setup.
 
-## Production build on the RTX 3060 Ti PC
+## Headless operation and logging
+
+The headless executable logs lifecycle changes and a status summary every second by default. It writes normal logs to standard output and errors to standard error, making it suitable for a terminal, systemd, or another service supervisor.
+
+- `--log-level quiet|error|info|debug|trace` controls detail. `info` is the default; `debug` adds network, output, retry, and drop counters; `trace` also adds latency percentiles, clock uncertainty, control strength, and GPU memory.
+- `--log-interval-ms N` changes the periodic summary interval from its 1000 ms default. Use `0` to disable periodic summaries while retaining lifecycle and action messages.
+- `--quiet`, `--verbose`, and `--trace` are shortcuts for quiet, debug, and trace logging.
+- `--seconds 0` runs until SIGINT or SIGTERM. A graceful stop releases synthetic input and writes the metrics file selected by `--metrics`.
+
+For example:
+
+```bash
+./build/linux-cuda/receiver_headless --profile profiles/yolo11n.json --arm --seconds 0 \
+  --log-level debug --log-interval-ms 500 --metrics receiver.csv
+```
+
+## Production TensorRT build
+
+### Windows
 
 Use Windows 11 x64, Visual Studio 2022 with the Desktop development with C++ workload and a Windows SDK, CMake 3.24+, Git, **CUDA Toolkit 12.9**, and the **TensorRT 10.13 Windows x64 CUDA 12 SDK**. Use an NVIDIA driver supported by that CUDA version. This backend deliberately targets TensorRT **10.x**; TensorRT 11's precision/export API is different and is rejected at compile time.
 
@@ -59,6 +77,20 @@ ctest --preset windows-cuda
 
 Set `TENSORRT_ROOT` to your actual extracted SDK directory containing `include` and `lib`. CUDA kernels target SM 8.6, the RTX 3060 Ti architecture. CMake fetches pinned Dear ImGui 1.92.1 and nlohmann/json 3.12.0 sources; subsequent builds can run offline.
 
+### Linux headless
+
+Install a C++20 compiler, CMake 3.24+, Ninja, OpenSSL development headers, an NVIDIA driver, CUDA Toolkit, and TensorRT 10.x with its ONNX parser. TensorRT may be installed system-wide or extracted beneath a custom `TENSORRT_ROOT`. Then run:
+
+```bash
+export TENSORRT_ROOT=/path/to/TensorRT-10.x
+cmake --preset linux-cuda
+cmake --build --preset linux-cuda
+ctest --preset linux-cuda
+./build/linux-cuda/receiver_headless --profile profiles/yolo11n.json --arm --seconds 0
+```
+
+The default CUDA architecture is SM 8.6 for the planned RTX 3060 Ti. Override it at configure time for another supported NVIDIA GPU, for example `cmake --preset linux-cuda -DRECEIVER_CUDA_ARCHITECTURES=89`. The Linux executable uses the Raspberry Pi UDP backend; the DirectX GUI and local Windows mouse backend are not built.
+
 For a build without GPU dependencies:
 
 ```powershell
@@ -69,7 +101,16 @@ py tests/integration_test.py build/tests/Release/receiver_headless.exe
 py tests/telemetry_recovery_test.py build/tests/Release/receiver_headless.exe
 ```
 
-The headless networking/control code also has POSIX socket support for tests; the production GPU backend and GUI are Windows targets. Linux test configure: `cmake -S . -B build/tests -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF`.
+For a Linux build without GPU dependencies:
+
+```bash
+cmake --preset linux-tests
+cmake --build --preset linux-tests
+ctest --preset linux-tests
+python3 tests/integration_test.py build/linux-tests/receiver_headless
+python3 tests/direction_integration_test.py build/linux-tests/receiver_headless
+python3 tests/telemetry_recovery_test.py build/linux-tests/receiver_headless
+```
 
 ## Connect the real system
 
@@ -85,7 +126,7 @@ The application sends **relative HID counts**, not absolute cursor coordinates. 
 
 Receiver probes UPT3 first and explicitly falls back to UPT1. While UPT1 remains usable, bounded background probes retry UPT3 with version-bound tokens; a valid upgrade restores direction assistance and click endpoint timing without restarting Receiver. Peer recovery accelerates a probe, and peer loss returns to the short startup probe without changing the persistent UDP source endpoint. Full click scheduling and direction assistance require UPT3. Canonical 80-byte and legacy 88-byte UPT2 decoders remain regression-tested, but UPT2 is not auto-negotiated because the audited proxy has a conflicting same-size 80-byte layout that cannot be safely identified from all packet values. Physical UPT1/UPT2/UPT3 buttons are never copied or ORed into Receiver's persistent mask because the Pi merges physical, persistent, and scheduled state independently.
 
-The C++ `App` API exposes `button_down`, `button_up`, `set_button`, `release_all`, scoped `hold`, and nonblocking `click`. The public click API uses `uint32_t` counts and `std::chrono::microseconds`; CLI values remain milliseconds and are converted safely. Persistent state changes send even with zero motion, every movement repeats the complete mask, and a nonzero mask receives a 75 ms heartbeat. The headless executable exposes `--hold-button`, `--release-after-ms`, and `--click BUTTON COUNT PRESS_MS INTERVAL_MS` for controlled integration testing. A click is queued locally without sleeping in inference or control; the Pi schedules its press/release reports under the idempotent 40/48-byte UPC1/UPA1 v2 protocol.
+The C++ `App` API exposes `button_down`, `button_up`, `set_button`, `release_all`, scoped `hold`, and nonblocking `click`. The public click API uses `uint32_t` counts and `std::chrono::microseconds`; CLI values remain milliseconds and are converted safely. Persistent state changes send even with zero motion, every movement repeats the complete mask, and a nonzero mask receives a 75 ms heartbeat. The headless executable exposes `--hold-button`, `--release-after-ms`, and `--click BUTTON COUNT PRESS_MS INTERVAL_MS` for controlled integration testing. When combined with `--hold-button`, the release delay starts when the hold is established, after Pi discovery and clock synchronization. A click is queued locally without sleeping in inference or control; the Pi schedules its press/release reports under the idempotent 40/48-byte UPC1/UPA1 v2 protocol.
 
 ## Model export and validation
 

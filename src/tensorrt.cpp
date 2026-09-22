@@ -1,8 +1,12 @@
 #include "receiver/backend.hpp"
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include <openssl/evp.h>
+#endif
 #include <cuda_runtime.h>
 #include <filesystem>
 #include <fstream>
@@ -39,10 +43,11 @@ class Log final : public nvinfer1::ILogger {
     }
 };
 std::string sha256(std::span<const uint8_t> data) {
+    std::array<uint8_t, 32> digest{};
+#ifdef _WIN32
     BCRYPT_ALG_HANDLE alg = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
     DWORD object_size = 0, returned = 0;
-    std::array<uint8_t, 32> digest{};
     auto check = [](NTSTATUS s) {
         if (s < 0)
             throw std::runtime_error("SHA-256 failed");
@@ -68,6 +73,18 @@ std::string sha256(std::span<const uint8_t> data) {
         throw;
     }
     BCryptCloseAlgorithmProvider(alg, 0);
+#else
+    auto* raw = EVP_MD_CTX_new();
+    if (!raw)
+        throw std::runtime_error("SHA-256 context creation failed");
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(raw, &EVP_MD_CTX_free);
+    unsigned int length = 0;
+    if (EVP_DigestInit_ex(context.get(), EVP_sha256(), nullptr) != 1 ||
+        EVP_DigestUpdate(context.get(), data.data(), data.size()) != 1 ||
+        EVP_DigestFinal_ex(context.get(), digest.data(), &length) != 1 ||
+        length != static_cast<unsigned int>(digest.size()))
+        throw std::runtime_error("SHA-256 failed");
+#endif
     std::ostringstream out;
     for (auto v : digest)
         out << std::hex << std::setw(2) << std::setfill('0') << int(v);
@@ -123,9 +140,9 @@ class TrtBackend final : public Backend {
     }
 
   public:
-    explicit TrtBackend(const Settings& s) {
+    explicit TrtBackend(const Settings& s, const BackendProgress& progress) {
         try {
-            initialize(s);
+            initialize(s, progress);
         } catch (...) {
             cleanup();
             throw;
@@ -142,13 +159,19 @@ class TrtBackend final : public Backend {
         checked(cudaMemGetInfo(&free, &total));
         return {free, total};
     }
-    void initialize(const Settings& s) {
+    void initialize(const Settings& s, const BackendProgress& progress) {
+        auto report = [&](const std::string& message) {
+            if (progress)
+                progress(message);
+        };
+        report("TensorRT: inspecting CUDA device");
         size_ = s.input_size;
         checked(cudaSetDevice(0));
         cudaDeviceProp props{};
         checked(cudaGetDeviceProperties(&props, 0));
         if (props.major < 7)
             throw std::runtime_error("TensorRT FP16 deployment requires a supported NVIDIA GPU");
+        report("TensorRT: reading and verifying model");
         auto model = read_file(s.model);
         auto hash = sha256(model);
         const auto metadata = s.metadata.empty() ? s.model + ".json" : s.metadata;
@@ -180,10 +203,12 @@ class TrtBackend final : public Backend {
         if (!runtime_)
             throw std::runtime_error("TensorRT runtime creation failed: " + log_.message());
         if (std::filesystem::exists(cache)) {
+            report("TensorRT: loading cached engine");
             auto data = read_file(cache);
             engine_.reset(runtime_->deserializeCudaEngine(data.data(), data.size()));
         }
         if (!engine_) {
+            report("TensorRT: parsing ONNX model");
             std::unique_ptr<nvinfer1::IBuilder> builder(nvinfer1::createInferBuilder(log_));
             if (!builder)
                 throw std::runtime_error("TensorRT builder failed");
@@ -224,6 +249,7 @@ class TrtBackend final : public Backend {
                 if (config->addOptimizationProfile(profile) < 0)
                     throw std::runtime_error("Invalid TensorRT profile");
             }
+            report("TensorRT: building FP16 engine");
             std::unique_ptr<nvinfer1::IHostMemory> serialized(
                 builder->buildSerializedNetwork(*network, *config));
             if (!serialized)
@@ -233,6 +259,7 @@ class TrtBackend final : public Backend {
                 throw std::runtime_error("Engine deserialization failed");
             auto tmp = cache;
             tmp += ".tmp";
+            report("TensorRT: caching engine");
             {
                 std::ofstream f(tmp, std::ios::binary);
                 f.write(static_cast<const char*>(serialized->data()), std::streamsize(serialized->size()));
@@ -264,6 +291,7 @@ class TrtBackend final : public Backend {
             throw std::runtime_error("Unsupported raw YOLO output shape");
         count_ = int(out.d[2]);
         output_count_ = size_t(classes_ + 4) * count_;
+        report("TensorRT: allocating CUDA buffers");
         checked(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking));
         for (auto* e : {&begin_, &prepared_, &inferred_, &done_})
             checked(cudaEventCreate(e));
@@ -277,6 +305,7 @@ class TrtBackend final : public Backend {
             throw std::runtime_error("Cannot bind TensorRT tensors");
         description_ = "TensorRT FP16 / " + std::string(props.name) + " / " + std::to_string(size_) + "x" +
                        std::to_string(size_);
+        report("TensorRT: warming engine");
         checked(cudaMemsetAsync(input_, 0, size_t(3) * size_ * size_ * sizeof(float), stream_));
         for (int i = 0; i < 10; ++i)
             if (!context_->enqueueV3(stream_))
@@ -309,7 +338,7 @@ class TrtBackend final : public Backend {
         return {{host_output_, output_count_}, count_, classes_, host_copy_ms + upload + download, infer};
     }
 };
-std::unique_ptr<Backend> make_backend(const Settings& settings) {
-    return std::make_unique<TrtBackend>(settings);
+std::unique_ptr<Backend> make_backend(const Settings& settings, const BackendProgress& progress) {
+    return std::make_unique<TrtBackend>(settings, progress);
 }
 } // namespace receiver

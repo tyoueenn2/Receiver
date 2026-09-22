@@ -1,9 +1,105 @@
 {
   "version": 6,
   "configurePresets": [
-    {"name":"windows-tests","generator":"Visual Studio 17 2022","architecture":"x64","binaryDir":"${sourceDir}/build/tests","cacheVariables":{"RECEIVER_TENSORRT":"OFF","RECEIVER_GUI":"ON"}},
-    {"name":"windows-cuda","inherits":"windows-tests","binaryDir":"${sourceDir}/build/cuda","cacheVariables":{"RECEIVER_TENSORRT":"ON","TENSORRT_ROOT":"$env{TENSORRT_ROOT}"}}
+    {
+      "name": "windows-tests",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/tests",
+      "cacheVariables": {
+        "RECEIVER_TENSORRT": "OFF",
+        "RECEIVER_GUI": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-cuda",
+      "inherits": "windows-tests",
+      "binaryDir": "${sourceDir}/build/cuda",
+      "cacheVariables": {
+        "RECEIVER_TENSORRT": "ON",
+        "TENSORRT_ROOT": "$env{TENSORRT_ROOT}"
+      }
+    },
+    {
+      "name": "linux-tests",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-tests",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "RECEIVER_TENSORRT": "OFF",
+        "RECEIVER_GUI": "OFF"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-cuda",
+      "inherits": "linux-tests",
+      "binaryDir": "${sourceDir}/build/linux-cuda",
+      "cacheVariables": {
+        "RECEIVER_TENSORRT": "ON",
+        "TENSORRT_ROOT": "$env{TENSORRT_ROOT}"
+      }
+    }
   ],
-  "buildPresets":[{"name":"windows-tests","configurePreset":"windows-tests","configuration":"Release"},{"name":"windows-cuda","configurePreset":"windows-cuda","configuration":"Release"}],
-  "testPresets":[{"name":"windows-tests","configurePreset":"windows-tests","configuration":"Release","output":{"outputOnFailure":true}},{"name":"windows-cuda","configurePreset":"windows-cuda","configuration":"Release","output":{"outputOnFailure":true}}]
+  "buildPresets": [
+    {
+      "name": "windows-tests",
+      "configurePreset": "windows-tests",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-cuda",
+      "configurePreset": "windows-cuda",
+      "configuration": "Release"
+    },
+    {
+      "name": "linux-tests",
+      "configurePreset": "linux-tests"
+    },
+    {
+      "name": "linux-cuda",
+      "configurePreset": "linux-cuda"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-tests",
+      "configurePreset": "windows-tests",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-cuda",
+      "configurePreset": "windows-cuda",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-tests",
+      "configurePreset": "linux-tests",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-cuda",
+      "configurePreset": "linux-cuda",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
 }

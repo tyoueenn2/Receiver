@@ -42,6 +42,12 @@ def stop(process, sender, pi=None):
         pi.stop()
 
 
+def assert_no_active_output(pi):
+    assert all(not command['dx'] and not command['dy'] and not command['buttons']
+               for command in pi.commands), 'Direction or held-button output escaped the safety gate'
+    assert not pi.click_requests, 'A click was scheduled before UPT3 capability was established'
+
+
 def late_pi(executable):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -85,7 +91,7 @@ def lost_initial_upt3(executable):
         try:
             wait_for(lambda: b'UPS1' in pi.subscription_versions,
                      'Receiver did not fall back after lost initial UPT3 responses')
-            assert not pi.commands and not pi.click_requests
+            assert_no_active_output(pi)
             pi.upt3_packets_to_drop = 0
             wait_for(lambda: len(pi.commands) > 5,
                      'Direction assistance did not recover after UPT3 response loss')
@@ -113,7 +119,7 @@ def late_upt3(executable):
             wait_for(lambda: b'UPS1' in pi.subscription_versions,
                      'Receiver did not establish UPT1 fallback')
             time.sleep(.25)
-            assert not pi.commands and not pi.click_requests
+            assert_no_active_output(pi)
             pi.upt3_enabled = True
             wait_for(lambda: len(pi.commands) > 5,
                      'Direction assistance did not upgrade when UPT3 became available')
@@ -179,7 +185,7 @@ def delayed_restart_and_loss(executable):
             pi.upt3_delay_s = .12
             pi.upt3_enabled = True
             wait_for(lambda: bool(pi.delayed_telemetry), 'No delayed UPT3 response was captured')
-            assert not pi.commands and not pi.click_requests
+            assert_no_active_output(pi)
 
             # Restart the peer after it formed the delayed old-epoch response. New
             # telemetry must establish the new epoch; the old response must not upgrade it.

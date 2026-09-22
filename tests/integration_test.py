@@ -44,6 +44,11 @@ def wait_until_quiet(items, description, settle=.15, timeout=.75):
 
 def main():
     p = argparse.ArgumentParser(); p.add_argument('executable'); a = p.parse_args()
+    help_result = subprocess.run([a.executable, '--help'], capture_output=True, text=True, timeout=5)
+    assert help_result.returncode == 0, help_result.stdout + help_result.stderr
+    assert '--log-level quiet|error|info|debug|trace' in help_result.stdout
+    assert '--log-interval-ms N' in help_result.stdout
+    assert '--seconds 0' in help_result.stdout
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp); frame_port, pi_port = free_port(), free_port()
         cfg = dict(version=1, frame_port=frame_port, pi_port=pi_port, sender_ip='127.0.0.1', pi_ip='127.0.0.1')
@@ -51,7 +56,9 @@ def main():
         metrics = tmp / 'metrics.csv'
         pi = MockPi(pi_port).start()
         sender = Sender(port=frame_port, width=160, height=160, fps=120, duplicate=.1, reorder=True, clock_offset_ms=-1500).start()
-        process = subprocess.Popen([a.executable, '--profile', str(profile), '--simulate', '--arm', '--seconds', '8', '--metrics', str(metrics)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        process = subprocess.Popen([a.executable, '--profile', str(profile), '--simulate', '--arm',
+            '--seconds', '8', '--metrics', str(metrics), '--log-level', 'debug',
+            '--log-interval-ms', '500'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
             try:
                 wait_for(lambda: len(pi.commands) >= 10, 'No active corrections received')
@@ -81,6 +88,8 @@ def main():
             output = process.communicate(timeout=10)[0]
             assert process.returncode == 0 or (process.returncode == 1 and 'Pi: error not50' in output), output
             assert metrics.exists() and 'receiver_to_submission' in metrics.read_text()
+            assert 'DEBUG network packets=' in output
+            assert 'DEBUG output synthetic_snapshots=' in output
             print(output); print(f'Integration passed: {len(pi.commands)} commands, release, frame stall, telemetry expiry, old capture, restart, BGRA, readiness.')
         finally:
             if process.poll() is None:
@@ -89,8 +98,10 @@ def main():
         # Default disarmed operation must never produce movement.
         pi = MockPi(pi_port).start(); sender = Sender(port=frame_port, width=160, height=160).start()
         try:
-            result = subprocess.run([a.executable, '--profile', str(profile), '--simulate', '--seconds', '1', '--metrics', str(metrics)], capture_output=True, text=True, timeout=5)
+            result = subprocess.run([a.executable, '--profile', str(profile), '--simulate', '--seconds',
+                '1', '--metrics', str(metrics), '--quiet'], capture_output=True, text=True, timeout=5)
             assert result.returncode == 0, result.stdout + result.stderr
+            assert not result.stdout and not result.stderr, 'Quiet logging emitted output'
             assert pi.commands and all(not c['dx'] and not c['dy'] and not c['buttons'] for c in pi.commands), \
                 'Default-disarmed run may emit only fail-safe shutdown release snapshots'
         finally:
@@ -100,12 +111,16 @@ def main():
         # Persistent synthetic state is independent of physical telemetry and survives movement.
         pi = MockPi(pi_port).start(); sender = Sender(port=frame_port, width=160, height=160).start()
         pi.release_cancel_count = 1
+        pi.telemetry_enabled = False
         synthetic_metrics = tmp / 'synthetic-metrics.csv'
         process = subprocess.Popen([a.executable, '--profile', str(profile), '--simulate', '--arm',
             '--seconds', '4', '--metrics', str(synthetic_metrics), '--hold-button', '1',
-            '--release-after-ms', '2500', '--click', '3', '2', '10', '15'], stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True)
+            '--release-after-ms', '500', '--click', '3', '2', '10', '15', '--trace',
+            '--log-interval-ms', '500'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         try:
+            # Discovery delay must not consume the requested hold duration.
+            time.sleep(.75)
+            pi.telemetry_enabled = True
             wait_for(lambda: any(c['buttons'] == 1 for c in pi.commands), 'Zero-motion synthetic press missing')
             wait_for(lambda: any(c['buttons'] == 1 and c['dx'] for c in pi.commands),
                      'Movement did not preserve synthetic hold')
@@ -128,6 +143,11 @@ def main():
             assert len(heartbeats) >= 3, 'Periodic zero-motion hold heartbeats missing'
             assert any(.04 <= b - a <= .18 for a, b in zip(heartbeats, heartbeats[1:])), \
                 'Hold heartbeat interval was outside the platform-safe 75 ms scheduling tolerance'
+            pressed_at = next(t['time'] for t in pi.transitions if t['persistent'] == 1)
+            released_at = next(t['time'] for t in pi.transitions
+                               if t['persistent'] == 0 and t['time'] > pressed_at)
+            assert .35 <= released_at - pressed_at <= 1.25, \
+                'Release delay was not measured from the established hold'
             assert any(not c['buttons'] and not c['dx'] and not c['dy'] for c in pi.commands), \
                 'Zero-motion release missing'
             assert pi.commands[-1]['buttons'] == 0, 'Synthetic button remained held after shutdown'
@@ -139,6 +159,7 @@ def main():
             assert '# persistent_injected_mask,0' in report
             assert '# last_release_reason,shutdown' in report
             assert '# release_all_terminal_cancellations_superseded,1' in report
+            assert 'TRACE latency_ms reassembly_p95=' in output
             assert len(pi.release_requests) >= 2
             assert pi.release_requests[1]['client'] == pi.release_requests[0]['client']
             assert pi.release_requests[1]['command'] > pi.release_requests[0]['command']
