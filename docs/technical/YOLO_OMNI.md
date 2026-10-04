@@ -48,8 +48,9 @@ Linux uses the same options with its executable and interpreter paths. Use
 `--backend yolo_omni` or `--backend tensorrt` to override Auto. A conflicting file
 format is rejected with an explanation. The resolved runtime appears in the GUI
 and headless status. Class names are read from the native checkpoint after loading;
-`.pt` models do not need an ONNX manifest. Stop before changing models, runtimes,
-source folders or devices. `omni_worker` defaults to `tools/yolo_omni_worker.py`
+`.pt` models do not need an ONNX manifest. Model, runtime, source-folder and device
+changes use the [hot reload workflow](MODEL_WORKFLOWS.md), which turns movement off
+and restores the previous model if loading fails. `omni_worker` defaults to `tools/yolo_omni_worker.py`
 relative to the working directory and can be set to an absolute path in a profile.
 
 ## Contract and timing

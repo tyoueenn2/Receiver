@@ -1,187 +1,41 @@
-# UDP Vision Receiver
+# Receiver
 
-**YOLO-Omni:** native `.pt` detection models now use a persistent PyTorch backend.
-The default **Auto** selects PyTorch for `.pt` and TensorRT for `.onnx`/`.engine`.
-TensorRT builds support [direct engine loading](docs/ENGINE_FILES.md), including
-Ultralytics metadata headers and FP16 input/output.
-See [YOLO-Omni setup](docs/YOLO_OMNI.md) for runtime installation, model selection,
-headless options and validation limits.
+Receiver processes image frames with YOLO models and sends mouse commands to a
+Raspberry Pi USB proxy. Windows includes a desktop interface; Linux runs from the
+command line.
 
-C++20 receiver for raw UDP frames, YOLO11/YOLO-Omni inference, and relative mouse commands to a Raspberry Pi USB proxy. The production headless runner supports Linux and Windows; the optional Dear ImGui/DirectX 11 GUI and local-mouse test backend remain Windows-only. A synthetic sender and loopback-only Pi simulator are included.
+## Features
 
-**Delivery status:** the default CI builds are **builds without TensorRT**. They support explicit simulation and native `.pt` inference when the Python model runtime is installed. The production TensorRT 10 backend is implemented for both operating systems and requires a local CUDA/TensorRT installation. See [validation results](docs/VALIDATION.md) and [YOLO-Omni checks](docs/YOLO_OMNI.md#local-validation) for what has been tested.
+- Switch models during a session, with automatic image sizing.
+- Remember settings for each model and restore saved profiles.
+- Adjust detection, tracking and movement while viewing a live preview.
+- Try the interface and run automated checks without a physical device.
 
-CI now checks Linux/Windows builds, worker faults, repeated hot swaps, settings
-recovery, sanitizers, real CPU inference, CUDA compilation and extracted packages.
-See [checks without a device](docs/CI.md) for coverage, downloadable artifacts and
-the hardware behavior that still needs validation.
+## Try it on Windows
 
-The exported sample `models/yolo11n.onnx` and its manifest are included in this directory. This is the standard COCO detection model, not a model trained for a particular application. Real desktop capture on the target PC is intentionally outside this first delivery.
+1. Download a Windows package from a successful [GitHub Actions run](https://github.com/tyoueenn2/Receiver/actions/workflows/receiver.yml).
+2. Extract it, open the app folder, and install Python 3.12 or newer.
+3. Double-click **Start Demo.cmd** to try the interface with simulated devices.
 
-## Try the interface
+The demo starts with movement off and does not move your actual mouse. To use
+your own model or connect devices, follow the [getting started guide](docs/GETTING_STARTED.md).
 
-After building the app or unpacking a test build, install Python 3.12 or newer and double-click **Start Demo.cmd**. This opens the app with example pictures and a simulated mouse device already connected. Close the app to stop the demo helpers.
+## Documentation
 
-- **Setup** explains how to connect devices or try practice mode.
-- **Models** switches models during a session, chooses image size automatically,
-  remembers each model's settings and measures real-model processing speed.
-- **Detection** controls which object is selected and where to point within its box.
-- **Mouse** controls the named button to hold and output limits.
-- **Humanization** contains sensitivity, smoothing, movement styles, jitter, and configurable direction-based strength. See [control details](docs/HUMANIZATION.md).
-- **Saved settings** searches, opens and exports profiles. Accepted settings
-  restore automatically next launch, with movement off.
+See the [documentation index](docs/README.md) for setup, model runtimes, builds,
+protocols, tests and troubleshooting. Downloadable builds support practice mode
+and native `.pt` models with the Python runtime installed; ONNX and `.engine`
+models require a TensorRT build.
 
-See [model switching, automatic sizes and preferences](docs/MODEL_WORKFLOWS.md)
-for supported metadata, rollback behavior, library refresh and performance tuning.
+## Repository layout
 
-Use **Show preview** to see the picture. **Enable practice movement** sends commands only to the simulator; it never moves your actual mouse. The simulated device holds the right button for you. **Turn movement off** or **Delete** disables movement. Practice uses a fixed example detection, not YOLO inference. Technical settings and performance numbers are in expandable sections.
-
-From a terminal, the same demo is `py tools/ui_demo.py`; use `--exe path/to/receiver.exe` for a custom build location.
-
-## Headless hardware-free test
-
-Install Python 3.12 or newer. From the receiver directory, open three terminals:
-
-```powershell
-py tools/mock_pi.py --seconds 60
+```text
+docs/           Getting started, technical documentation and licenses
+include/        C++ headers
+src/            Receiver application and processing code
+tools/          Model workers, device simulators and utilities
+tests/          Automated checks and test fixtures
+models/         Sample model and metadata
+profiles/       Example settings
+integrations/   Raspberry Pi integration assets
 ```
-
-```powershell
-py tools/test_sender.py --width 320 --height 320 --fps 120 --seconds 60
-```
-
-```powershell
-.\receiver_headless.exe --simulate --arm --seconds 30 --metrics simulation.csv
-```
-
-For a source build, executables are under `build/tests/Release/` instead. The mock Pi reports a held right button by default and records received commands in `mock_commands.json`. It never accesses USB or moves the local mouse. Simulation refuses any sender/Pi IP other than `127.0.0.1`.
-
-For manual GUI startup, run `receiver.exe`, choose **Practice on this computer**, then **Start practice** while the two test peers are running. Builds without TensorRT default to practice mode and also allow a two-computer setup using native `.pt` detection.
-
-## Headless operation and logging
-
-The headless executable logs lifecycle changes and a status summary every second by default. It writes normal logs to standard output and errors to standard error, making it suitable for a terminal, systemd, or another service supervisor.
-
-- `--log-level quiet|error|info|debug|trace` controls detail. `info` is the default; `debug` adds network, output, retry, and drop counters; `trace` also adds latency percentiles, clock uncertainty, control strength, and GPU memory.
-- `--log-interval-ms N` changes the periodic summary interval from its 1000 ms default. Use `0` to disable periodic summaries while retaining lifecycle and action messages.
-- `--quiet`, `--verbose`, and `--trace` are shortcuts for quiet, debug, and trace logging.
-- `--seconds 0` runs until SIGINT or SIGTERM. A graceful stop releases synthetic input and writes the metrics file selected by `--metrics`.
-
-For example:
-
-```bash
-./build/linux-cuda/receiver_headless --profile profiles/yolo11n.json --arm --seconds 0 \
-  --log-level debug --log-interval-ms 500 --metrics receiver.csv
-```
-
-## Production TensorRT build
-
-### Windows
-
-Use Windows 11 x64, Visual Studio 2022 with the Desktop development with C++ workload and a Windows SDK, CMake 3.24+, Git, **CUDA Toolkit 12.9**, and the **TensorRT 10.13 Windows x64 CUDA 12 SDK**. Use an NVIDIA driver supported by that CUDA version. This backend deliberately targets TensorRT **10.x**; TensorRT 11's precision/export API is different and is rejected at compile time.
-
-Official SDK references: [TensorRT Windows installation](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-zip.html), [TensorRT compatibility matrix](https://docs.nvidia.com/deeplearning/tensorrt/latest/getting-started/support-matrix.html). Select the 10.13 release, rather than substituting the latest major version.
-
-In an x64 Developer PowerShell, from this directory:
-
-```powershell
-$env:TENSORRT_ROOT = 'C:\SDKs\TensorRT-10.13.0.35'
-$env:PATH = "$env:TENSORRT_ROOT\lib;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.9\bin;$env:PATH"
-cmake --preset windows-cuda
-cmake --build --preset windows-cuda
-ctest --preset windows-cuda
-.\build\cuda\Release\receiver.exe
-```
-
-Set `TENSORRT_ROOT` to your actual extracted SDK directory containing `include` and `lib`. CUDA kernels target SM 8.6, the RTX 3060 Ti architecture. CMake fetches pinned Dear ImGui 1.92.1 and nlohmann/json 3.12.0 sources; subsequent builds can run offline.
-
-### Linux headless
-
-Install a C++20 compiler, CMake 3.24+, Ninja, OpenSSL development headers, an NVIDIA driver, CUDA Toolkit, and TensorRT 10.x with its ONNX parser. TensorRT may be installed system-wide or extracted beneath a custom `TENSORRT_ROOT`. Then run:
-
-```bash
-export TENSORRT_ROOT=/path/to/TensorRT-10.x
-cmake --preset linux-cuda
-cmake --build --preset linux-cuda
-ctest --preset linux-cuda
-./build/linux-cuda/receiver_headless --profile profiles/yolo11n.json --arm --seconds 0
-```
-
-The default CUDA architecture is SM 8.6 for the planned RTX 3060 Ti. Override it at configure time for another supported NVIDIA GPU, for example `cmake --preset linux-cuda -DRECEIVER_CUDA_ARCHITECTURES=89`. The Linux executable uses the Raspberry Pi UDP backend; the DirectX GUI and local Windows mouse backend are not built.
-
-For a build without GPU dependencies:
-
-```powershell
-cmake --preset windows-tests
-cmake --build --preset windows-tests
-ctest --preset windows-tests
-py tests/integration_test.py build/tests/Release/receiver_headless.exe
-py tests/telemetry_recovery_test.py build/tests/Release/receiver_headless.exe
-```
-
-For a Linux build without GPU dependencies:
-
-```bash
-cmake --preset linux-tests
-cmake --build --preset linux-tests
-ctest --preset linux-tests
-python3 tests/integration_test.py build/linux-tests/receiver_headless
-python3 tests/direction_integration_test.py build/linux-tests/receiver_headless
-python3 tests/telemetry_recovery_test.py build/linux-tests/receiver_headless
-```
-
-## Connect the real system
-
-1. Install a public proxy build that implements UPX1, UPS1/UPT1, UPS3/UPT3, and UPC1/UPA1 version 2, then run it with injection enabled. UPT3 is the production telemetry contract; the audited proxy's UPT2 is deliberately not negotiated because it conflicts with the canonical 80-byte layout. The proxy repository is authoritative; Receiver does not contain or generate a proxy implementation. Follow the proxy's USB setup instructions and move the physical mouse once after enumeration.
-2. Set the receiver's **Sender IPv4**, **Pi IPv4**, and listen port. If configured on the Pi, `USB_PROXY_PEER` must be the processing PC's IPv4 address. The receiver uses one persistent UDP socket/source port for telemetry, UPX1 snapshots, and scheduled-click commands.
-3. Allow inbound UDP on the configured frame port in the processing PC's firewall. The frame path should use wired 2.5 GbE or faster as planned. The Pi's control link only carries small commands/status messages.
-4. Load `profiles/yolo11n.json`. Paths in profiles are relative to the process working directory; launch from this directory or use absolute model paths. New model selections read their required or preferred input size automatically. Dynamic models can use a saved size or the performance helper's recommendation.
-5. Start the receiver. The first load builds and warms a TensorRT engine on this GPU; it can take minutes. The GUI remains responsive. Stop runs asynchronously, but cannot interrupt an in-progress TensorRT builder call.
-6. Send frames conforming to [the protocol](docs/PROTOCOL.md) and the complete [future sender contract](docs/SENDER.md). The provided test sender can run on the target PC and send a raw image file for end-to-end testing, but does not capture its screen.
-7. Arm the GUI and hold the configured physical mouse button (right button by default). Output requires fresh telemetry, clock synchronization, fresh frames, and a current detection inside the FOV.
-
-The application sends **relative HID counts**, not absolute cursor coordinates. Tune X/Y gain against the target application's sensitivity. The default reference is the capture center, so a centered screen crop is the natural sender configuration. A different reference can be set in capture pixels. Input/model changes require restart; detection/control changes apply between frames and invalidate pending corrections.
-
-Receiver probes UPT3 first and explicitly falls back to UPT1. While UPT1 remains usable, bounded background probes retry UPT3 with version-bound tokens; a valid upgrade restores direction assistance and click endpoint timing without restarting Receiver. Peer recovery accelerates a probe, and peer loss returns to the short startup probe without changing the persistent UDP source endpoint. Full click scheduling and direction assistance require UPT3. Canonical 80-byte and legacy 88-byte UPT2 decoders remain regression-tested, but UPT2 is not auto-negotiated because the audited proxy has a conflicting same-size 80-byte layout that cannot be safely identified from all packet values. Physical UPT1/UPT2/UPT3 buttons are never copied or ORed into Receiver's persistent mask because the Pi merges physical, persistent, and scheduled state independently.
-
-The C++ `App` API exposes `button_down`, `button_up`, `set_button`, `release_all`, scoped `hold`, and nonblocking `click`. The public click API uses `uint32_t` counts and `std::chrono::microseconds`; CLI values remain milliseconds and are converted safely. Persistent state changes send even with zero motion, every movement repeats the complete mask, and a nonzero mask receives a 75 ms heartbeat. The headless executable exposes `--hold-button`, `--release-after-ms`, and `--click BUTTON COUNT PRESS_MS INTERVAL_MS` for controlled integration testing. When combined with `--hold-button`, the release delay starts when the hold is established, after Pi discovery and clock synchronization. A click is queued locally without sleeping in inference or control; the Pi schedules its press/release reports under the idempotent 40/48-byte UPC1/UPA1 v2 protocol.
-
-## Model export and validation
-
-The sample is already exported. For other YOLO11 detection weights, create an isolated Python environment:
-
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r tools/requirements-export.txt
-.\.venv\Scripts\python.exe tools/export_model.py --weights path/to/custom.pt --size 320
-```
-
-The exporter writes an ONNX file and `<model>.onnx.json` containing class names, the raw detection contract, and a SHA-256 digest. Default exports have dynamic spatial dimensions, allowing separate optimized engines at 160 and 320. `--fixed` exports require the GUI input size to match exactly. Batch size is always one; model input dimensions must be multiples of 32, from 32 to 1024. Capture sizes need not be multiples of 32.
-
-The ONNX path validates float32 NCHW input and raw `[1, 4 + classes, candidates]` output. Internal TensorRT layers use FP16 where supported; its I/O remains float32. Direct `.engine` loading also supports FP16 I/O and requires embedded or companion class metadata; see [engine requirements](docs/ENGINE_FILES.md). Segmentation, pose, classification, embedded-NMS and external-data ONNX are not supported. Cache keys include the model hash, input size, GPU model, runtime/driver versions, and precision mode. Cache files live under `cache/`; deleting a cache file forces a rebuild when loading ONNX.
-
-For a GPU/reference comparison on a tightly packed RGB24 file:
-
-```powershell
-.\.venv\Scripts\python.exe tools/validate_gpu.py --verify-exe build/cuda/Release/receiver_verify.exe --profile profiles/yolo11n.json --raw sample.rgb --width 320 --height 320
-```
-
-This compares preprocessing plus inference against ONNX Runtime CPU FP32. Review representative images as well as numeric differences. Reduced input resolution and FP16 may affect detection accuracy. ONNX Runtime CUDA is a possible future backend; it is not a hidden CPU fallback in this application.
-
-## Performance and troubleshooting
-
-- The GUI runs at up to 60 Hz; the preview is sampled at 30 Hz. Disable preview when benchmarking. CPU conversion/upload for preview only occurs when a new preview frame is displayed.
-- The receiver preallocates a 28 MiB pool of seven maximum-size frames: three incomplete frames plus slots held by inference, pending results, and preview. Pool exhaustion drops work safely. CUDA staging/device buffers are allocated once per model load. Postprocessing uses bounded candidate lists.
-- Metrics include reassembly, host/device copies plus preprocessing, inference, postprocessing, command submission, receiver-to-submission, and a conservative capture-age bound. GPU stages use CUDA events. Reported percentiles cover the most recent 2,048 samples; sample counts are lifetime totals. The GPU free-memory figure is a device-wide snapshot after initialization, not exclusive application memory.
-- No UDP ACK is available for successful UPX1 commands. A movement or button snapshot reported as submitted means only that the local socket accepted the datagram. Scheduled clicks report three distinct stages: submitted locally, accepted by the Pi scheduler, and completed by the USB writer. None proves physical USB/link reliability or target-application processing.
-- Disarm, shutdown, sender loss/restart, stale telemetry, Pi error, GPU error, restart-required configuration changes, and Pi epoch changes clear local desired state, maintain one v2 ReleaseAll fence, and request three zero-mask UPX1 snapshots with fresh sequence numbers. Repeated triggers coalesce. Timeouts retry identical release bytes; a terminal cached Cancelled atomically creates a higher-ID replacement without opening the fence. Shutdown allows the worker 100 ms to drain releases. The 250 ms Pi watchdog remains the final fallback.
-- Click request loss is retried after 50 ms with the same immutable bytes, random client session, and command ID. QueueFull backs off 25/50/75 ms with the same ID. Accepted commands continue a same-ID status/lease retry at least every 75 ms. Post-acceptance ButtonActive preserves partial progress and records physical interference rather than corrupt protocol. A changed Pi server epoch discards old commands, rotates the client session, releases, and reprobes; old work is never resubmitted.
-- Profiles never store an armed state. The headless `--arm` option is an explicit per-run choice. The GUI always starts disarmed.
-
-See [benchmark procedure](docs/BENCHMARK.md), [validation record](docs/VALIDATION.md), and [third-party notices](docs/THIRD_PARTY.md).
-
-## Local mouse and automated checks
-
-The Mouse page offers a **Local Windows mouse** connection for manual testing. It starts disarmed and requires a held physical activation button. Humanization includes three prediction methods, lead controls, sticky distance, dynamic FOV, and EMA response. See [Humanization](docs/HUMANIZATION.md).
-
-Open **Test Hub** to run individual or selected checks, inspect results, and save logs automatically. The demo launcher fills in Python automatically. See [Test Hub requirements](docs/TEST_HUB.md).

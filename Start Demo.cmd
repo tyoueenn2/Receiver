@@ -12,7 +12,7 @@ python tools\ui_demo.py
 :finished
 if errorlevel 1 (
   echo.
-  echo The demo could not start. See the message above and the setup guide in README.md.
+  echo The demo could not start. See the message above and docs\GETTING_STARTED.md.
   pause
 )
 exit /b

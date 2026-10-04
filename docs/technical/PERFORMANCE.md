@@ -1,0 +1,13 @@
+# Performance and troubleshooting
+
+Run commands from the repository root or extracted app folder unless noted.
+
+- The GUI runs at up to 60 Hz; the preview is sampled at 30 Hz. Disable preview when benchmarking. CPU conversion/upload for preview only occurs when a new preview frame is displayed.
+- The receiver preallocates a 28 MiB pool of seven maximum-size frames: three incomplete frames plus slots held by inference, pending results, and preview. Pool exhaustion drops work safely. CUDA staging/device buffers are allocated once per model load. Postprocessing uses bounded candidate lists.
+- Metrics include reassembly, host/device copies plus preprocessing, inference, postprocessing, command submission, receiver-to-submission, and a conservative capture-age bound. GPU stages use CUDA events. Reported percentiles cover the most recent 2,048 samples; sample counts are lifetime totals. The GPU free-memory figure is a device-wide snapshot after initialization, not exclusive application memory.
+- No UDP ACK is available for successful UPX1 commands. A movement or button snapshot reported as submitted means only that the local socket accepted the datagram. Scheduled clicks report three distinct stages: submitted locally, accepted by the Pi scheduler, and completed by the USB writer. None proves physical USB/link reliability or target-application processing.
+- Disarm, shutdown, sender loss/restart, stale telemetry, Pi error, GPU error, restart-required configuration changes, and Pi epoch changes clear local desired state, maintain one v2 ReleaseAll fence, and request three zero-mask UPX1 snapshots with fresh sequence numbers. Repeated triggers coalesce. Timeouts retry identical release bytes; a terminal cached Cancelled atomically creates a higher-ID replacement without opening the fence. Shutdown allows the worker 100 ms to drain releases. The 250 ms Pi watchdog remains the final fallback.
+- Click request loss is retried after 50 ms with the same immutable bytes, random client session, and command ID. QueueFull backs off 25/50/75 ms with the same ID. Accepted commands continue a same-ID status/lease retry at least every 75 ms. Post-acceptance ButtonActive preserves partial progress and records physical interference rather than corrupt protocol. A changed Pi server epoch discards old commands, rotates the client session, releases, and reprobes; old work is never resubmitted.
+- Profiles never store an armed state. The headless `--arm` option is an explicit per-run choice. The GUI always starts disarmed.
+
+See [benchmark procedure](BENCHMARK.md), [validation record](VALIDATION.md), and [third-party notices](THIRD_PARTY.md).
