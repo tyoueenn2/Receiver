@@ -8,9 +8,11 @@
 #include <fstream>
 #include <mutex>
 #include <thread>
+#include <vector>
 namespace receiver {
 struct Samples {
-    std::array<double, 2048> values{};
+    // Snapshots contain eight rings. Heap storage avoids large Debug stack frames.
+    std::vector<double> values = std::vector<double>(2048);
     uint64_t count = 0;
     void add(double v) {
         values[count++ % values.size()] = v;

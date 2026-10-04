@@ -83,21 +83,50 @@ Settings settings_from_json(const json& j) {
     validate(s);
     return s;
 }
-Settings load_settings(const std::string& path) {
-    std::ifstream f(path);
+json read_json_file(const std::filesystem::path& path) {
+    constexpr size_t max_size = 8 * 1024 * 1024;
 #ifdef _WIN32
-    // A concurrent atomic replacement can briefly deny a new reader on Windows.
-    for (int attempt = 0; !f && attempt < 40; ++attempt) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        f.clear();
-        f.open(path);
+    // Unlike the CRT's ifstream, this permits replacement while a reader owns the
+    // old file. Each handle still reads one complete version of an atomic save.
+    struct File {
+        HANDLE handle;
+        ~File() {
+            if (handle != INVALID_HANDLE_VALUE)
+                CloseHandle(handle);
+        }
+    } file{CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (file.handle == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("Cannot open settings file: " + path.string());
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file.handle, &size) || size.QuadPart < 0 || uint64_t(size.QuadPart) > max_size)
+        throw std::runtime_error("Invalid or oversized settings file");
+    std::string content(size_t(size.QuadPart), '\0');
+    size_t offset = 0;
+    while (offset < content.size()) {
+        DWORD bytes = 0;
+        if (!ReadFile(file.handle, content.data() + offset, DWORD(content.size() - offset), &bytes,
+                      nullptr) ||
+            !bytes)
+            throw std::runtime_error("Failed reading settings file");
+        offset += bytes;
     }
-#endif
+#else
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
     if (!f)
-        throw std::runtime_error("Cannot open profile: " + path);
-    json j;
-    f >> j;
-    return settings_from_json(j);
+        throw std::runtime_error("Cannot open settings file: " + path.string());
+    auto size = f.tellg();
+    if (size < 0 || uint64_t(size) > max_size)
+        throw std::runtime_error("Invalid or oversized settings file");
+    std::string content(size_t(size), '\0');
+    f.seekg(0);
+    if (!f.read(content.data(), std::streamsize(content.size())))
+        throw std::runtime_error("Failed reading settings file");
+#endif
+    return json::parse(content);
+}
+Settings load_settings(const std::string& path) {
+    return settings_from_json(read_json_file(path));
 }
 void write_json_atomic(const json& value, const std::filesystem::path& path) {
     auto temp = path;

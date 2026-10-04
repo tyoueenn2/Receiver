@@ -4,6 +4,7 @@
 namespace receiver {
 nlohmann::json settings_json(const Settings& settings);
 Settings settings_from_json(const nlohmann::json& value);
+nlohmann::json read_json_file(const std::filesystem::path& path);
 void write_json_atomic(const nlohmann::json& value, const std::filesystem::path& path);
 struct LibraryEntry {
     std::filesystem::path path;

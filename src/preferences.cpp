@@ -25,13 +25,9 @@ void Preferences::add_directory(const std::filesystem::path& directory, bool mod
 }
 void Preferences::load() {
     auto path = root_ / "preferences.json";
-    std::ifstream file(path);
-    if (!file)
+    if (!std::filesystem::exists(path))
         return;
-    if (std::filesystem::file_size(path) > 8 * 1024 * 1024)
-        throw std::runtime_error("Saved preferences are too large");
-    nlohmann::json j;
-    file >> j;
+    const auto j = read_json_file(path);
     if (j.value("version", 0) != 1)
         throw std::runtime_error("Unsupported preference version");
     auto settings = settings_from_json(j.at("settings"));

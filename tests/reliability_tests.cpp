@@ -1,4 +1,5 @@
 #include "test_support.hpp"
+#include "receiver/app.hpp"
 #include "receiver/engine.hpp"
 #include "receiver/performance.hpp"
 #include "receiver/preferences.hpp"
@@ -9,6 +10,22 @@
 using namespace receiver;
 using test::rejects;
 namespace {
+void sample_snapshots() {
+    // Windows Debug snapshots must fit the ordinary 1 MiB application stack.
+    static_assert(sizeof(Stats) < 16 * 1024);
+    Samples ring;
+    for (int i = 0; i < 4096; ++i)
+        ring.add(i);
+    CHECK(ring.count == 4096 && ring.percentile(0) == 2048 && ring.percentile(1) == 4095);
+    const auto snapshot = ring;
+    for (int i = 0; i < 2048; ++i)
+        ring.add(7);
+    CHECK(ring.percentile(.5) == 7);
+    CHECK(snapshot.count == 4096 && snapshot.percentile(0) == 2048 && snapshot.percentile(1) == 4095);
+    auto copied = snapshot;
+    copied.add(-5);
+    CHECK(copied.percentile(0) == -5 && snapshot.percentile(0) == 2048);
+}
 void metadata_boundaries() {
     for (int size : {32, 64, 160, 256, 320, 416, 640, 1024})
         CHECK(inspect_onnx(test::onnx({1, 3, size, size})).fixed_size == size);
@@ -96,6 +113,17 @@ void preferences_failures() {
     write_json_atomic(saved, file);
     prefs.load();
     CHECK(settings_json(prefs.current) == baseline);
+#ifdef _WIN32
+    // An unrelated reader that denies replacement must not lose the last save.
+    std::ifstream locked(file);
+    CHECK(locked.is_open());
+    auto blocked = good;
+    blocked.confidence = .3f;
+    rejects([&] { prefs.save(blocked, "blocked.json"); });
+    CHECK(settings_json(prefs.current) == baseline && prefs.profile == "good.json");
+    locked.close();
+    CHECK(read_json_file(file) == saved);
+#endif
     // A replacement blocked by a directory must preserve both disk and in-memory choices.
     std::filesystem::remove(file);
     std::filesystem::create_directory(file);
@@ -128,6 +156,7 @@ void preferences_failures() {
         }
     });
     try {
+        sample_snapshots();
         for (int i = 0; i < 100; ++i) {
             auto s = good;
             s.confidence = i % 2 ? .2f : .8f;
@@ -145,6 +174,12 @@ void preferences_failures() {
     CHECK(reads > 0);
     for (const auto& entry : std::filesystem::directory_iterator(temp.path))
         CHECK(!entry.path().filename().string().ends_with(".tmp"));
+    auto oversized = temp.path / "oversized.json";
+    std::ofstream(oversized) << std::string(8 * 1024 * 1024 + 1, ' ');
+    rejects([&] { read_json_file(oversized); });
+    auto truncated = temp.path / "truncated.json";
+    std::ofstream(truncated) << "{\"confidence\":";
+    rejects([&] { load_settings(truncated.string()); });
     auto folder = temp.path / "library";
     std::filesystem::create_directory(folder);
     Preferences library(temp.path / "library-settings");

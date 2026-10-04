@@ -19,7 +19,9 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 
 The new reliability suite runs 10,000 seeded metadata mutations, randomized protocol
 inputs, truncated/oversized metadata, blocked settings replacements, concurrent
-profile reads/writes and library refresh cases. Failed preference loads/saves must
+profile reads/writes and library refresh cases. Timing ring snapshots also verify
+wraparound, independent copies and a bounded stack footprint for Windows Debug.
+Failed preference loads/saves must
 preserve the previous in-memory settings and clean up incomplete temporary files.
 
 The independent fault worker exercises partial TCP replies, slow loads, reordered

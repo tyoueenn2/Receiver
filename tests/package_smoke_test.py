@@ -25,6 +25,10 @@ def main():
         assert (root / filename).is_file(), f'Package missing {filename}'
     if os.name == 'nt':
         assert (root / 'receiver.exe').is_file(), 'Windows GUI missing'
+        runtimes = ('libc++.dll', 'libunwind.dll', 'libwinpthread-1.dll') if (root / 'libc++.dll').exists() \
+            else ('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+        for filename in runtimes:
+            assert (root / filename).is_file(), f'Windows runtime missing {filename}'
     with tempfile.TemporaryDirectory(prefix='receiver-package-smoke-') as directory:
         working = Path(directory)
         profile = working / 'profile.json'
