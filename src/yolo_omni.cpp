@@ -371,7 +371,8 @@ class OmniBackend final : public Backend {
         if (!h.width || !h.height || h.width > 1024 || h.height > 1024 || (h.format != 1 && h.format != 2) ||
             h.bytes != expected || expected > frame.pixels.size())
             throw error("invalid input frame");
-        auto begin = now_ns(), deadline = begin + 10'000'000'000ll;
+        const int64_t begin = now_ns();
+        const int64_t deadline = begin + 10'000'000'000;
         send_json({{"width", h.width}, {"height", h.height}, {"format", h.format}, {"bytes", h.bytes}},
                   deadline);
         transfer(const_cast<uint8_t*>(frame.pixels.data()), expected, true, deadline);
