@@ -10,3 +10,8 @@
 - Aimmy and Aimmy-CUDA were inspected as behavioral references for settings and selection. Receiver code is independently implemented; their code, assets, and models are not bundled.
 
 Model weights and third-party libraries retain their own licenses.
+
+The optional native YOLO-Omni backend uses a separately installed Python runtime,
+PyTorch, NumPy and the YOLO-Omni Ultralytics fork at
+https://github.com/z637826/yolo-omni (AGPL-3.0). These dependencies and Omni weights
+are not bundled. The receiver's process adapter does not vendor the fork's code.

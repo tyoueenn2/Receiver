@@ -1,8 +1,10 @@
 #include "receiver/test_hub.hpp"
 #include "receiver/app.hpp"
+#include "receiver/preferences.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -88,7 +90,7 @@ std::optional<std::string> choose_file(HWND window, bool save, int model = 0) {
     dialog.lpstrFile = path.data();
     dialog.nMaxFile = DWORD(path.size());
     dialog.lpstrFilter = model == 2 ? "Programs (*.exe)\0*.exe\0\0"
-                         : model    ? "Detection models (*.onnx)\0*.onnx\0\0"
+                         : model    ? "Detection models (*.onnx;*.pt;*.engine)\0*.onnx;*.pt;*.engine\0\0"
                                     : "Saved settings (*.json)\0*.json\0\0";
     dialog.lpstrDefExt = model ? "onnx" : "json";
     dialog.Flags =
@@ -96,15 +98,6 @@ std::optional<std::string> choose_file(HWND window, bool save, int model = 0) {
     if (save ? GetSaveFileNameA(&dialog) : GetOpenFileNameA(&dialog))
         return std::string(path.data());
     return std::nullopt;
-}
-std::vector<std::string> class_names(const receiver::Settings& settings) {
-    try {
-        std::ifstream input(settings.metadata.empty() ? settings.model + ".json" : settings.metadata);
-        auto manifest = nlohmann::json::parse(input);
-        return manifest.at("names").get<std::vector<std::string>>();
-    } catch (...) {
-        return {};
-    }
 }
 const char* mouse_buttons[] = {"Left mouse button",
                                "Right mouse button",
@@ -292,7 +285,6 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     int64_t last_frame = 0;
     std::string notice;
     int page = -1;
-    bool custom_size = false;
     if (options.find("--page=detect") != std::string::npos)
         page = 1;
     if (options.find("--page=mouse") != std::string::npos)
@@ -303,6 +295,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         page = 3;
     if (options.find("--page=hub") != std::string::npos)
         page = 5;
+    if (options.find("--page=models") != std::string::npos)
+        page = 6;
     if (smoke) {
         auto port = [&](const std::string& key, int current) {
             auto pos = options.find(key);
@@ -312,6 +306,76 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         settings.pi_port = port("--test-pi-port=", settings.pi_port);
     }
     std::string profile, error, class_text;
+    receiver::Preferences preferences;
+    bool preferences_dirty = false;
+    int64_t preferences_changed = 0, library_updated = 0;
+    uint64_t model_revision = 0;
+    std::string model_draft, model_filter, profile_filter;
+    int performance_goal = 1;
+    std::vector<receiver::LibraryEntry> library;
+    if (!smoke && !demo) {
+        try {
+            preferences.load();
+            settings = preferences.current;
+            profile = preferences.profile;
+            if (!settings.model.empty())
+                simulate = false;
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    }
+    model_draft = settings.model;
+    auto mark_preferences = [&] {
+        preferences_dirty = true;
+        preferences_changed = receiver::now_ns();
+    };
+    auto open_model = [&](const std::string& path) {
+        try {
+            if (!settings.model.empty())
+                preferences.save(app.stats().running ? app.settings() : settings, profile, names);
+            auto selected = preferences.select_model(settings, path);
+            receiver::select_backend(selected);
+            if (app.stats().running)
+                app.configure(selected, true);
+            settings = selected;
+            model_draft = settings.model;
+            preferences.add_directory(std::filesystem::absolute(path).parent_path(), true);
+            library_updated = 0;
+            names.clear();
+            class_text.clear();
+            mark_preferences();
+            error.clear();
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    };
+    auto open_profile = [&](const std::string& path) {
+        try {
+            auto loaded = receiver::load_settings(path);
+            app.arm(false);
+            if (app.stats().running)
+                app.configure(loaded);
+            settings = loaded;
+            profile = path;
+            model_draft = settings.model;
+            class_text.clear();
+            names.clear();
+            preferences.add_directory(std::filesystem::absolute(path).parent_path(), false);
+            library_updated = 0;
+            mark_preferences();
+            notice = "Settings loaded. Mouse control is off.";
+            error.clear();
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    };
+    auto matches = [](std::string value, std::string query) {
+        for (auto& c : value)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
+        for (auto& c : query)
+            c = char(std::tolower(static_cast<unsigned char>(c)));
+        return value.find(query) != std::string::npos;
+    };
     std::future<void> operation;
     Texture texture;
     std::array<float, 180> latency{};
@@ -347,6 +411,26 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             }
         }
         auto stats = app.stats();
+        if (stats.running && stats.model_revision != model_revision && !stats.model_loading) {
+            model_revision = stats.model_revision;
+            settings = app.settings();
+            model_draft = settings.model;
+            names = stats.model_classes;
+            class_text.clear();
+            for (int id : settings.classes) {
+                if (!class_text.empty())
+                    class_text += ",";
+                class_text += std::to_string(id);
+            }
+            mark_preferences();
+        }
+        if (receiver::now_ns() - library_updated > 1'000'000'000) {
+            library = preferences.library();
+            library_updated = receiver::now_ns();
+        }
+        if (!simulate && !stats.model_classes.empty())
+            names = stats.model_classes;
+        auto previous_settings = settings;
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -368,7 +452,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         ImGui::TextDisabled("  /  %s", simulate ? "Practice mode" : "Two-computer setup");
         const char* next_step =
             !stats.error.empty() ? "Something needs attention. Stop, check the details below, then try again."
-            : busy()             ? "Getting ready. Loading a new model can take a few minutes."
+            : stats.model_loading || stats.benchmarking || busy()
+                ? "Getting ready. Loading a new model can take a few minutes."
             : !stats.running ? "Choose your setup below, then press Start. Mouse control starts turned off."
             : !receiving     ? "Waiting for pictures. Start the picture sender on the sending computer."
             : !stats.synchronized ? "Pictures are arriving. Waiting for the sender's timing check."
@@ -396,7 +481,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 const bool use_simulation = simulate;
                 if (use_simulation)
                     cfg.sender_ip = cfg.pi_ip = "127.0.0.1";
-                names = use_simulation ? std::vector<std::string>{"Example object"} : class_names(settings);
+                names =
+                    use_simulation ? std::vector<std::string>{"Example object"} : std::vector<std::string>{};
+                model_revision = 0;
                 last_frame = 0;
                 previous_frames = 0;
                 operation = std::async(std::launch::async,
@@ -425,6 +512,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             ImGui::TextColored(ImVec4(1, .65f, .5f, 1), "Unable to finish that step");
             ImGui::TextWrapped("%s", error.empty() ? stats.error.c_str() : error.c_str());
         }
+        if (!stats.model_error.empty())
+            ImGui::TextColored(ImVec4(1, .65f, .5f, 1), "%s", stats.model_error.c_str());
+        if (!stats.model_message.empty())
+            hint(stats.model_message.c_str());
         if (!notice.empty())
             ImGui::TextWrapped("%s", notice.c_str());
         ImGui::Spacing();
@@ -459,17 +550,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 if (ImGui::RadioButton("Practice on this computer", simulate)) {
                     simulate = true;
                     settings.sender_ip = settings.pi_ip = "127.0.0.1";
+                    mark_preferences();
                 }
 #ifndef RECEIVER_HAS_TENSORRT
-                hint("This test build supports practice mode. Real detection needs the GPU build described "
-                     "in the setup guide.");
-                ImGui::BeginDisabled();
+                hint("This build can run .pt models with the Python runtime installed. "
+                     "Exported .onnx and .engine models need the TensorRT build.");
 #endif
-                if (ImGui::RadioButton("Connect my computers and Raspberry Pi", !simulate))
+                if (ImGui::RadioButton("Connect my computers and Raspberry Pi", !simulate)) {
                     simulate = false;
-#ifndef RECEIVER_HAS_TENSORRT
-                ImGui::EndDisabled();
-#endif
+                    mark_preferences();
+                }
                 if (simulate) {
                     section("2. Prepare the practice pictures",
                             "The demo launcher starts a picture sender and simulated mouse device for you. "
@@ -481,53 +571,142 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 } else {
                     section("2. Connect your devices", "Enter the local network addresses of the computer "
                                                        "sending pictures and your Raspberry Pi.");
-                    input_string("Sending computer address", settings.sender_ip);
-                    input_string("Raspberry Pi address", settings.pi_ip);
+                    changed |= input_string("Sending computer address", settings.sender_ip);
+                    changed |= input_string("Raspberry Pi address", settings.pi_ip);
                     hint("An address looks like 192.168.1.20. Both devices must be on your local network. "
                          "The picture sender is a separate program.");
-                    section("3. Choose a detection model",
-                            "A model tells the app what objects to look for. Choose an exported .onnx file.");
-                    input_string("Model file", settings.model);
-                    if (ImGui::Button("Browse for model...")) {
-                        if (auto path = choose_file(window, false, true)) {
-                            settings.model = *path;
-                            settings.metadata.clear();
-                            names = class_names(settings);
-                        }
-                    }
-                    int size = custom_size                  ? 2
-                               : settings.input_size == 160 ? 0
-                               : settings.input_size == 320 ? 1
-                                                            : 2;
-                    if (ImGui::Combo("Processing detail", &size,
-                                     "160 x 160 - smaller\0"
-                                     "320 x 320 - standard\0"
-                                     "Custom size\0")) {
-                        custom_size = size == 2;
-                        settings.input_size = size == 0 ? 160 : size == 1 ? 320 : settings.input_size;
-                    }
-                    if (size == 2)
-                        ImGui::InputInt("Processing size", &settings.input_size, 32, 160);
-                    hint("Smaller images can be faster but may miss small objects. This resizes incoming "
-                         "pictures; it does not change the sender's capture area.");
+                    hint("Choose your detection model on the Models page.");
                 }
                 if (ImGui::CollapsingHeader("Advanced connection settings")) {
-                    input_string("Local listen address", settings.bind_ip);
-                    ImGui::InputInt("Picture port", &settings.frame_port);
-                    ImGui::InputInt("Mouse device port", &settings.pi_port);
-                    if (!simulate) {
-                        input_string("Model metadata file", settings.metadata);
-                        if (ImGui::Button("Read object names"))
-                            names = class_names(settings);
-                    }
+                    changed |= input_string("Local listen address", settings.bind_ip);
+                    changed |= ImGui::InputInt("Picture port", &settings.frame_port);
+                    changed |= ImGui::InputInt("Mouse device port", &settings.pi_port);
                     hint("Keep the defaults unless your sender or Pi uses different ports. Model metadata is "
                          "found automatically beside the model when this field is empty.");
                 }
                 ImGui::EndDisabled();
                 if (stats.running || busy())
-                    hint("Stop the session to change connections or models.");
+                    hint("Stop the session to change connections. Models can switch on the Models page.");
                 section("Next: Start and check the preview",
                         "Press Start at the top. You can view detections with mouse control turned off.");
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Models", nullptr, page == 6 ? ImGuiTabItemFlags_SetSelected : 0)) {
+                section("Choose a model", "Switch models without reconnecting. Your previous model stays "
+                                          "available if loading fails.");
+                ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking ||
+                                     (stats.running && simulate));
+                input_string("Model file", model_draft);
+                if (ImGui::Button("Load selected model"))
+                    open_model(model_draft);
+                ImGui::SameLine();
+                if (ImGui::Button("Browse..."))
+                    if (auto path = choose_file(window, false, true))
+                        open_model(*path);
+                hint("Models and profiles in your chosen folders refresh automatically. Settings are "
+                     "remembered separately for each model.");
+                input_string("Search models", model_filter);
+                ImGui::BeginChild("Model library", ImVec2(0, 115), ImGuiChildFlags_Borders);
+                for (const auto& item : library)
+                    if (item.model && matches(item.name, model_filter)) {
+                        ImGui::PushID(item.path.string().c_str());
+                        if (ImGui::Selectable(item.name.c_str(), item.path.string() == settings.model))
+                            open_model(item.path.string());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", item.path.string().c_str());
+                        ImGui::PopID();
+                    }
+                ImGui::EndChild();
+                section("Image size", "Fixed-size models always use their required size. Dynamic models can "
+                                      "use a saved size or a performance recommendation.");
+                changed |= ImGui::Checkbox("Choose size from model", &settings.auto_size);
+                if (!settings.auto_size)
+                    changed |= ImGui::InputInt("Processing size", &settings.input_size, 32, 160);
+                ImGui::Text("Current size: %d x %d", settings.input_size, settings.input_size);
+                if (!stats.running && settings.auto_size)
+                    hint("The model's preferred size will be read when you start.");
+                changed |= ImGui::InputInt("Processing FPS (0 = unlimited)", &settings.inference_fps, 10);
+                if (ImGui::CollapsingHeader("Model options")) {
+                    const char* backends[]{"Auto", "TensorRT (.onnx / .engine)", "YOLO-Omni / PyTorch (.pt)"};
+                    int backend = settings.inference_backend == "tensorrt"    ? 1
+                                  : settings.inference_backend == "yolo_omni" ? 2
+                                                                              : 0;
+                    if (ImGui::Combo("Detection backend", &backend, backends, 3)) {
+                        settings.inference_backend = backend == 1   ? "tensorrt"
+                                                     : backend == 2 ? "yolo_omni"
+                                                                    : "auto";
+                        changed = true;
+                    }
+                    input_string("Python executable", settings.omni_python);
+                    if (ImGui::IsItemDeactivatedAfterEdit())
+                        changed = true;
+                    input_string("YOLO-Omni source folder", settings.omni_source);
+                    if (ImGui::IsItemDeactivatedAfterEdit())
+                        changed = true;
+                    int device = settings.omni_device == "cpu" ? 1 : 0;
+                    if (ImGui::Combo("PyTorch device", &device, "NVIDIA GPU\0CPU (testing)\0")) {
+                        settings.omni_device = device == 1 ? "cpu" : "cuda:0";
+                        changed = true;
+                    }
+                    input_string("Model metadata file", settings.metadata);
+                    if (ImGui::IsItemDeactivatedAfterEdit())
+                        changed = true;
+                    hint("Object names and supported image sizes are read from the model. An optional "
+                         "companion file can supply missing metadata.");
+                }
+                ImGui::EndDisabled();
+                section("Performance helper",
+                        "Measures this model on a received picture at supported sizes. Mouse control stays "
+                        "off. This measures speed, not detection accuracy or network delay.");
+                ImGui::Combo("Preference", &performance_goal, "Fastest\0Balanced\0Lower GPU load\0");
+                ImGui::BeginDisabled(!stats.running || simulate || stats.model_loading ||
+                                     stats.benchmarking || busy());
+                if (ImGui::Button("Measure model performance")) {
+                    try {
+                        app.benchmark(receiver::PerformanceGoal(performance_goal));
+                        error.clear();
+                    } catch (const std::exception& e) {
+                        error = e.what();
+                    }
+                }
+                ImGui::EndDisabled();
+                if (stats.benchmarking && ImGui::Button("Cancel measurement"))
+                    app.cancel_benchmark();
+                if (!stats.benchmark.samples.empty() &&
+                    ImGui::BeginTable("Model performance", 4, ImGuiTableFlags_Borders)) {
+                    for (auto label : {"Size", "FPS", "Average ms", "95% ms"})
+                        ImGui::TableSetupColumn(label);
+                    ImGui::TableHeadersRow();
+                    for (const auto& sample : stats.benchmark.samples) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%d", sample.size);
+                        ImGui::TableNextColumn();
+                        if (!sample.error.empty()) {
+                            ImGui::TextUnformatted("Unavailable");
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("%s", sample.error.c_str());
+                        } else
+                            ImGui::Text("%.1f", sample.fps);
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%.2f", sample.mean_ms);
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%.2f", sample.p95_ms);
+                    }
+                    ImGui::EndTable();
+                }
+                if (stats.benchmark.recommended_size) {
+                    ImGui::Text("Suggested: %d pixels, %d FPS", stats.benchmark.recommended_size,
+                                stats.benchmark.recommended_fps);
+                    ImGui::BeginDisabled(stats.model_loading || stats.benchmarking || busy());
+                    if (ImGui::Button("Apply recommendation")) {
+                        settings.input_size = stats.benchmark.recommended_size;
+                        settings.inference_fps = stats.benchmark.recommended_fps;
+                        settings.auto_size = false;
+                        changed = true;
+                    }
+                    ImGui::EndDisabled();
+                }
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("Detection", nullptr, page == 1 ? ImGuiTabItemFlags_SetSelected : 0)) {
@@ -543,6 +722,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 if (ImGui::BeginCombo("Object type", selected_class.c_str())) {
                     if (ImGui::Selectable("All object types", settings.classes.empty())) {
                         settings.classes.clear();
+                        settings.selected_class_names.clear();
                         class_text.clear();
                         changed = true;
                     }
@@ -551,6 +731,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                         if (ImGui::Selectable(names[i].c_str(),
                                               settings.classes == std::vector<int>{int(i)})) {
                             settings.classes = {int(i)};
+                            settings.selected_class_names = {names[i]};
                             class_text = std::to_string(i);
                             changed = true;
                         }
@@ -559,7 +740,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     ImGui::EndCombo();
                 }
                 if (names.empty())
-                    hint("Object names appear when the model's companion metadata file is available. "
+                    hint("Object names appear automatically after the model loads. "
                          "Advanced settings also accept numeric object IDs.");
                 changed |= ImGui::SliderFloat("Search radius", &settings.fov_radius, 0, 1024, "%.0f pixels");
                 hint("Only aim points inside the circle in the preview are eligible.");
@@ -608,6 +789,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                                 ids.push_back(id);
                             }
                             settings.classes = std::move(ids);
+                            settings.selected_class_names.clear();
                             changed = true;
                         } catch (...) {
                             error = "Use object numbers separated by commas, or leave the field empty for "
@@ -941,6 +1123,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                         try {
                             receiver::save_settings(settings, *path);
                             profile = *path;
+                            preferences.add_directory(std::filesystem::absolute(*path).parent_path(), false);
+                            library_updated = 0;
+                            mark_preferences();
                             notice = "Settings saved.";
                             error.clear();
                         } catch (const std::exception& e) {
@@ -949,31 +1134,24 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     }
                 }
                 ImGui::Spacing();
-                ImGui::BeginDisabled(stats.running || busy());
-                if (ImGui::Button("Open saved settings...", ImVec2(190, 36))) {
-                    if (auto path = choose_file(window, false)) {
-                        try {
-                            auto loaded = receiver::load_settings(*path);
-                            settings = loaded;
-                            custom_size = settings.input_size != 160 && settings.input_size != 320;
-                            profile = *path;
-                            class_text.clear();
-                            for (auto id : settings.classes) {
-                                if (!class_text.empty())
-                                    class_text += ",";
-                                class_text += std::to_string(id);
-                            }
-                            names = class_names(settings);
-                            notice = "Settings loaded. Mouse control is off.";
-                            error.clear();
-                        } catch (const std::exception& e) {
-                            error = e.what();
-                        }
+                hint(
+                    "Your latest settings restore automatically next time. Mouse control always starts off.");
+                ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
+                if (ImGui::Button("Open saved settings...", ImVec2(190, 36)))
+                    if (auto path = choose_file(window, false))
+                        open_profile(*path);
+                input_string("Search saved settings", profile_filter);
+                for (const auto& item : library)
+                    if (!item.model && matches(item.name, profile_filter)) {
+                        ImGui::PushID(item.path.string().c_str());
+                        if (ImGui::Selectable(item.name.c_str(), item.path.string() == profile))
+                            open_profile(item.path.string());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", item.path.string().c_str());
+                        ImGui::PopID();
                     }
-                }
                 ImGui::EndDisabled();
-                if (stats.running || busy())
-                    hint("Stop the session before opening a different setup.");
+                hint("A profile with different connection addresses requires stopping the session first.");
                 if (!profile.empty()) {
                     ImGui::Spacing();
                     hint("Current settings file");
@@ -1083,8 +1261,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 ImGui::Text("Desired persistent: 0x%02x", stats.injection.persistent_mask);
                 if (stats.pi_ready && stats.injection.has_upt3) {
                     ImGui::Text("Pi applied persistent: 0x%02x | Pi scheduled: 0x%02x | Poll: %u us",
-                                stats.injection.pi_applied_persistent_mask,
-                                stats.injection.pi_scheduled_mask,
+                                stats.injection.pi_applied_persistent_mask, stats.injection.pi_scheduled_mask,
                                 stats.injection.endpoint_poll_us);
                 } else {
                     ImGui::TextUnformatted("Pi applied/scheduled state: unavailable (fresh UPT3 required)");
@@ -1102,34 +1279,33 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                             static_cast<unsigned long long>(stats.injection.click_retries),
                             static_cast<unsigned long long>(stats.injection.click_timeouts),
                             static_cast<unsigned long long>(stats.injection.click_queue_full));
-                ImGui::Text("Release retries: %llu | Superseded cancellations: %llu | Server-epoch resets: %llu",
-                            static_cast<unsigned long long>(stats.injection.release_retries),
-                            static_cast<unsigned long long>(stats.injection.release_superseded),
-                            static_cast<unsigned long long>(stats.injection.click_epoch_resets));
+                ImGui::Text(
+                    "Release retries: %llu | Superseded cancellations: %llu | Server-epoch resets: %llu",
+                    static_cast<unsigned long long>(stats.injection.release_retries),
+                    static_cast<unsigned long long>(stats.injection.release_superseded),
+                    static_cast<unsigned long long>(stats.injection.click_epoch_resets));
                 ImGui::Text("Last release: %s | ReleaseAll: %s", stats.injection.last_release_reason.c_str(),
                             stats.injection.last_release_all_state.c_str());
                 if (stats.pi_ready && stats.injection.has_upt3) {
                     ImGui::Text("Pi click totals accepted/completed: %u/%u | Active/queued sequences: %u/%u",
                                 stats.injection.pi_accepted_click_total,
-                                stats.injection.pi_completed_click_total,
-                                stats.injection.pi_active_sequences,
+                                stats.injection.pi_completed_click_total, stats.injection.pi_active_sequences,
                                 stats.injection.pi_queued_sequences);
-                    ImGui::Text("Pi output/pending depths: %u/%u | Physical reports received/submitted: %u/%u",
-                                stats.injection.pi_output_queue_depth,
-                                stats.injection.pi_pending_synthetic_depth,
-                                stats.injection.pi_physical_reports_received,
-                                stats.injection.pi_physical_reports_submitted);
+                    ImGui::Text(
+                        "Pi output/pending depths: %u/%u | Physical reports received/submitted: %u/%u",
+                        stats.injection.pi_output_queue_depth, stats.injection.pi_pending_synthetic_depth,
+                        stats.injection.pi_physical_reports_received,
+                        stats.injection.pi_physical_reports_submitted);
                     ImGui::Text("Pi superseded movement: %u | USB writer failures: %u",
-                                stats.injection.pi_superseded_synthetic,
-                                stats.injection.pi_writer_failures);
+                                stats.injection.pi_superseded_synthetic, stats.injection.pi_writer_failures);
                 }
                 for (const auto& command : stats.injection.commands) {
                     ImGui::Text("Command %llu (%s, button %u): %s [accepted %u, completed %u/%u]",
                                 static_cast<unsigned long long>(command.id),
-                                command.operation == receiver::ClickOperation::release_all ? "ReleaseAll" : "click",
+                                command.operation == receiver::ClickOperation::release_all ? "ReleaseAll"
+                                                                                           : "click",
                                 unsigned(command.button), receiver::local_command_state_name(command.state),
-                                command.accepted_clicks, command.completed_clicks,
-                                command.requested_clicks);
+                                command.accepted_clicks, command.completed_clicks, command.requested_clicks);
                 }
                 ImGui::Text("Frame pool: 28 MiB | GPU free at load: %.0f / %.0f MiB", stats.gpu_free_mib,
                             stats.gpu_total_mib);
@@ -1188,9 +1364,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 receiver::validate(settings);
                 if (stats.running)
                     app.configure(settings);
+                mark_preferences();
                 error.clear();
             } catch (const std::exception& e) {
                 error = e.what();
+                settings = stats.running ? app.settings() : previous_settings;
+            }
+        }
+        if (!smoke && !demo && preferences_dirty && !stats.model_loading && !stats.benchmarking &&
+            !app.stats().model_loading && !app.stats().benchmarking && stats.error.empty() &&
+            receiver::now_ns() - preferences_changed > 750'000'000) {
+            try {
+                preferences.save(settings, profile, names);
+                preferences_dirty = false;
+            } catch (const std::exception& e) {
+                error = e.what();
+                preferences_changed = receiver::now_ns();
             }
         }
         ImGui::End();
@@ -1223,6 +1412,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             operation.get();
         } catch (...) {
         }
+    if (!smoke && !demo) {
+        try {
+            if (app.stats().running)
+                settings = app.settings();
+            preferences.save(settings, profile, names);
+        } catch (...) {
+        }
+    }
     app.stop();
     texture.clear();
     ImGui_ImplDX11_Shutdown();

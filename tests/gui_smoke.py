@@ -15,7 +15,7 @@ def free_port():
         return sock.getsockname()[1]
 
 def main():
-    pages=['setup','detect','mouse','saved','human','hub']
+    pages=['setup','models','detect','mouse','saved','human','hub']
     parser=argparse.ArgumentParser()
     parser.add_argument('executable')
     parser.add_argument('--page',choices=pages,default='setup')

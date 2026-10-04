@@ -1,4 +1,5 @@
 #include "receiver/backend.hpp"
+#include "receiver/model.hpp"
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -20,6 +21,9 @@ int main(int argc, char** argv) {
         if (!f || f.peek() != EOF)
             throw std::runtime_error("Raw file size mismatch");
         auto backend = receiver::make_backend(cfg);
+        if (backend->input_size())
+            cfg.input_size = backend->input_size();
+        receiver::reconcile_classes(cfg, backend->class_names());
         auto result = backend->run(frame);
         auto detections = receiver::decode_yolo(result.output, result.candidates, result.classes, w, h,
                                                 cfg.input_size, cfg);
