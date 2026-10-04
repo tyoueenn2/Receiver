@@ -1,5 +1,6 @@
 /build/
 /cache/
+/user-settings/
 /dist/
 .venv/
 *.engine
@@ -9,6 +10,8 @@ __pycache__/
 *.csv
 *.log
 gui-smoke.bmp
+gui-smoke-*.bmp
+gui-smoke-*.png
 imgui.ini
 
 # Include the verified sample export; generated/custom engines stay local.

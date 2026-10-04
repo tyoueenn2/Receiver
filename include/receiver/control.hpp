@@ -64,9 +64,15 @@ struct Detection {
 struct Settings {
     int version = 1;
     std::string bind_ip = "0.0.0.0", sender_ip = "127.0.0.1", pi_ip = "127.0.0.1", model = "", metadata = "";
+    std::string inference_backend = "auto"; // auto, tensorrt, yolo_omni
+    std::string omni_python = "python", omni_source = "", omni_device = "cuda:0";
+    std::string omni_worker = "tools/yolo_omni_worker.py";
     int frame_port = 5000, pi_port = 12345, input_size = 320;
     float confidence = .45f, nms_iou = .45f, fov_radius = 160, reference_x = -1, reference_y = -1;
     std::vector<int> classes;
+    std::vector<std::string> selected_class_names;
+    int inference_fps = 0; // 0: process every available fresh frame.
+    bool auto_size = true;
     bool highest_confidence = false, persistence = false, preview = false;
     float persistence_iou = .2f, aim_x = .5f, aim_y = .5f, offset_x = 0, offset_y = 0;
     float gain_x = .2f, gain_y = .2f, smoothing_ms = 0, deadzone = 1;

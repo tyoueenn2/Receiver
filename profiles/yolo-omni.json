@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "model": "models/yolo-omni.pt",
+  "inference_backend": "auto",
+  "omni_python": ".venv-omni/Scripts/python.exe",
+  "omni_source": "",
+  "omni_device": "cuda:0",
+  "input_size": 320,
+  "classes": [],
+  "sender_ip": "127.0.0.1",
+  "pi_ip": "127.0.0.1",
+  "confidence": 0.45,
+  "preview": true
+}

@@ -3,34 +3,182 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: receiver-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  linux-tests:
+  native:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.configuration }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, compiler: GCC, cc: gcc, cxx: g++, configuration: Release, gui: 'OFF'}
+          - {os: ubuntu-24.04, compiler: Clang, cc: clang, cxx: clang++, configuration: Debug, gui: 'OFF'}
+          - {os: windows-2022, compiler: MSVC, configuration: Release, gui: 'ON'}
+          - {os: windows-2022, compiler: MSVC, configuration: Debug, gui: 'ON'}
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure hardware-free build
+        run: cmake -S . -B build/ci -DRECEIVER_TENSORRT=OFF -DRECEIVER_GUI=${{ matrix.gui }} -DRECEIVER_INTEGRATION_TESTS=ON -DCMAKE_BUILD_TYPE=${{ matrix.configuration }}
+      - run: cmake --build build/ci --config ${{ matrix.configuration }} --parallel 2
+      - name: Unit, process, network and GUI checks
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --output-junit junit.xml
+      - name: Repeat reload and settings stress checks
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:20 -R "receiver_workflows|receiver_reliability" --output-junit stress.xml
+      - name: Build and test extracted release package
+        if: matrix.configuration == 'Release'
+        run: python tools/package_ci.py --build build/ci --name Receiver-${{ matrix.os }}-${{ matrix.compiler }}-${{ github.sha }}
+      - name: Keep tested package and checksums
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Receiver-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+      - name: Keep diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.configuration }}
+          path: |
+            build/ci/*.xml
+            build/ci/Testing/Temporary/
+            build/ci/CMakeFiles/CMakeConfigureLog.yaml
+            build/ci/test-results/
+            build/ci/gui-smoke-*.bmp
+          if-no-files-found: warn
+
+  sanitizers:
+    name: Linux address and undefined-behavior sanitizers
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CC: clang
+      CXX: clang++
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: cmake --preset linux-tests
-      - run: cmake --build --preset linux-tests
-      - run: ctest --preset linux-tests
-      - run: python tests/integration_test.py build/linux-tests/receiver_headless
-      - run: python tests/direction_integration_test.py build/linux-tests/receiver_headless
-      - run: python tests/telemetry_recovery_test.py build/linux-tests/receiver_headless
-  windows-tests:
-    runs-on: windows-2022
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: cmake --preset windows-tests
-      - run: cmake --build --preset windows-tests
-      - run: ctest --preset windows-tests
-      - run: python tests/integration_test.py build/tests/Release/receiver_headless.exe
-      - run: python tests/direction_integration_test.py build/tests/Release/receiver_headless.exe
-      - run: python tests/telemetry_recovery_test.py build/tests/Release/receiver_headless.exe
+      - run: cmake -S . -B build/sanitized -DCMAKE_BUILD_TYPE=Debug -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF -DRECEIVER_SANITIZERS=ON -DRECEIVER_INTEGRATION_TESTS=ON
+      - run: cmake --build build/sanitized --parallel 2
+      - run: ctest --test-dir build/sanitized --output-on-failure --no-tests=error --output-junit junit.xml
+      - run: ctest --test-dir build/sanitized --output-on-failure --repeat until-fail:10 -R "receiver_workflows|receiver_reliability" --output-junit stress.xml
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: windows-test-build-no-tensorrt
-          path: build/tests/Release/*.exe
+          name: diagnostics-sanitizers
+          path: |
+            build/sanitized/*.xml
+            build/sanitized/Testing/Temporary/
+            build/sanitized/test-results/
+
+  cpu-model:
+    name: Real CPU model and official ONNX schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v4
+        with:
+          repository: z637826/yolo-omni
+          ref: 0b8610dbfc4d5eb3496ac8037002ea3c81a24fbd
+          path: build/dependencies/yolo-omni
+          persist-credentials: false
+      - name: Install CPU-only test dependencies
+        run: |
+          python -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r tools/requirements-omni.txt numpy==2.2.6 onnx==1.18.0 onnxruntime==1.22.1 huggingface_hub==0.36.0 pandas==2.2.3 seaborn==0.13.2
+      - run: cmake -S . -B build/cpu -DCMAKE_BUILD_TYPE=Release -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF
+      - run: cmake --build build/cpu --target receiver_verify receiver_inspect_model receiver_decode --parallel 2
+      - name: Independently generated ONNX metadata
+        run: python tests/model_metadata_oracle_test.py build/cpu/receiver_inspect_model
+      - name: Native worker vs direct PyTorch inference and RGB/BGRA preprocessing
+        run: python tests/omni_native_test.py --verify-exe build/cpu/receiver_verify --source build/dependencies/yolo-omni
+      - name: Actual ONNX model and independent detection decoding
+        run: python tests/model_reference_test.py --model models/yolo11n.onnx --image build/dependencies/yolo-omni/ultralytics/assets/bus.jpg --decoder build/cpu/receiver_decode
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-cpu-model
+          path: build/cpu/CMakeFiles/CMakeConfigureLog.yaml
+
+  cuda-compile:
+    name: CUDA kernels and TensorRT API (no GPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/checkout@v4
+        with:
+          repository: NVIDIA/TensorRT
+          ref: b8db91e15be2cae4465ac17fab19e0f969e45407
+          path: build/dependencies/tensorrt
+          sparse-checkout: include
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: onnx/onnx-tensorrt
+          ref: 346bdcae450e2724ffc16d7e15710d3bbf76d7ed
+          path: build/dependencies/onnx-parser
+          sparse-checkout: NvOnnxParser.h
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Install CUDA compiler libraries and headers
+        run: python -m pip install nvidia-cuda-nvrtc-cu12==12.9.86 nvidia-cuda-runtime-cu12==12.9.79 nvidia-cuda-nvcc-cu12==12.9.86
+      - run: python tests/cuda_compile_ci.py
+      - name: Configure JSON header dependency
+        run: cmake -S . -B build/api -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF
+      - name: Compile production TensorRT host code against official API headers
+        shell: bash
+        run: |
+          NVIDIA=$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"] + "/nvidia")')
+          g++ -fsyntax-only -std=c++20 -Wno-deprecated-declarations -DRECEIVER_HAS_TENSORRT=1 -Iinclude -Ibuild/api/_deps/json-src/include -Ibuild/dependencies/tensorrt/include -Ibuild/dependencies/onnx-parser -I"$NVIDIA/cuda_runtime/include" -I"$NVIDIA/cuda_nvcc/include" src/tensorrt.cpp
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: compiled-cuda-kernels
+          path: build/cuda-check/*.ptx
+
+  release:
+    name: Publish tested hardware-free packages on version tags
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    needs: [native, sanitizers, cpu-model, cuda-compile]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Receiver-*
+          path: packages
+          merge-multiple: true
+      - name: Verify package checksums
+        working-directory: packages
+        run: sha256sum --check *.sha256
+      - name: Publish packages after all checks pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" packages/* --verify-tag --generate-notes --title "Receiver $RELEASE_TAG (hardware-free build)"

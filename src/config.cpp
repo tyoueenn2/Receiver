@@ -1,9 +1,15 @@
 #include "receiver/control.hpp"
+#include "receiver/preferences.hpp"
+#include "receiver/network.hpp"
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 namespace receiver {
 using nlohmann::json;
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HumanizationSettings, enabled, path, curve, duration_ms,
@@ -14,18 +20,25 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(TrackingSettings, prediction, dy
                                                 max_lead, sticky_distance, held_radius)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(DirectionSettings, enabled, mode, strength, slow_strength,
                                                 slow_speed, window_ms, left_strength, right_strength)
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(Settings, version, bind_ip, sender_ip, pi_ip, model, metadata,
-                                                frame_port, pi_port, input_size, confidence, nms_iou,
-                                                fov_radius, reference_x, reference_y, classes,
-                                                highest_confidence, persistence, preview, persistence_iou,
-                                                aim_x, aim_y, offset_x, offset_y, gain_x, gain_y,
-                                                smoothing_ms, deadzone, max_step, activation_button,
-                                                max_age_ms, humanization, direction, tracking, mouse_backend,
-                                                secondary_button)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
+    Settings, version, bind_ip, sender_ip, pi_ip, model, metadata, frame_port, pi_port, input_size,
+    confidence, nms_iou, fov_radius, reference_x, reference_y, classes, highest_confidence, persistence,
+    preview, persistence_iou, aim_x, aim_y, offset_x, offset_y, gain_x, gain_y, smoothing_ms, deadzone,
+    max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend,
+    secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
+    selected_class_names, inference_fps, auto_size)
 void validate(const Settings& s) {
     auto range = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
+    if (s.inference_fps < 0 || s.inference_fps > 1000 || s.selected_class_names.size() > 10000)
+        throw std::runtime_error("Inference FPS must be 0..1000");
     if (s.version != 1)
         throw std::runtime_error("Unsupported profile version");
+    if (s.inference_backend != "auto" && s.inference_backend != "tensorrt" &&
+        s.inference_backend != "yolo_omni")
+        throw std::runtime_error("Detection backend must be auto, tensorrt, or yolo_omni");
+    if (s.omni_python.empty() || s.omni_worker.empty() ||
+        (s.omni_device != "cpu" && s.omni_device != "cuda:0"))
+        throw std::runtime_error("YOLO-Omni needs a Python executable, worker, and cpu or cuda:0 device");
     if (s.frame_port < 1 || s.frame_port > 65535 || s.pi_port < 1 || s.pi_port > 65535)
         throw std::runtime_error("Ports must be 1..65535");
     if (s.input_size < 32 || s.input_size > 1024 || s.input_size % 32)
@@ -59,37 +72,98 @@ void validate(const Settings& s) {
         !range(d.right_strength, 0, 2))
         throw std::runtime_error("Direction assistance settings are outside their allowed range");
 }
-Settings load_settings(const std::string& path) {
-    std::ifstream f(path);
-    if (!f)
-        throw std::runtime_error("Cannot open profile: " + path);
-    json j;
-    f >> j;
+json settings_json(const Settings& s) {
+    return json(s);
+}
+Settings settings_from_json(const json& j) {
     auto s = j.get<Settings>();
+    // Existing profiles explicitly chose a size before automatic sizing existed.
+    if (!j.contains("auto_size") && j.contains("input_size"))
+        s.auto_size = false;
     validate(s);
     return s;
 }
+json read_json_file(const std::filesystem::path& path) {
+    constexpr size_t max_size = 8 * 1024 * 1024;
+#ifdef _WIN32
+    // Unlike the CRT's ifstream, this permits replacement while a reader owns the
+    // old file. Each handle still reads one complete version of an atomic save.
+    struct File {
+        HANDLE handle;
+        ~File() {
+            if (handle != INVALID_HANDLE_VALUE)
+                CloseHandle(handle);
+        }
+    } file{CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                       nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)};
+    if (file.handle == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("Cannot open settings file: " + path.string());
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file.handle, &size) || size.QuadPart < 0 || uint64_t(size.QuadPart) > max_size)
+        throw std::runtime_error("Invalid or oversized settings file");
+    std::string content(size_t(size.QuadPart), '\0');
+    size_t offset = 0;
+    while (offset < content.size()) {
+        DWORD bytes = 0;
+        if (!ReadFile(file.handle, content.data() + offset, DWORD(content.size() - offset), &bytes,
+                      nullptr) ||
+            !bytes)
+            throw std::runtime_error("Failed reading settings file");
+        offset += bytes;
+    }
+#else
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f)
+        throw std::runtime_error("Cannot open settings file: " + path.string());
+    auto size = f.tellg();
+    if (size < 0 || uint64_t(size) > max_size)
+        throw std::runtime_error("Invalid or oversized settings file");
+    std::string content(size_t(size), '\0');
+    f.seekg(0);
+    if (!f.read(content.data(), std::streamsize(content.size())))
+        throw std::runtime_error("Failed reading settings file");
+#endif
+    return json::parse(content);
+}
+Settings load_settings(const std::string& path) {
+    return settings_from_json(read_json_file(path));
+}
+void write_json_atomic(const json& value, const std::filesystem::path& path) {
+    auto temp = path;
+    temp += "." + std::to_string(random_id()) + ".tmp";
+    try {
+        {
+            std::ofstream f(temp);
+            if (!f)
+                throw std::runtime_error("Cannot write profile");
+            f << value.dump(2) << '\n';
+            f.flush();
+            if (!f)
+                throw std::runtime_error("Failed writing profile");
+        }
+#ifdef _WIN32
+        DWORD error = ERROR_SUCCESS;
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            if (MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                return;
+            error = GetLastError();
+            if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        throw std::runtime_error("Cannot replace settings file (Windows error " + std::to_string(error) +
+                                 ")");
+#else
+        std::filesystem::rename(temp, path);
+#endif
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove(temp, ignored);
+        throw;
+    }
+}
 void save_settings(const Settings& s, const std::string& path) {
     validate(s);
-    auto temp = path + ".tmp";
-    {
-        std::ofstream f(temp);
-        if (!f)
-            throw std::runtime_error("Cannot write profile");
-        f << json(s).dump(2) << '\n';
-        f.flush();
-        if (!f)
-            throw std::runtime_error("Failed writing profile");
-    }
-    // The GUI never serializes its runtime armed flag.
-    std::error_code error;
-    std::filesystem::rename(temp, path, error);
-    if (error) {
-        std::filesystem::remove(path, error);
-        error.clear();
-        std::filesystem::rename(temp, path, error);
-        if (error)
-            throw std::runtime_error("Cannot replace profile: " + error.message());
-    }
+    write_json_atomic(settings_json(s), path);
 }
 } // namespace receiver

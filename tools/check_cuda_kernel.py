@@ -7,7 +7,10 @@ from pathlib import Path
 
 def main():
     p = argparse.ArgumentParser(); p.add_argument('--nvrtc', required=True)
-    p.add_argument('--output', default='preprocess.ptx'); p.add_argument('--arch', default='compute_86'); a = p.parse_args()
+    p.add_argument('--output', default='preprocess.ptx'); p.add_argument('--arch', default='compute_86')
+    p.add_argument('--source', help='Optional production kernel header')
+    p.add_argument('--include', action='append', default=[], help='Optional CUDA header include directory')
+    a = p.parse_args()
     library = Path(a.nvrtc).resolve()
     dll_dir = os.add_dll_directory(str(library.parent)) if os.name == 'nt' else None
     # NVRTC loads its builtins internally with legacy DLL search semantics.
@@ -21,11 +24,13 @@ def main():
     nvrtc.nvrtcGetPTXSize.argtypes = [c.c_void_p, c.POINTER(c.c_size_t)]
     nvrtc.nvrtcGetPTX.argtypes = [c.c_void_p, c.c_void_p]
     nvrtc.nvrtcDestroyProgram.argtypes = [c.POINTER(c.c_void_p)]
-    source = (Path(__file__).resolve().parents[1] / 'src/preprocess_kernel.cuh').read_bytes()
+    source = (Path(a.source) if a.source else Path(__file__).resolve().parents[1] / 'src/preprocess_kernel.cuh').read_bytes()
     assert nvrtc.nvrtcCreateProgram(c.byref(program), source, b'preprocess_kernel.cuh', 0, None, None) == 0
     try:
-        options = (c.c_char_p * 2)(f'--gpu-architecture={a.arch}'.encode(), b'--std=c++17')
-        result = nvrtc.nvrtcCompileProgram(program, 2, options)
+        flags = [f'--gpu-architecture={a.arch}'.encode(), b'--std=c++17']
+        flags += [f'--include-path={Path(path).resolve()}'.encode() for path in a.include]
+        options = (c.c_char_p * len(flags))(*flags)
+        result = nvrtc.nvrtcCompileProgram(program, len(flags), options)
         length = c.c_size_t(); nvrtc.nvrtcGetProgramLogSize(program, c.byref(length))
         log = c.create_string_buffer(length.value); nvrtc.nvrtcGetProgramLog(program, log)
         if result:

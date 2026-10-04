@@ -1,8 +1,20 @@
 # UDP Vision Receiver
 
-C++20 receiver for raw UDP frames, YOLO11 TensorRT inference, and relative mouse commands to a Raspberry Pi USB proxy. The production headless runner supports Linux and Windows; the optional Dear ImGui/DirectX 11 GUI and local-mouse test backend remain Windows-only. A synthetic sender and loopback-only Pi simulator are included.
+**YOLO-Omni:** native `.pt` detection models now use a persistent PyTorch backend.
+The default **Auto** selects PyTorch for `.pt` and TensorRT for `.onnx`/`.engine`.
+TensorRT builds support [direct engine loading](docs/ENGINE_FILES.md), including
+Ultralytics metadata headers and FP16 input/output.
+See [YOLO-Omni setup](docs/YOLO_OMNI.md) for runtime installation, model selection,
+headless options and validation limits.
 
-**Delivery status:** the default CI builds are **test builds without TensorRT**. They exercise the Windows GUI plus the Linux and Windows headless network/control paths in explicit simulation mode. The production TensorRT 10 backend is implemented for both operating systems and requires a local CUDA/TensorRT installation. See [validation results](docs/VALIDATION.md) for exactly what has been tested on deployment hardware.
+C++20 receiver for raw UDP frames, YOLO11/YOLO-Omni inference, and relative mouse commands to a Raspberry Pi USB proxy. The production headless runner supports Linux and Windows; the optional Dear ImGui/DirectX 11 GUI and local-mouse test backend remain Windows-only. A synthetic sender and loopback-only Pi simulator are included.
+
+**Delivery status:** the default CI builds are **builds without TensorRT**. They support explicit simulation and native `.pt` inference when the Python model runtime is installed. The production TensorRT 10 backend is implemented for both operating systems and requires a local CUDA/TensorRT installation. See [validation results](docs/VALIDATION.md) and [YOLO-Omni checks](docs/YOLO_OMNI.md#local-validation) for what has been tested.
+
+CI now checks Linux/Windows builds, worker faults, repeated hot swaps, settings
+recovery, sanitizers, real CPU inference, CUDA compilation and extracted packages.
+See [checks without a device](docs/CI.md) for coverage, downloadable artifacts and
+the hardware behavior that still needs validation.
 
 The exported sample `models/yolo11n.onnx` and its manifest are included in this directory. This is the standard COCO detection model, not a model trained for a particular application. Real desktop capture on the target PC is intentionally outside this first delivery.
 
@@ -11,10 +23,16 @@ The exported sample `models/yolo11n.onnx` and its manifest are included in this 
 After building the app or unpacking a test build, install Python 3.12 or newer and double-click **Start Demo.cmd**. This opens the app with example pictures and a simulated mouse device already connected. Close the app to stop the demo helpers.
 
 - **Setup** explains how to connect devices or try practice mode.
+- **Models** switches models during a session, chooses image size automatically,
+  remembers each model's settings and measures real-model processing speed.
 - **Detection** controls which object is selected and where to point within its box.
 - **Mouse** controls the named button to hold and output limits.
 - **Humanization** contains sensitivity, smoothing, movement styles, jitter, and configurable direction-based strength. See [control details](docs/HUMANIZATION.md).
-- **Saved settings** opens and saves setup files using Windows file pickers.
+- **Saved settings** searches, opens and exports profiles. Accepted settings
+  restore automatically next launch, with movement off.
+
+See [model switching, automatic sizes and preferences](docs/MODEL_WORKFLOWS.md)
+for supported metadata, rollback behavior, library refresh and performance tuning.
 
 Use **Show preview** to see the picture. **Enable practice movement** sends commands only to the simulator; it never moves your actual mouse. The simulated device holds the right button for you. **Turn movement off** or **Delete** disables movement. Practice uses a fixed example detection, not YOLO inference. Technical settings and performance numbers are in expandable sections.
 
@@ -38,7 +56,7 @@ py tools/test_sender.py --width 320 --height 320 --fps 120 --seconds 60
 
 For a source build, executables are under `build/tests/Release/` instead. The mock Pi reports a held right button by default and records received commands in `mock_commands.json`. It never accesses USB or moves the local mouse. Simulation refuses any sender/Pi IP other than `127.0.0.1`.
 
-For manual GUI startup, run `receiver.exe`, choose **Practice on this computer**, then **Start practice** while the two test peers are running. Test builds default to practice mode; production GPU builds also offer a two-computer setup.
+For manual GUI startup, run `receiver.exe`, choose **Practice on this computer**, then **Start practice** while the two test peers are running. Builds without TensorRT default to practice mode and also allow a two-computer setup using native `.pt` detection.
 
 ## Headless operation and logging
 
@@ -117,7 +135,7 @@ python3 tests/telemetry_recovery_test.py build/linux-tests/receiver_headless
 1. Install a public proxy build that implements UPX1, UPS1/UPT1, UPS3/UPT3, and UPC1/UPA1 version 2, then run it with injection enabled. UPT3 is the production telemetry contract; the audited proxy's UPT2 is deliberately not negotiated because it conflicts with the canonical 80-byte layout. The proxy repository is authoritative; Receiver does not contain or generate a proxy implementation. Follow the proxy's USB setup instructions and move the physical mouse once after enumeration.
 2. Set the receiver's **Sender IPv4**, **Pi IPv4**, and listen port. If configured on the Pi, `USB_PROXY_PEER` must be the processing PC's IPv4 address. The receiver uses one persistent UDP socket/source port for telemetry, UPX1 snapshots, and scheduled-click commands.
 3. Allow inbound UDP on the configured frame port in the processing PC's firewall. The frame path should use wired 2.5 GbE or faster as planned. The Pi's control link only carries small commands/status messages.
-4. Load `profiles/yolo11n.json`. Paths in profiles are relative to the process working directory; launch from this directory or use absolute model paths. Set model input to 160 or 320 as desired. Load your application-specific exported model when available.
+4. Load `profiles/yolo11n.json`. Paths in profiles are relative to the process working directory; launch from this directory or use absolute model paths. New model selections read their required or preferred input size automatically. Dynamic models can use a saved size or the performance helper's recommendation.
 5. Start the receiver. The first load builds and warms a TensorRT engine on this GPU; it can take minutes. The GUI remains responsive. Stop runs asynchronously, but cannot interrupt an in-progress TensorRT builder call.
 6. Send frames conforming to [the protocol](docs/PROTOCOL.md) and the complete [future sender contract](docs/SENDER.md). The provided test sender can run on the target PC and send a raw image file for end-to-end testing, but does not capture its screen.
 7. Arm the GUI and hold the configured physical mouse button (right button by default). Output requires fresh telemetry, clock synchronization, fresh frames, and a current detection inside the FOV.
@@ -140,7 +158,7 @@ py -3.12 -m venv .venv
 
 The exporter writes an ONNX file and `<model>.onnx.json` containing class names, the raw detection contract, and a SHA-256 digest. Default exports have dynamic spatial dimensions, allowing separate optimized engines at 160 and 320. `--fixed` exports require the GUI input size to match exactly. Batch size is always one; model input dimensions must be multiples of 32, from 32 to 1024. Capture sizes need not be multiples of 32.
 
-The runtime validates float32 NCHW input and raw `[1, 4 + classes, candidates]` output. Internal TensorRT layers use FP16 where supported; I/O remains float32. Segmentation, pose, classification, embedded-NMS, external-data ONNX, and arbitrary prebuilt engines are not supported. Only locally generated cache engines are loaded. Engine keys include the model hash, input size, GPU model, runtime/driver versions, and precision mode. Cache files live under `cache/`; deleting a cache file forces a rebuild.
+The ONNX path validates float32 NCHW input and raw `[1, 4 + classes, candidates]` output. Internal TensorRT layers use FP16 where supported; its I/O remains float32. Direct `.engine` loading also supports FP16 I/O and requires embedded or companion class metadata; see [engine requirements](docs/ENGINE_FILES.md). Segmentation, pose, classification, embedded-NMS and external-data ONNX are not supported. Cache keys include the model hash, input size, GPU model, runtime/driver versions, and precision mode. Cache files live under `cache/`; deleting a cache file forces a rebuild when loading ONNX.
 
 For a GPU/reference comparison on a tightly packed RGB24 file:
 

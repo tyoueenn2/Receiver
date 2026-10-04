@@ -2,14 +2,17 @@
 #include "backend.hpp"
 #include "injection.hpp"
 #include "network.hpp"
+#include "performance.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <fstream>
 #include <mutex>
 #include <thread>
+#include <vector>
 namespace receiver {
 struct Samples {
-    std::array<double, 2048> values{};
+    // Snapshots contain eight rings. Heap storage avoids large Debug stack frames.
+    std::vector<double> values = std::vector<double>(2048);
     uint64_t count = 0;
     void add(double v) {
         values[count++ % values.size()] = v;
@@ -19,8 +22,8 @@ struct Samples {
 struct Stats {
     ReassemblyStats network;
     InjectionMetrics injection;
-    uint64_t inferred = 0, sent = 0, synthetic_snapshots = 0, release_snapshots = 0,
-             hold_heartbeats = 0, replaced = 0, stale = 0, telemetry_rejected = 0;
+    uint64_t inferred = 0, sent = 0, synthetic_snapshots = 0, release_snapshots = 0, hold_heartbeats = 0,
+             replaced = 0, stale = 0, telemetry_rejected = 0;
     bool running = false, armed = false, active = false, synchronized = false, pi_ready = false;
     int width = 0, height = 0;
     uint8_t physical = 0;
@@ -29,6 +32,11 @@ struct Stats {
     bool motion_available = false;
     double mouse_speed = 0, assist_strength = 0;
     std::string status = "Stopped", backend = "Not loaded", error;
+    std::vector<std::string> model_classes;
+    bool model_loading = false, benchmarking = false;
+    uint64_t model_revision = 0;
+    std::string model_message, model_error;
+    BenchmarkReport benchmark;
     Samples reassembly, upload, inference, postprocess, submit, receiver_total, capture_age, control_handoff;
 };
 struct Preview {
@@ -58,20 +66,27 @@ class App {
     ClockSync clock_;
     uint64_t epoch_ = 0, result_id_ = 0;
     bool simulated_ = false;
+    BackendFactory backend_factory_;
+    std::optional<Settings> pending_model_;
+    std::optional<PerformanceGoal> pending_benchmark_;
+    std::atomic<bool> benchmark_cancel_{false};
     void receive_loop();
     void inference_loop();
     void pi_loop();
     void fail(const std::string& error, ReleaseReason reason);
 
   public:
-    App();
+    explicit App(BackendFactory factory = make_backend);
     ~App() {
         stop();
     }
     void start(const Settings& settings, bool simulated = false);
     void stop();
     void arm(bool enabled);
-    void configure(const Settings& settings);
+    void configure(const Settings& settings, bool reload_model = false);
+    Settings settings() const;
+    void benchmark(PerformanceGoal goal);
+    void cancel_benchmark();
     void button_down(int button);
     void button_up(int button);
     void set_button(int button, bool state);

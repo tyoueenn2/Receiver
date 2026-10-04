@@ -1,5 +1,30 @@
 # Validation record — 2026-09-13
 
+## Model workflows — 2026-10-04
+
+The Windows non-TensorRT build completed with the GUI, headless runner, model
+verification tool and all test executables. All nine CTest suites passed.
+New workflow checks cover ONNX metadata and malformed input, automatic fixed
+and preferred sizes, compatible legacy profiles, per-model preferences and
+class-label remapping, library add/delete refresh, benchmark recommendations,
+engine profile size discovery through a test backend, cancellation, FPS limits
+and accepted-settings rollback. The threaded App test receives frames during a
+reload, keeps its connections running after a failed model, supports reloading
+weights at the same path and cancels loading on shutdown.
+
+All seven GUI pages passed the live loopback framebuffer check; the Models page
+was visually inspected and rerun after the final UI changes. The main network,
+direction and telemetry-recovery integrations passed. One telemetry run exceeded
+the permanent-UPT1 250 ms gap limit (300 ms); a subsequent isolated full run
+passed unchanged. Timing results depend on host scheduling.
+
+The TensorRT source passed a C++ syntax/API check against the local TensorRT
+10.x and CUDA headers. This was not a linked TensorRT build or execution test.
+The new reload and benchmark regression tests use deterministic backends and a
+native-worker fixture. Real-checkpoint accuracy, multi-model GPU memory limits,
+TensorRT engine/profile execution, deployment GPU throughput, Linux execution
+and physical Pi/USB behavior remain hardware or platform validation work.
+
 ## Telemetry startup and recovery — 2026-09-14
 
 Receiver now performs version-bound, one-shot UPT3 upgrade probes while continuing normal UPT1 renewals. Failed attempts back off from 250 ms to a 4 s cap; the 50 ms probe-response window, configured peer endpoint, Receiver client session, server epoch, and requested protocol version are all validated before upgrade. Healthy UPT1 gate state is not reset by a background probe. A confirmed upgrade resets the physical-motion baseline and immediately refreshes scheduled-click endpoint timing. Confirmed peer loss returns to the 100 ms startup UPT3 probe, and the first restored UPT1 response accelerates another upgrade attempt. UPT2 negotiation remains disabled.

@@ -1,4 +1,6 @@
 #include "receiver/backend.hpp"
+#include "receiver/model.hpp"
+#include "receiver/engine.hpp"
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
 #ifdef _WIN32
@@ -8,6 +10,8 @@
 #include <openssl/evp.h>
 #endif
 #include <cuda_runtime.h>
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -20,6 +24,8 @@
 #endif
 namespace receiver {
 void launch_preprocess(const uint8_t*, float*, int, int, int, int, int, int, int, int, cudaStream_t);
+void launch_float_to_half(const float*, void*, size_t, cudaStream_t);
+void launch_half_to_float(const void*, float*, size_t, cudaStream_t);
 static void checked(cudaError_t e) {
     if (e != cudaSuccess)
         throw std::runtime_error(std::string("CUDA: ") + cudaGetErrorString(e));
@@ -116,9 +122,12 @@ class TrtBackend final : public Backend {
     float* input_ = nullptr;
     float* output_ = nullptr;
     float* host_output_ = nullptr;
+    void* half_input_ = nullptr;
+    void* half_output_ = nullptr;
     int size_ = 0, classes_ = 0, count_ = 0;
     size_t output_count_ = 0;
     std::string input_name_, output_name_, description_;
+    std::vector<std::string> names_;
     void cleanup() {
         if (stream_)
             cudaStreamSynchronize(stream_);
@@ -128,6 +137,10 @@ class TrtBackend final : public Backend {
             cudaFree(input_);
         if (output_)
             cudaFree(output_);
+        if (half_input_)
+            cudaFree(half_input_);
+        if (half_output_)
+            cudaFree(half_output_);
         if (pinned_)
             cudaFreeHost(pinned_);
         if (host_output_)
@@ -154,6 +167,28 @@ class TrtBackend final : public Backend {
     std::string description() const override {
         return description_;
     }
+    std::vector<std::string> class_names() const override {
+        return names_;
+    }
+    int input_size() const override {
+        return size_;
+    }
+    std::vector<int> supported_sizes() const override {
+        const auto shape = engine_->getTensorShape(input_name_.c_str());
+        if (shape.nbDims == 4 && shape.d[2] > 0 && shape.d[3] > 0)
+            return {size_};
+        const auto lo = engine_->getProfileShape(input_name_.c_str(), 0, nvinfer1::OptProfileSelector::kMIN);
+        const auto hi = engine_->getProfileShape(input_name_.c_str(), 0, nvinfer1::OptProfileSelector::kMAX);
+        std::vector<int> sizes;
+        if (lo.nbDims == 4 && hi.nbDims == 4) {
+            for (int size : {160, 256, 320, 416, 512, 640, size_})
+                if (size >= lo.d[2] && size >= lo.d[3] && size <= hi.d[2] && size <= hi.d[3])
+                    sizes.push_back(size);
+        }
+        std::sort(sizes.begin(), sizes.end());
+        sizes.erase(std::unique(sizes.begin(), sizes.end()), sizes.end());
+        return sizes;
+    }
     std::pair<size_t, size_t> device_memory() const override {
         size_t free = 0, total = 0;
         checked(cudaMemGetInfo(&free, &total));
@@ -174,108 +209,164 @@ class TrtBackend final : public Backend {
         report("TensorRT: reading and verifying model");
         auto model = read_file(s.model);
         auto hash = sha256(model);
+        auto extension = std::filesystem::path(s.model).extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        const bool direct_engine = extension == ".engine";
         const auto metadata = s.metadata.empty() ? s.model + ".json" : s.metadata;
         std::ifstream mf(metadata);
-        if (!mf)
-            throw std::runtime_error("Missing model manifest. Export with tools/export_model.py");
+        if (!mf && !s.metadata.empty())
+            throw std::runtime_error(direct_engine
+                                         ? "Cannot open selected engine metadata file: " + metadata
+                                         : "Missing model manifest. Export with tools/export_model.py");
         nlohmann::json meta;
-        mf >> meta;
-        if (meta.at("version") != 1 || meta.at("task") != "detect" || meta.at("layout") != "NCHW" ||
-            meta.at("output") != "raw_yolo11" || meta.at("sha256") != hash)
-            throw std::runtime_error(
-                "Model manifest mismatch; only verified raw YOLO11 detection exports are supported");
-        classes_ = int(meta.at("names").size());
-        if (classes_ < 1 || classes_ > 10000)
-            throw std::runtime_error("Invalid model class metadata");
-        for (int c : s.classes)
-            if (c >= classes_)
-                throw std::runtime_error("Selected class is absent from model");
-        int driver = 0, runtime_version = 0;
-        checked(cudaDriverGetVersion(&driver));
-        checked(cudaRuntimeGetVersion(&runtime_version));
-        std::string key = hash + ":" + std::to_string(size_) + ":" + props.name + ":" +
-                          std::to_string(NV_TENSORRT_VERSION) + ":" + std::to_string(driver) + ":" +
-                          std::to_string(runtime_version) + ":fp16-v1:" + std::to_string(classes_);
-        auto cache_key = sha256(Bytes(reinterpret_cast<const uint8_t*>(key.data()), key.size()));
-        std::filesystem::create_directories("cache");
-        auto cache = std::filesystem::path("cache") / (cache_key + ".engine");
         runtime_.reset(nvinfer1::createInferRuntime(log_));
         if (!runtime_)
             throw std::runtime_error("TensorRT runtime creation failed: " + log_.message());
-        if (std::filesystem::exists(cache)) {
-            report("TensorRT: loading cached engine");
-            auto data = read_file(cache);
-            engine_.reset(runtime_->deserializeCudaEngine(data.data(), data.size()));
-        }
-        if (!engine_) {
-            report("TensorRT: parsing ONNX model");
-            std::unique_ptr<nvinfer1::IBuilder> builder(nvinfer1::createInferBuilder(log_));
-            if (!builder)
-                throw std::runtime_error("TensorRT builder failed");
-            std::unique_ptr<nvinfer1::INetworkDefinition> network(builder->createNetworkV2(0));
-            if (!network)
-                throw std::runtime_error("TensorRT network creation failed");
-            std::unique_ptr<nvonnxparser::IParser> parser(nvonnxparser::createParser(*network, log_));
-            if (!parser)
-                throw std::runtime_error("ONNX parser creation failed");
-            if (!parser->parse(model.data(), model.size()))
-                throw std::runtime_error("ONNX parsing failed: " + log_.message());
-            if (network->getNbInputs() != 1 || network->getNbOutputs() != 1)
-                throw std::runtime_error(
-                    "Expected one detection input/output; pose/segmentation/NMS exports are unsupported");
-            auto* input = network->getInput(0);
-            auto dims = input->getDimensions();
-            auto out = network->getOutput(0)->getDimensions();
-            if (dims.nbDims != 4 || (dims.d[0] != 1 && dims.d[0] != -1) || dims.d[1] != 3 ||
-                (dims.d[2] != -1 && dims.d[2] != size_) || (dims.d[3] != -1 && dims.d[3] != size_) ||
-                out.nbDims != 3 || (out.d[1] != 4 + classes_ && out.d[1] != -1) ||
-                input->getType() != nvinfer1::DataType::kFLOAT ||
-                network->getOutput(0)->getType() != nvinfer1::DataType::kFLOAT)
-                throw std::runtime_error("Expected float32 [1,3,H,W] and [1,4+classes,N]; fixed model size "
-                                         "must match selected input");
-            std::unique_ptr<nvinfer1::IBuilderConfig> config(builder->createBuilderConfig());
-            config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1024ull * 1024 * 1024);
-            config->setFlag(nvinfer1::BuilderFlag::kFP16);
-            // Profiles are owned by IBuilder; their destructor is protected.
-            auto* profile = builder->createOptimizationProfile();
-            if (!profile)
-                throw std::runtime_error("Cannot create optimization profile");
-            if (dims.d[0] == -1 || dims.d[2] == -1 || dims.d[3] == -1) {
-                for (auto selector : {nvinfer1::OptProfileSelector::kMIN, nvinfer1::OptProfileSelector::kOPT,
-                                      nvinfer1::OptProfileSelector::kMAX})
-                    if (!profile->setDimensions(input->getName(), selector,
-                                                nvinfer1::Dims4{1, 3, size_, size_}))
-                        throw std::runtime_error("Invalid optimization dimensions");
-                if (config->addOptimizationProfile(profile) < 0)
-                    throw std::runtime_error("Invalid TensorRT profile");
-            }
-            report("TensorRT: building FP16 engine");
-            std::unique_ptr<nvinfer1::IHostMemory> serialized(
-                builder->buildSerializedNetwork(*network, *config));
-            if (!serialized)
-                throw std::runtime_error("TensorRT engine build failed: " + log_.message());
-            engine_.reset(runtime_->deserializeCudaEngine(serialized->data(), serialized->size()));
+        if (direct_engine) {
+            auto payload = inspect_engine_payload(model);
+            meta = payload.metadata;
+            if (mf)
+                mf >> meta;
+            names_ = engine_class_names(meta, hash);
+            classes_ = int(names_.size());
+            for (int c : s.classes)
+                if (c >= classes_)
+                    throw std::runtime_error("Selected class is absent from engine");
+            report("TensorRT: loading selected engine");
+            engine_.reset(runtime_->deserializeCudaEngine(model.data() + payload.offset,
+                                                          model.size() - payload.offset));
             if (!engine_)
-                throw std::runtime_error("Engine deserialization failed");
-            auto tmp = cache;
-            tmp += ".tmp";
-            report("TensorRT: caching engine");
-            {
-                std::ofstream f(tmp, std::ios::binary);
-                f.write(static_cast<const char*>(serialized->data()), std::streamsize(serialized->size()));
-                if (!f)
-                    throw std::runtime_error("Engine cache write failed");
+                throw std::runtime_error(
+                    "Cannot load TensorRT engine; check GPU, TensorRT version and required plugins: " +
+                    log_.message());
+        } else {
+            if (mf)
+                mf >> meta;
+            else {
+                auto embedded = inspect_onnx(model);
+                meta = embedded.metadata;
+                if (meta.value("task", "") != "detect" || embedded.names.empty())
+                    throw std::runtime_error(
+                        "ONNX needs embedded detection class metadata or a verified manifest");
+                meta["names"] = embedded.names;
+                meta["version"] = 1;
+                meta["layout"] = "NCHW";
+                meta["output"] = "raw_yolo11";
+                meta["sha256"] = hash;
             }
-            std::error_code error;
-            std::filesystem::remove(cache, error);
-            std::filesystem::rename(tmp, cache);
-        }
+            if (meta.at("version") != 1 || meta.at("task") != "detect" || meta.at("layout") != "NCHW" ||
+                (meta.at("output") != "raw_yolo11" && meta.at("output") != "raw_yolo_omni") ||
+                meta.at("sha256") != hash)
+                throw std::runtime_error(
+                    "Model manifest mismatch; export a verified raw YOLO11 or YOLO-Omni detection model");
+            names_ = engine_class_names(meta, hash);
+            classes_ = int(names_.size());
+            for (int c : s.classes)
+                if (c >= classes_)
+                    throw std::runtime_error("Selected class is absent from model");
+            int driver = 0, runtime_version = 0;
+            checked(cudaDriverGetVersion(&driver));
+            checked(cudaRuntimeGetVersion(&runtime_version));
+            std::string key = hash + ":" + std::to_string(size_) + ":" + props.name + ":" +
+                              std::to_string(NV_TENSORRT_VERSION) + ":" + std::to_string(driver) + ":" +
+                              std::to_string(runtime_version) + ":fp16-v1:" + std::to_string(classes_);
+            auto cache_key = sha256(Bytes(reinterpret_cast<const uint8_t*>(key.data()), key.size()));
+            std::filesystem::create_directories("cache");
+            auto cache = std::filesystem::path("cache") / (cache_key + ".engine");
+            if (std::filesystem::exists(cache)) {
+                report("TensorRT: loading cached engine");
+                auto data = read_file(cache);
+                engine_.reset(runtime_->deserializeCudaEngine(data.data(), data.size()));
+            }
+            if (!engine_) {
+                report("TensorRT: parsing ONNX model");
+                std::unique_ptr<nvinfer1::IBuilder> builder(nvinfer1::createInferBuilder(log_));
+                if (!builder)
+                    throw std::runtime_error("TensorRT builder failed");
+                std::unique_ptr<nvinfer1::INetworkDefinition> network(builder->createNetworkV2(0));
+                if (!network)
+                    throw std::runtime_error("TensorRT network creation failed");
+                std::unique_ptr<nvonnxparser::IParser> parser(nvonnxparser::createParser(*network, log_));
+                if (!parser)
+                    throw std::runtime_error("ONNX parser creation failed");
+                if (!parser->parse(model.data(), model.size()))
+                    throw std::runtime_error("ONNX parsing failed: " + log_.message());
+                if (network->getNbInputs() != 1 || network->getNbOutputs() != 1)
+                    throw std::runtime_error(
+                        "Expected one detection input/output; pose/segmentation/NMS exports are unsupported");
+                auto* input = network->getInput(0);
+                auto dims = input->getDimensions();
+                auto out = network->getOutput(0)->getDimensions();
+                if (dims.nbDims != 4 || (dims.d[0] != 1 && dims.d[0] != -1) || dims.d[1] != 3 ||
+                    (dims.d[2] != -1 && dims.d[2] != size_) || (dims.d[3] != -1 && dims.d[3] != size_) ||
+                    out.nbDims != 3 || (out.d[1] != 4 + classes_ && out.d[1] != -1) ||
+                    input->getType() != nvinfer1::DataType::kFLOAT ||
+                    network->getOutput(0)->getType() != nvinfer1::DataType::kFLOAT)
+                    throw std::runtime_error(
+                        "Expected float32 [1,3,H,W] and [1,4+classes,N]; fixed model size "
+                        "must match selected input");
+                std::unique_ptr<nvinfer1::IBuilderConfig> config(builder->createBuilderConfig());
+                config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1024ull * 1024 * 1024);
+                config->setFlag(nvinfer1::BuilderFlag::kFP16);
+                // Profiles are owned by IBuilder; their destructor is protected.
+                auto* profile = builder->createOptimizationProfile();
+                if (!profile)
+                    throw std::runtime_error("Cannot create optimization profile");
+                if (dims.d[0] == -1 || dims.d[2] == -1 || dims.d[3] == -1) {
+                    for (auto selector :
+                         {nvinfer1::OptProfileSelector::kMIN, nvinfer1::OptProfileSelector::kOPT,
+                          nvinfer1::OptProfileSelector::kMAX})
+                        if (!profile->setDimensions(input->getName(), selector,
+                                                    nvinfer1::Dims4{1, 3, size_, size_}))
+                            throw std::runtime_error("Invalid optimization dimensions");
+                    if (config->addOptimizationProfile(profile) < 0)
+                        throw std::runtime_error("Invalid TensorRT profile");
+                }
+                report("TensorRT: building FP16 engine");
+                std::unique_ptr<nvinfer1::IHostMemory> serialized(
+                    builder->buildSerializedNetwork(*network, *config));
+                if (!serialized)
+                    throw std::runtime_error("TensorRT engine build failed: " + log_.message());
+                engine_.reset(runtime_->deserializeCudaEngine(serialized->data(), serialized->size()));
+                if (!engine_)
+                    throw std::runtime_error("Engine deserialization failed");
+                auto tmp = cache;
+                tmp += ".tmp";
+                report("TensorRT: caching engine");
+                {
+                    std::ofstream f(tmp, std::ios::binary);
+                    f.write(static_cast<const char*>(serialized->data()),
+                            std::streamsize(serialized->size()));
+                    if (!f)
+                        throw std::runtime_error("Engine cache write failed");
+                }
+                std::error_code error;
+                std::filesystem::remove(cache, error);
+                std::filesystem::rename(tmp, cache);
+                auto engine_meta = meta;
+                engine_meta["sha256"] =
+                    sha256(Bytes(static_cast<const uint8_t*>(serialized->data()), serialized->size()));
+                engine_meta["format"] = "tensorrt_engine";
+                engine_meta["input_size"] = size_;
+                engine_meta["dynamic"] = false;
+                std::ofstream sidecar(cache.string() + ".json");
+                sidecar << engine_meta.dump(2) << '\n';
+                if (!sidecar)
+                    throw std::runtime_error("Engine metadata write failed");
+            }
+        } // ONNX builds/cache; selected .engine files never enter the builder.
         if (engine_->getNbIOTensors() != 2)
-            throw std::runtime_error("Cached engine has an unsupported I/O contract");
+            throw std::runtime_error("Engine must have one image input and one raw detection output");
         for (int i = 0; i < 2; ++i) {
             const char* name = engine_->getIOTensorName(i);
-            if (engine_->getTensorDataType(name) != nvinfer1::DataType::kFLOAT)
-                throw std::runtime_error("Engine I/O must be float32");
+            auto type = engine_->getTensorDataType(name);
+            if (type != nvinfer1::DataType::kFLOAT && type != nvinfer1::DataType::kHALF)
+                throw std::runtime_error("Engine I/O must be float32 or float16");
+            if (engine_->getTensorLocation(name) != nvinfer1::TensorLocation::kDEVICE ||
+                engine_->getTensorFormat(name) != nvinfer1::TensorFormat::kLINEAR ||
+                engine_->getTensorVectorizedDim(name) != -1 || engine_->isShapeInferenceIO(name))
+                throw std::runtime_error("Engine I/O must use unvectorized linear device tensors");
             if (engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT)
                 input_name_ = name;
             else
@@ -283,13 +374,28 @@ class TrtBackend final : public Backend {
         }
         if (input_name_.empty() || output_name_.empty())
             throw std::runtime_error("Missing engine input/output");
+        auto required = engine_->getTensorShape(input_name_.c_str());
+        if (required.nbDims == 4 && required.d[2] > 0 && required.d[3] == required.d[2])
+            size_ = required.d[2];
+        else if (direct_engine && s.auto_size) {
+            auto preferred =
+                engine_->getProfileShape(input_name_.c_str(), 0, nvinfer1::OptProfileSelector::kOPT);
+            if (preferred.nbDims == 4 && preferred.d[0] == 1 && preferred.d[1] == 3 &&
+                preferred.d[2] == preferred.d[3])
+                size_ = preferred.d[2];
+        }
+        if (size_ < 32 || size_ > 1024 || size_ % 32)
+            throw std::runtime_error("Engine input size must be 32..1024 in multiples of 32");
         context_.reset(engine_->createExecutionContext());
         if (!context_ || !context_->setInputShape(input_name_.c_str(), nvinfer1::Dims4{1, 3, size_, size_}))
             throw std::runtime_error("Cannot select model input size");
         auto out = context_->getTensorShape(output_name_.c_str());
-        if (out.nbDims != 3 || out.d[0] != 1 || out.d[1] != 4 + classes_ || out.d[2] < 1 || out.d[2] > 100000)
-            throw std::runtime_error("Unsupported raw YOLO output shape");
-        count_ = int(out.d[2]);
+        auto in = context_->getTensorShape(input_name_.c_str());
+        if (in.nbDims < 0 || out.nbDims < 0)
+            throw std::runtime_error(
+                "Engine input/output shapes remain unresolved for the selected processing size");
+        count_ =
+            validate_engine_shape({in.d, size_t(in.nbDims)}, {out.d, size_t(out.nbDims)}, size_, classes_);
         output_count_ = size_t(classes_ + 4) * count_;
         report("TensorRT: allocating CUDA buffers");
         checked(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking));
@@ -299,14 +405,20 @@ class TrtBackend final : public Backend {
         checked(cudaMalloc(reinterpret_cast<void**>(&raw_), max_frame_bytes));
         checked(cudaMalloc(reinterpret_cast<void**>(&input_), size_t(3) * size_ * size_ * sizeof(float)));
         checked(cudaMalloc(reinterpret_cast<void**>(&output_), output_count_ * sizeof(float)));
+        if (engine_->getTensorDataType(input_name_.c_str()) == nvinfer1::DataType::kHALF)
+            checked(cudaMalloc(&half_input_, size_t(3) * size_ * size_ * 2));
+        if (engine_->getTensorDataType(output_name_.c_str()) == nvinfer1::DataType::kHALF)
+            checked(cudaMalloc(&half_output_, output_count_ * 2));
         checked(cudaMallocHost(reinterpret_cast<void**>(&host_output_), output_count_ * sizeof(float)));
-        if (!context_->setTensorAddress(input_name_.c_str(), input_) ||
-            !context_->setTensorAddress(output_name_.c_str(), output_))
+        if (!context_->setTensorAddress(input_name_.c_str(), half_input_ ? half_input_ : input_) ||
+            !context_->setTensorAddress(output_name_.c_str(), half_output_ ? half_output_ : output_))
             throw std::runtime_error("Cannot bind TensorRT tensors");
-        description_ = "TensorRT FP16 / " + std::string(props.name) + " / " + std::to_string(size_) + "x" +
-                       std::to_string(size_);
+        description_ = std::string(direct_engine ? "TensorRT engine" : "TensorRT FP16") + " / " +
+                       std::string(props.name) + " / " + std::to_string(size_) + "x" + std::to_string(size_);
         report("TensorRT: warming engine");
         checked(cudaMemsetAsync(input_, 0, size_t(3) * size_ * size_ * sizeof(float), stream_));
+        if (half_input_)
+            checked(cudaMemsetAsync(half_input_, 0, size_t(3) * size_ * size_ * 2, stream_));
         for (int i = 0; i < 10; ++i)
             if (!context_->enqueueV3(stream_))
                 throw std::runtime_error("TensorRT warmup failed");
@@ -322,11 +434,17 @@ class TrtBackend final : public Backend {
         checked(cudaMemcpyAsync(raw_, pinned_, h.bytes, cudaMemcpyHostToDevice, stream_));
         launch_preprocess(raw_, input_, h.width, h.height, h.format == 1 ? 3 : 4, size_, b.resized_w,
                           b.resized_h, b.left, b.top, stream_);
+        if (half_input_)
+            launch_float_to_half(input_, half_input_, size_t(3) * size_ * size_, stream_);
         checked(cudaGetLastError());
         checked(cudaEventRecord(prepared_, stream_));
         if (!context_->enqueueV3(stream_))
             throw std::runtime_error("TensorRT inference failed: " + log_.message());
         checked(cudaEventRecord(inferred_, stream_));
+        if (half_output_) {
+            launch_half_to_float(half_output_, output_, output_count_, stream_);
+            checked(cudaGetLastError());
+        }
         checked(cudaMemcpyAsync(host_output_, output_, output_count_ * sizeof(float), cudaMemcpyDeviceToHost,
                                 stream_));
         checked(cudaEventRecord(done_, stream_));
@@ -338,7 +456,7 @@ class TrtBackend final : public Backend {
         return {{host_output_, output_count_}, count_, classes_, host_copy_ms + upload + download, infer};
     }
 };
-std::unique_ptr<Backend> make_backend(const Settings& settings, const BackendProgress& progress) {
+std::unique_ptr<Backend> make_tensorrt_backend(const Settings& settings, const BackendProgress& progress) {
     return std::make_unique<TrtBackend>(settings, progress);
 }
 } // namespace receiver

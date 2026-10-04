@@ -1,0 +1,7 @@
+# Install CUDA-enabled PyTorch/torchvision first, using pytorch.org's selector.
+# These provide the fork's runtime dependencies; select its source via omni_source.
+ultralytics==8.3.199
+huggingface_hub>=0.24,<1
+thop==0.1.1.post2209072238
+pandas>=1.1.4
+seaborn>=0.11.0

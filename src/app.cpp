@@ -1,5 +1,6 @@
 #include "receiver/app.hpp"
 #include "receiver/local_mouse.hpp"
+#include "receiver/model.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -8,7 +9,7 @@
 #include <mmsystem.h>
 #endif
 namespace receiver {
-App::App() : injected_(random_id()) {
+App::App(BackendFactory factory) : injected_(random_id()), backend_factory_(std::move(factory)) {
     injected_.set_wake([this] { control_wake_.notify(); });
 }
 double Samples::percentile(double p) const {
@@ -52,6 +53,10 @@ void App::start(const Settings& settings, bool simulated) {
         clock_.reset();
         ++epoch_;
         simulated_ = simulated;
+        pending_model_.reset();
+        pending_benchmark_.reset();
+        benchmark_cancel_ = false;
+        stats_.model_loading = !simulated;
         stop_ = false;
         sender_seen_ = 0;
     }
@@ -70,7 +75,8 @@ void App::start(const Settings& settings, bool simulated) {
         try {
             inference_loop();
         } catch (const std::exception& e) {
-            fail(e.what(), ReleaseReason::gpu_error);
+            if (!stop_)
+                fail(e.what(), ReleaseReason::gpu_error);
         }
     });
     pi_thread_ = std::thread([this] {
@@ -100,6 +106,9 @@ void App::stop() {
     {
         std::lock_guard lock(mutex_);
         stats_.running = false;
+        stats_.model_loading = stats_.benchmarking = false;
+        pending_model_.reset();
+        pending_benchmark_.reset();
         latest_.reset();
         preview_ = {};
         if (stats_.error.empty())
@@ -115,7 +124,7 @@ void App::stop() {
 void App::arm(bool enabled) {
     {
         std::lock_guard lock(mutex_);
-        stats_.armed = enabled && !stop_ && stats_.error.empty();
+        stats_.armed = enabled && !stop_ && stats_.error.empty() && !stats_.benchmarking && !pending_model_;
         ++epoch_;
         result_.reset();
         stats_.active = false;
@@ -124,20 +133,29 @@ void App::arm(bool enabled) {
     }
     control_wake_.notify();
 }
-void App::configure(const Settings& s) {
+void App::configure(const Settings& s, bool reload_model) {
     validate(s);
     bool restart;
     {
         std::lock_guard lock(mutex_);
-        restart = s.bind_ip != settings_.bind_ip || s.sender_ip != settings_.sender_ip ||
-                  s.pi_ip != settings_.pi_ip || s.frame_port != settings_.frame_port ||
-                  s.pi_port != settings_.pi_port || s.model != settings_.model ||
-                  s.metadata != settings_.metadata || s.input_size != settings_.input_size ||
-                  s.mouse_backend != settings_.mouse_backend;
+        if (stats_.model_loading || stats_.benchmarking)
+            throw std::runtime_error("Wait for the model operation to finish");
+        restart = connection_settings_changed(s, settings_);
         if (restart) {
             stats_.armed = stats_.active = false;
             ++epoch_;
             result_.reset();
+            injected_.release_all(ReleaseReason::configuration_restart, true);
+        } else if ((reload_model || model_settings_changed(s, settings_)) && !stop_) {
+            pending_model_ = s;
+            stats_.model_loading = true;
+            stats_.model_error.clear();
+            stats_.model_message = "Loading selected model";
+            stats_.benchmark = {};
+            stats_.armed = stats_.active = false;
+            ++epoch_;
+            result_.reset();
+            preview_ = {};
             injected_.release_all(ReleaseReason::configuration_restart, true);
         } else {
             settings_ = s;
@@ -148,8 +166,35 @@ void App::configure(const Settings& s) {
         }
     }
     control_wake_.notify();
+    cv_.notify_all();
     if (restart)
-        throw std::runtime_error("Stop and restart to change networking or model");
+        throw std::runtime_error("Stop and restart to change network connections or mouse connection");
+}
+Settings App::settings() const {
+    std::lock_guard lock(mutex_);
+    return settings_;
+}
+void App::benchmark(PerformanceGoal goal) {
+    std::lock_guard lock(mutex_);
+    if (stop_ || simulated_ || stats_.model_loading || stats_.benchmarking)
+        throw std::runtime_error("Start a real model and wait for loading to finish before benchmarking");
+    if (!latest_ && !preview_.frame)
+        throw std::runtime_error("Receive a picture with preview on before benchmarking");
+    stats_.armed = stats_.active = false;
+    ++epoch_;
+    result_.reset();
+    injected_.release_all(ReleaseReason::configuration_restart, true);
+    benchmark_cancel_ = false;
+    pending_benchmark_ = goal;
+    stats_.benchmarking = true;
+    stats_.model_error.clear();
+    stats_.benchmark = {};
+    cv_.notify_all();
+    control_wake_.notify();
+}
+void App::cancel_benchmark() {
+    benchmark_cancel_ = true;
+    cv_.notify_all();
 }
 namespace {
 void require_synthetic_ready(bool stopped, const Stats& stats, const Settings& settings,
@@ -162,7 +207,7 @@ void require_synthetic_ready(bool stopped, const Stats& stats, const Settings& s
     if (!stats.pi_ready || !sender_seen || now < sender_seen || now - sender_seen > 100'000'000)
         throw std::runtime_error("Synthetic buttons require fresh sender and Pi telemetry");
 }
-}
+} // namespace
 void App::button_down(int button) {
     std::lock_guard lock(mutex_);
     require_synthetic_ready(stop_, stats_, settings_, sender_seen_);
@@ -313,38 +358,137 @@ void App::inference_loop() {
         initial = settings_;
     }
     std::unique_ptr<Backend> backend;
-    if (!simulated_)
-        backend = make_backend(initial, [this](const std::string& status) {
-            std::lock_guard lock(mutex_);
-            stats_.backend = status;
-        });
-    {
+    auto progress = [this](const std::string& message) {
         std::lock_guard lock(mutex_);
+        stats_.model_message = message;
+    };
+    auto load = [&](Settings& config) {
+        config = prepare_model_settings(config);
+        auto loading = config;
+        loading.classes.clear();
+        loading.selected_class_names.clear();
+        auto next = backend_factory_(loading, progress, [this] { return stop_.load(); });
+        if (next->input_size())
+            config.input_size = next->input_size();
+        reconcile_classes(config, next->class_names());
+        return next;
+    };
+    auto publish = [&](const Settings& config) {
+        settings_ = config;
         stats_.backend =
             simulated_ ? "SIMULATION (fixed test detection, loopback only)" : backend->description();
+        stats_.model_classes = backend ? backend->class_names() : std::vector<std::string>{"Example object"};
         if (backend) {
             auto [free, total] = backend->device_memory();
             stats_.gpu_free_mib = double(free) / (1024 * 1024);
             stats_.gpu_total_mib = double(total) / (1024 * 1024);
         }
+        stats_.model_loading = false;
+        ++stats_.model_revision;
+    };
+    if (!simulated_)
+        backend = load(initial);
+    {
+        std::lock_guard lock(mutex_);
+        publish(initial);
+        stats_.model_message = simulated_ ? "" : "Model ready.";
     }
-    int64_t last_preview = 0;
+    int64_t last_preview = 0, next_inference = 0;
     while (!stop_) {
+        std::optional<Settings> requested;
+        std::optional<PerformanceGoal> goal;
+        std::shared_ptr<const Frame> sample;
+        {
+            std::lock_guard lock(mutex_);
+            requested = pending_model_;
+            goal = pending_benchmark_;
+            if (goal)
+                sample = latest_ ? latest_ : preview_.frame;
+        }
+        if (requested) {
+            try {
+                auto config = *requested;
+                auto replacement = simulated_ ? std::unique_ptr<Backend>{} : load(config);
+                if (stop_)
+                    break;
+                auto old = std::move(backend);
+                backend = std::move(replacement);
+                {
+                    std::lock_guard lock(mutex_);
+                    publish(config);
+                    pending_model_.reset();
+                    ++epoch_;
+                    result_.reset();
+                    latest_.reset();
+                    stats_.model_message = "Model ready. Mouse control is off.";
+                }
+                // Destroy the old session only after the replacement was fully validated.
+            } catch (const std::exception& e) {
+                if (stop_)
+                    break;
+                std::lock_guard lock(mutex_);
+                pending_model_.reset();
+                stats_.model_loading = false;
+                ++stats_.model_revision;
+                stats_.model_error = e.what();
+                stats_.model_message = "Previous model and settings retained. Mouse control is off.";
+                ++epoch_;
+                result_.reset();
+            }
+            next_inference = 0;
+            control_wake_.notify();
+            continue;
+        }
+        if (goal) {
+            try {
+                if (!sample)
+                    throw std::runtime_error("No benchmark picture available");
+                auto report = benchmark_model(settings(), *sample, backend_factory_, *goal, progress,
+                                              [this] { return stop_.load() || benchmark_cancel_.load(); });
+                std::lock_guard lock(mutex_);
+                stats_.benchmark = std::move(report);
+                stats_.model_message =
+                    "Benchmark complete. Apply a recommendation or keep your current settings.";
+            } catch (const std::exception& e) {
+                std::lock_guard lock(mutex_);
+                stats_.model_error = e.what();
+                stats_.model_message =
+                    "Measurement stopped. Current model and settings retained. Mouse control is off.";
+            }
+            {
+                std::lock_guard lock(mutex_);
+                pending_benchmark_.reset();
+                stats_.benchmarking = false;
+                ++epoch_;
+                result_.reset();
+                latest_.reset();
+            }
+            next_inference = 0;
+            control_wake_.notify();
+            continue;
+        }
         std::shared_ptr<const Frame> frame;
         Settings cfg;
         uint64_t epoch;
         int64_t deadline = 0;
         {
             std::unique_lock lock(mutex_);
-            cv_.wait_for(lock, std::chrono::milliseconds(10), [&] { return stop_ || bool(latest_); });
+            cv_.wait_for(lock, std::chrono::milliseconds(10),
+                         [&] { return stop_ || pending_model_ || pending_benchmark_ || bool(latest_); });
             if (stop_)
                 break;
-            if (!latest_)
+            if (pending_model_ || pending_benchmark_ || !latest_)
                 continue;
+            auto at = now_ns();
+            if (at < next_inference) {
+                cv_.wait_for(lock, std::chrono::nanoseconds(next_inference - at),
+                             [&] { return stop_ || pending_model_ || pending_benchmark_; });
+                continue;
+            }
             frame = std::move(latest_);
             cfg = settings_;
             epoch = epoch_;
-            auto at = now_ns();
+            next_inference = cfg.inference_fps ? at + 1'000'000'000ll / cfg.inference_fps : 0;
             auto age = clock_.age_upper(frame->header.capture_ns, at);
             if (age) {
                 stats_.frame_age_ms = double(*age) / 1e6;
@@ -476,8 +620,8 @@ void App::pi_loop() {
                     throw std::runtime_error("Pi subscription send failed");
                 renewal = now;
             }
-            if (!shutdown_deadline && probe == Probe::selected_v1 && !upgrade_token &&
-                next_upgrade_probe && now >= next_upgrade_probe) {
+            if (!shutdown_deadline && probe == Probe::selected_v1 && !upgrade_token && next_upgrade_probe &&
+                now >= next_upgrade_probe) {
                 upgrade_token = ++token;
                 auto p = subscribe(client, upgrade_token, SubscriptionVersion::v3);
                 gate.issue(upgrade_token, now, SubscriptionVersion::v3);
@@ -508,8 +652,7 @@ void App::pi_loop() {
         bool proxy_error = false;
         bool protocol_error = false;
         if (n > 0 && from == pi) {
-            if (n >= 4 && (!std::memcmp(bytes.data(), "UPT1", 4) ||
-                           !std::memcmp(bytes.data(), "UPT2", 4) ||
+            if (n >= 4 && (!std::memcmp(bytes.data(), "UPT1", 4) || !std::memcmp(bytes.data(), "UPT2", 4) ||
                            !std::memcmp(bytes.data(), "UPT3", 4))) {
                 const bool wire_v1 = !std::memcmp(bytes.data(), "UPT1", 4);
                 const bool wire_v3 = !std::memcmp(bytes.data(), "UPT3", 4);
@@ -517,9 +660,9 @@ void App::pi_loop() {
                 const bool primary_wire =
                     ((probe == Probe::initial_v3 || probe == Probe::selected_v3) && wire_v3) ||
                     (probe == Probe::selected_v1 && wire_v1);
-                const bool optional_upgrade =
-                    parsed && probe == Probe::selected_v1 && wire_v3 && upgrade_token &&
-                    parsed->token == upgrade_token && now <= upgrade_deadline;
+                const bool optional_upgrade = parsed && probe == Probe::selected_v1 && wire_v3 &&
+                                              upgrade_token && parsed->token == upgrade_token &&
+                                              now <= upgrade_deadline;
                 if (!parsed && primary_wire) {
                     protocol_error = true;
                     std::lock_guard lock(mutex_);
@@ -636,8 +779,7 @@ void App::pi_loop() {
             upgrade_deadline = 0;
             next_upgrade_probe = 0;
             upgrade_backoff = upgrade_backoff_min_ns;
-        } else if (!shutdown_deadline && peer_recovered && probe == Probe::selected_v1 &&
-                   !upgrade_token) {
+        } else if (!shutdown_deadline && peer_recovered && probe == Probe::selected_v1 && !upgrade_token) {
             // A live UPT1 response proves the peer is back. Try UPT3 promptly without
             // clearing the just-restored UPT1 state.
             next_upgrade_probe = now;
@@ -664,9 +806,8 @@ void App::pi_loop() {
                 }
             }
             state = injected_.snapshot();
-            const bool heartbeat =
-                !state.release_barrier && state.mask && last_snapshot &&
-                now - last_snapshot >= injected_heartbeat_ns;
+            const bool heartbeat = !state.release_barrier && state.mask && last_snapshot &&
+                                   now - last_snapshot >= injected_heartbeat_ns;
             if (injected_snapshot_due(state, have_sent_revision, sent_revision, last_snapshot, now)) {
                 const bool release_batch = state.release_snapshot_batches != 0;
                 const uint8_t wire_mask = state.wire_mask();
@@ -705,7 +846,8 @@ void App::pi_loop() {
         stats_.motion_available = input_ok && physical_motion.available;
         stats_.mouse_speed = stats_.motion_available ? std::hypot(physical_motion.x, physical_motion.y) : 0;
         bool motion_ok = !settings_.direction.enabled || stats_.motion_available;
-        bool active = stats_.armed && !proxy_error && sender_ok && input_ok && motion_ok &&
+        bool active = stats_.armed && !stats_.model_loading && !stats_.benchmarking && !proxy_error &&
+                      sender_ok && input_ok && motion_ok &&
                       ((gate.state.physical & (1u << (settings_.activation_button - 1))) ||
                        (settings_.secondary_button &&
                         (gate.state.physical & (1u << (settings_.secondary_button - 1)))));
@@ -757,7 +899,8 @@ void App::pi_loop() {
             continue;
         }
         if (correction.dx || correction.dy) {
-            // Serialize final gating, current complete synthetic snapshot and send against disarm/config changes.
+            // Serialize final gating, current complete synthetic snapshot and send against disarm/config
+            // changes.
             auto send_at = now_ns();
             if (send_at > r.deadline || !input_fresh(send_at)) {
                 controller.reset();
@@ -773,8 +916,7 @@ void App::pi_loop() {
                                            : "Pi command send failed";
                 ++epoch_;
                 controller.reset();
-                injected_.release_all(local_mouse ? ReleaseReason::gpu_error : ReleaseReason::pi_error,
-                                      true);
+                injected_.release_all(local_mouse ? ReleaseReason::gpu_error : ReleaseReason::pi_error, true);
                 continue;
             }
             auto sent = now_ns();
@@ -805,45 +947,40 @@ void App::export_metrics(const std::string& path) const {
           << pair.second->percentile(.95) << ',' << pair.second->percentile(.99) << '\n';
     f << "# backend," << s.backend << "\n# frames," << s.inferred << "\n# sent," << s.sent
       << "\n# synthetic_snapshots," << s.synthetic_snapshots << "\n# release_snapshots,"
-      << s.release_snapshots << "\n# hold_heartbeats," << s.hold_heartbeats
-      << "\n# persistent_injected_mask," << unsigned(s.injection.persistent_mask)
-      << "\n# pending_click_commands," << s.injection.pending_clicks
+      << s.release_snapshots << "\n# hold_heartbeats," << s.hold_heartbeats << "\n# persistent_injected_mask,"
+      << unsigned(s.injection.persistent_mask) << "\n# pending_click_commands," << s.injection.pending_clicks
       << "\n# click_commands_submitted_locally," << s.injection.click_submitted
       << "\n# click_commands_accepted_by_pi," << s.injection.click_accepted
       << "\n# click_commands_completed_by_usb_writer," << s.injection.click_completed
-      << "\n# click_commands_rejected_before_acceptance,"
-      << s.injection.click_rejected_before_acceptance
+      << "\n# click_commands_rejected_before_acceptance," << s.injection.click_rejected_before_acceptance
       << "\n# accepted_click_commands_cancelled_or_failed," << s.injection.click_accepted_failed
-      << "\n# click_request_retries," << s.injection.click_retries
-      << "\n# click_ack_timeouts," << s.injection.click_timeouts
-      << "\n# click_queue_full_backpressure_events," << s.injection.click_queue_full
-      << "\n# click_server_epoch_resets," << s.injection.click_epoch_resets
+      << "\n# click_request_retries," << s.injection.click_retries << "\n# click_ack_timeouts,"
+      << s.injection.click_timeouts << "\n# click_queue_full_backpressure_events,"
+      << s.injection.click_queue_full << "\n# click_server_epoch_resets," << s.injection.click_epoch_resets
       << "\n# release_all_retries," << s.injection.release_retries
       << "\n# release_all_terminal_cancellations_superseded," << s.injection.release_superseded
-      << "\n# last_release_reason," << s.injection.last_release_reason
-      << "\n# last_release_all_state," << s.injection.last_release_all_state
-      << "\n# pi_applied_persistent_mask," << unsigned(s.injection.pi_applied_persistent_mask)
-      << "\n# pi_scheduled_click_mask," << unsigned(s.injection.pi_scheduled_mask)
-      << "\n# pi_accepted_click_total," << s.injection.pi_accepted_click_total
-      << "\n# pi_completed_click_total," << s.injection.pi_completed_click_total
-      << "\n# pi_active_sequences," << s.injection.pi_active_sequences
-      << "\n# pi_queued_sequences," << s.injection.pi_queued_sequences
-      << "\n# pi_output_queue_depth," << s.injection.pi_output_queue_depth
-      << "\n# pi_pending_synthetic_depth," << s.injection.pi_pending_synthetic_depth
-      << "\n# pi_physical_reports_received," << s.injection.pi_physical_reports_received
-      << "\n# pi_physical_reports_submitted," << s.injection.pi_physical_reports_submitted
-      << "\n# pi_superseded_synthetic_movement," << s.injection.pi_superseded_synthetic
-      << "\n# pi_usb_writer_failures," << s.injection.pi_writer_failures
-      << "\n# superseded," << s.replaced << "\n# stale," << s.stale << "\n# incomplete_expired,"
-      << s.network.expired << "\n# incomplete_evicted," << s.network.evicted << "\n# invalid_packets,"
-      << s.network.invalid << "\n# duplicate_packets," << s.network.duplicates << "\n# pool_drops,"
-      << s.network.pool_drops << "\n# host_frame_pool_mib,28\n# gpu_free_at_start_mib," << s.gpu_free_mib
-      << "\n# gpu_total_mib," << s.gpu_total_mib << '\n';
+      << "\n# last_release_reason," << s.injection.last_release_reason << "\n# last_release_all_state,"
+      << s.injection.last_release_all_state << "\n# pi_applied_persistent_mask,"
+      << unsigned(s.injection.pi_applied_persistent_mask) << "\n# pi_scheduled_click_mask,"
+      << unsigned(s.injection.pi_scheduled_mask) << "\n# pi_accepted_click_total,"
+      << s.injection.pi_accepted_click_total << "\n# pi_completed_click_total,"
+      << s.injection.pi_completed_click_total << "\n# pi_active_sequences," << s.injection.pi_active_sequences
+      << "\n# pi_queued_sequences," << s.injection.pi_queued_sequences << "\n# pi_output_queue_depth,"
+      << s.injection.pi_output_queue_depth << "\n# pi_pending_synthetic_depth,"
+      << s.injection.pi_pending_synthetic_depth << "\n# pi_physical_reports_received,"
+      << s.injection.pi_physical_reports_received << "\n# pi_physical_reports_submitted,"
+      << s.injection.pi_physical_reports_submitted << "\n# pi_superseded_synthetic_movement,"
+      << s.injection.pi_superseded_synthetic << "\n# pi_usb_writer_failures,"
+      << s.injection.pi_writer_failures << "\n# superseded," << s.replaced << "\n# stale," << s.stale
+      << "\n# incomplete_expired," << s.network.expired << "\n# incomplete_evicted," << s.network.evicted
+      << "\n# invalid_packets," << s.network.invalid << "\n# duplicate_packets," << s.network.duplicates
+      << "\n# pool_drops," << s.network.pool_drops << "\n# host_frame_pool_mib,28\n# gpu_free_at_start_mib,"
+      << s.gpu_free_mib << "\n# gpu_total_mib," << s.gpu_total_mib << '\n';
     for (const auto& command : s.injection.commands)
         f << "# command," << command.id << ','
           << (command.operation == ClickOperation::release_all ? "ReleaseAll" : "Schedule") << ','
           << unsigned(command.button) << ',' << local_command_state_name(command.state) << ','
-          << command.requested_clicks << ',' << command.accepted_clicks << ','
-          << command.completed_clicks << '\n';
+          << command.requested_clicks << ',' << command.accepted_clicks << ',' << command.completed_clicks
+          << '\n';
 }
 } // namespace receiver

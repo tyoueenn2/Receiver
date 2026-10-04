@@ -133,6 +133,16 @@ int main(int argc, char** argv) {
                 cfg = receiver::load_settings(profile);
             } else if (a == "--simulate")
                 simulate = true;
+            else if (a == "--model")
+                cfg.model = value();
+            else if (a == "--backend")
+                cfg.inference_backend = value();
+            else if (a == "--omni-python")
+                cfg.omni_python = value();
+            else if (a == "--omni-source")
+                cfg.omni_source = value();
+            else if (a == "--omni-device")
+                cfg.omni_device = value();
             else if (a == "--arm")
                 arm = true;
             else if (a == "--seconds")
@@ -161,6 +171,8 @@ int main(int argc, char** argv) {
             } else if (a == "--help") {
                 std::cout
                     << "receiver_headless [--profile FILE] [--simulate] [--arm] [--seconds N]\n"
+                       "  [--model FILE] [--backend auto|tensorrt|yolo_omni]\n"
+                       "  [--omni-python EXE] [--omni-source DIR] [--omni-device cuda:0|cpu]\n"
                        "  [--metrics FILE] [--log-level quiet|error|info|debug|trace]\n"
                        "  [--log-interval-ms N] [--quiet|--verbose|--trace]\n"
                        "  [--hold-button 1..8] [--release-after-ms N]\n"
