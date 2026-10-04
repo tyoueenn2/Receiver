@@ -23,7 +23,7 @@ if ($RuntimeDirectory) {
         if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $Destination }
     }
 }
-Write-Output "Packaged at $Destination. CUDA/TensorRT SDK DLLs are not bundled. See README for the required runtime."
+Write-Output "Packaged at $Destination. CUDA/TensorRT SDK DLLs are not bundled. See docs/technical/BUILD.md for the required runtime."
 
 New-Item -ItemType Directory -Force -Path (Join-Path $Destination "src") | Out-Null
 Copy-Item -LiteralPath "src/preprocess_kernel.cuh" -Destination (Join-Path $Destination "src")

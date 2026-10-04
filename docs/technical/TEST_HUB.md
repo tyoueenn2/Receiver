@@ -11,14 +11,14 @@ Open **Test Hub** and press **Run selected checks**, **Run all checks**, or **Ru
 | Local mouse startup | Opens the real Windows reader without sending movement | Interactive Windows desktop |
 | Network pipeline | UDP sender and independent fake Pi/proxy, stale input, restarts, stable source port, independent masks, clicks, and release | Python |
 | Direction pipeline | Direction ratios, missing telemetry, recovery | Python |
-| Interface pages | Renders all six pages in a hidden app; checks startup is disarmed | Python, DirectX 11 |
+| Interface pages | Renders all seven pages in a hidden app; checks startup is disarmed | Python, DirectX 11 |
 | Model reference comparison | YOLO11n ONNX/reference detection comparison | Python ML packages, model, image |
 | CUDA kernel compilation | Compiles production preprocessing source | Python, NVRTC DLL |
 | CUDA preprocessing comparison | Compares GPU preprocessing with CPU reference | Python/NumPy, NVRTC, NVIDIA GPU |
 | TensorRT reference comparison | Compares FP16 output with FP32 ONNX Runtime | GPU build, Python ML packages, saved profile, raw RGB image |
 | Physical Pi / USB validation | Lists the external check to perform | Pi/Linux and physical USB hardware; unavailable from Windows |
 
-The first eight checks are selected by default. Optional prerequisites are entered under **Test settings and optional GPU checks**. The demo launcher supplies its Python path; otherwise select a Python executable. See the main setup guide for model and CUDA dependencies. GPU profile model paths are relative to the package/repository root. The preprocessing execution check compiles compute_75 PTX, usable on the MX450 and RTX 3060 Ti with a compatible CUDA driver.
+The first eight checks are selected by default. Optional prerequisites are entered under **Test settings and optional GPU checks**. The demo launcher supplies its Python path; otherwise select a Python executable. See [YOLO-Omni setup](YOLO_OMNI.md) for the Python model runtime and [build instructions](BUILD.md) for CUDA dependencies. GPU profile model paths are relative to the package/repository root. The preprocessing execution check compiles compute_75 PTX, usable on the MX450 and RTX 3060 Ti with a compatible CUDA driver.
 
 Each check shows Passed, Failed, Unavailable, Cancelled, or Not run. Unavailable is not a pass. Missing optional files are explained; runtime dependency errors appear in the test log. Each process has a three-minute time limit. Network tests use temporary loopback ports and isolated settings. Reports and individual logs are saved under `test-results/<run>/`, with the exact report location shown in the page. GUI test screenshots are rendered from the test app's own framebuffer, not captured from the desktop.
 
