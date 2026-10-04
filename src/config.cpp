@@ -6,6 +6,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <thread>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -84,6 +85,14 @@ Settings settings_from_json(const json& j) {
 }
 Settings load_settings(const std::string& path) {
     std::ifstream f(path);
+#ifdef _WIN32
+    // A concurrent atomic replacement can briefly deny a new reader on Windows.
+    for (int attempt = 0; !f && attempt < 40; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        f.clear();
+        f.open(path);
+    }
+#endif
     if (!f)
         throw std::runtime_error("Cannot open profile: " + path);
     json j;
@@ -93,22 +102,36 @@ Settings load_settings(const std::string& path) {
 void write_json_atomic(const json& value, const std::filesystem::path& path) {
     auto temp = path;
     temp += "." + std::to_string(random_id()) + ".tmp";
-    {
-        std::ofstream f(temp);
-        if (!f)
-            throw std::runtime_error("Cannot write profile");
-        f << value.dump(2) << '\n';
-        f.flush();
-        if (!f)
-            throw std::runtime_error("Failed writing profile");
-    }
+    try {
+        {
+            std::ofstream f(temp);
+            if (!f)
+                throw std::runtime_error("Cannot write profile");
+            f << value.dump(2) << '\n';
+            f.flush();
+            if (!f)
+                throw std::runtime_error("Failed writing profile");
+        }
 #ifdef _WIN32
-    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        throw std::runtime_error("Cannot replace settings file (Windows error " +
-                                 std::to_string(GetLastError()) + ")");
+        DWORD error = ERROR_SUCCESS;
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            if (MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+                return;
+            error = GetLastError();
+            if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED)
+                break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        throw std::runtime_error("Cannot replace settings file (Windows error " + std::to_string(error) +
+                                 ")");
 #else
-    std::filesystem::rename(temp, path);
+        std::filesystem::rename(temp, path);
 #endif
+    } catch (...) {
+        std::error_code ignored;
+        std::filesystem::remove(temp, ignored);
+        throw;
+    }
 }
 void save_settings(const Settings& s, const std::string& path) {
     validate(s);

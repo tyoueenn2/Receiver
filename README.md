@@ -11,6 +11,11 @@ C++20 receiver for raw UDP frames, YOLO11/YOLO-Omni inference, and relative mous
 
 **Delivery status:** the default CI builds are **builds without TensorRT**. They support explicit simulation and native `.pt` inference when the Python model runtime is installed. The production TensorRT 10 backend is implemented for both operating systems and requires a local CUDA/TensorRT installation. See [validation results](docs/VALIDATION.md) and [YOLO-Omni checks](docs/YOLO_OMNI.md#local-validation) for what has been tested.
 
+CI now checks Linux/Windows builds, worker faults, repeated hot swaps, settings
+recovery, sanitizers, real CPU inference, CUDA compilation and extracted packages.
+See [checks without a device](docs/CI.md) for coverage, downloadable artifacts and
+the hardware behavior that still needs validation.
+
 The exported sample `models/yolo11n.onnx` and its manifest are included in this directory. This is the standard COCO detection model, not a model trained for a particular application. Real desktop capture on the target PC is intentionally outside this first delivery.
 
 ## Try the interface

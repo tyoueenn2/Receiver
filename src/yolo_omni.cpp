@@ -330,7 +330,8 @@ class OmniBackend final : public Backend {
             throw error("invalid worker input size");
         names_ = reply.at("names").get<std::vector<std::string>>();
         classes_ = int(names_.size());
-        if (classes_ < 1 || classes_ > 10000)
+        if (classes_ < 1 || classes_ > 10000 ||
+            std::any_of(names_.begin(), names_.end(), [](const auto& name) { return name.empty(); }))
             throw error("invalid class count");
         for (int c : s.classes)
             if (c >= classes_)

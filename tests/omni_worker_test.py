@@ -53,7 +53,7 @@ class WorkerTests(unittest.TestCase):
 
     def test_class_ids(self):
         self.assertEqual(class_names({1: 'second', 0: 'first'}), ['first', 'second'])
-        for names in ({1: 'wrong'}, [], ['ok', 3]):
+        for names in ({1: 'wrong'}, [], ['ok', 3], ['']):
             with self.assertRaises(ValueError): class_names(names)
 
     def test_protocol_and_bounds(self):

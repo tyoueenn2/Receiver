@@ -29,6 +29,6 @@ def class_names(names):
         names = [names[i] for i in range(len(names))]
     if not isinstance(names, (list, tuple)) or not 1 <= len(names) <= 10000:
         raise ValueError('Model must provide 1..10000 class names')
-    if any(not isinstance(n, str) for n in names):
+    if any(not isinstance(n, str) or not n for n in names):
         raise ValueError('Model class names must be strings')
     return list(names)

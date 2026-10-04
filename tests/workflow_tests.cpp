@@ -8,6 +8,7 @@
 using namespace receiver;
 namespace {
 int checks = 0;
+std::atomic<bool> replacement_entered{false}, replacement_allowed{false};
 #define CHECK(x)                                                                                             \
     do {                                                                                                     \
         ++checks;                                                                                            \
@@ -118,8 +119,11 @@ class FakeBackend : public Backend {
 std::unique_ptr<Backend> fake_factory(const Settings& s, const BackendProgress&,
                                       const BackendCancel& cancel) {
     if (s.model == "second.pt" || s.model == "fail.pt" || s.model == "stall.pt") {
+        if (s.model == "second.pt")
+            replacement_entered = true;
         auto end = now_ns() + 100'000'000;
-        while (now_ns() < end || s.model == "stall.pt") {
+        while ((s.model == "second.pt" && !replacement_allowed) ||
+               (s.model != "second.pt" && now_ns() < end) || s.model == "stall.pt") {
             if (cancel && cancel())
                 throw std::runtime_error("Cancelled");
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -177,6 +181,7 @@ void app_workflows() {
     auto selected = app.settings();
     selected.model = "second.pt";
     app.configure(selected);
+    until([&] { return replacement_entered.load(); });
     CHECK(app.stats().model_loading && !app.stats().armed);
     app.arm(true);
     CHECK(!app.stats().armed);
@@ -185,6 +190,7 @@ void app_workflows() {
         return app.stats().network.completed > completed + 3;
     });
     CHECK(app.stats().model_loading); // Networking receives pictures while the replacement warms up.
+    replacement_allowed = true;
     until([&] { return app.stats().model_revision == 2; });
     CHECK(app.stats().running && app.stats().error.empty() && !app.stats().armed);
     CHECK(app.settings().model == "second.pt" && app.settings().input_size == 640);

@@ -10,7 +10,7 @@ def preprocess(raw, width, height, size):
     import numpy as np
     image = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3).astype(np.float32)
     scale = min(size / width, size / height)
-    rw, rh = int(np.floor(width * scale + .5)), int(np.floor(height * scale + .5))
+    rw, rh = max(1, int(np.floor(width * scale + .5))), max(1, int(np.floor(height * scale + .5)))
     left, top = (size - rw) // 2, (size - rh) // 2
     x = np.clip((np.arange(rw, dtype=np.float32) + .5) * width / rw - .5, 0, width - 1)
     y = np.clip((np.arange(rh, dtype=np.float32) + .5) * height / rh - .5, 0, height - 1)

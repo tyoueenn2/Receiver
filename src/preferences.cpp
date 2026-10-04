@@ -40,45 +40,52 @@ void Preferences::load() {
         throw std::runtime_error("Invalid saved model library");
     for (const auto& value : models.items())
         settings_from_json(value.value());
-    current = std::move(settings);
-    models_ = std::move(models);
-    profile = j.value("profile", "");
+    auto next = *this;
+    next.current = std::move(settings);
+    next.models_ = std::move(models);
+    next.profile = j.value("profile", "");
     for (const auto& [field, is_model] :
          {std::pair{"model_directories", true}, {"profile_directories", false}}) {
-        if (j.contains(field) && j[field].is_array() && j[field].size() <= 64)
-            for (const auto& directory : j[field])
-                add_directory(directory.get<std::string>(), is_model);
+        if (!j.contains(field))
+            continue;
+        if (!j[field].is_array() || j[field].size() > 64)
+            throw std::runtime_error("Invalid saved library directories");
+        for (const auto& directory : j[field])
+            next.add_directory(directory.get<std::string>(), is_model);
     }
+    *this = std::move(next);
 }
 void Preferences::save(const Settings& settings, const std::string& profile_path,
                        const std::vector<std::string>& names) {
     auto s = settings;
     reconcile_classes(s, names);
     validate(s);
-    current = s;
-    profile = profile_path;
+    auto next = *this;
+    next.current = s;
+    next.profile = profile_path;
     if (!s.model.empty()) {
         auto identity = key(s.model);
-        if (!models_.contains(identity) && models_.size() >= 1000)
-            models_.erase(models_.begin());
-        models_[identity] = settings_json(s);
-        add_directory(std::filesystem::absolute(s.model).parent_path(), true);
+        if (!next.models_.contains(identity) && next.models_.size() >= 1000)
+            next.models_.erase(next.models_.begin());
+        next.models_[identity] = settings_json(s);
+        next.add_directory(std::filesystem::absolute(s.model).parent_path(), true);
     }
-    if (!profile.empty())
-        add_directory(std::filesystem::absolute(profile).parent_path(), false);
+    if (!next.profile.empty())
+        next.add_directory(std::filesystem::absolute(next.profile).parent_path(), false);
     std::filesystem::create_directories(root_);
     std::vector<std::string> model_dirs, profile_dirs;
-    for (const auto& d : model_dirs_)
+    for (const auto& d : next.model_dirs_)
         model_dirs.push_back(d.string());
-    for (const auto& d : profile_dirs_)
+    for (const auto& d : next.profile_dirs_)
         profile_dirs.push_back(d.string());
     write_json_atomic({{"version", 1},
                        {"settings", settings_json(s)},
-                       {"profile", profile},
-                       {"models", models_},
+                       {"profile", next.profile},
+                       {"models", next.models_},
                        {"model_directories", model_dirs},
                        {"profile_directories", profile_dirs}},
                       root_ / "preferences.json");
+    *this = std::move(next);
 }
 Settings Preferences::select_model(const Settings& base, const std::string& path) const {
     auto identity = key(path);
