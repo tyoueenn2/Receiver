@@ -1,0 +1,363 @@
+diff --git a/USAGE.md b/USAGE.md
+index 2a21af5..13bbe4d 100644
+--- a/USAGE.md
++++ b/USAGE.md
+@@ -83,6 +83,14 @@ Python encoding: `struct.pack('!4sIhhbbBB', b'UPX1', seq, dx, dy, wheel, pan, bu
+ 
+ Sequence advances modulo 2^32. Duplicate/older packets are ignored within an ownership lease; the sequence baseline resets after timeout. This is not replay protection across leases. Successful binary packets receive no ACK. Errors can return ASCII. Button masks are full snapshots so the next delivered snapshot repairs a lost press/release. Wheel events and brief clicks are not made reliable by UDP.
+ 
++## Reliable scheduled clicks (UPC1/UPA1 extension)
++
++Receiver uses a separate idempotent command protocol for bounded click schedules. A 32-byte request is `UPC1 | random_client_session:u64be | monotonically_increasing_command_id:u64be | button:u8 | reserved:u8=0 | count:u16be | press_ms:u16be | interval_ms:u16be | reserved:u32be=0`. Button is 1–8, count is nonzero, durations are at most 1000 ms, press is nonzero, and the complete schedule is at most 60 seconds.
++
++The 32-byte response is `UPA1 | status:u8 | reserved:u24=0 | server_epoch:u64be | client_session:u64be | command_id:u64be`. Status values are 1 accepted, 2 duplicate/pending, 3 completed by the USB writer, 4 busy, 5 unsupported, 6 invalid, and 7 queue full. A retry must reuse the same client session and command ID. Accepted means the Pi scheduler owns the command; completed is emitted only after the final release report is successfully submitted by the USB writer. Neither status proves physical link reliability or host application processing.
++
++The scheduler is independent of the persistent UPX1 mask. The Pi merges its active scheduled-button overlay into reports produced from UPX1 movement and heartbeat snapshots, so those snapshots do not cancel a click. A scheduled click on the same button as a persistent hold is unsupported because it cannot produce a distinct host-visible transition. Up to 16 schedules are active/queued. The server keeps bounded terminal history so delayed duplicates cannot execute again; an unknown non-increasing ID is invalid. A new `server_epoch` means the Pi restarted and clients must discard old pending state.
++
+ Consecutive unsent binary corrections with the same button mask can replace one another. Physical reports, wheel/pan commands, ASCII commands, and changes of button mask prevent replacement across that point. Already submitted USB reports cannot be replaced. This is a latest-correction API, not a lossless trajectory API. Binary motion/wheel/pan older than 25 ms **since enqueue on the Pi** is zeroed at USB dequeue; button state is still applied. It does not measure network transit age or cancel an ioctl already blocked in the kernel.
+ 
+ Moves are split across native HID reports (e.g. 320 counts needs three reports on a -127..127 axis). Maximum queued reports: 32. A command needing more than 32 reports, unsupported buttons/axes, or insufficient queue space is rejected as a whole. Physical reports are backpressured rather than intentionally discarded. Use modest corrections per inference step.
+diff --git a/host-raw-gadget.h b/host-raw-gadget.h
+index 4570e76..628c5cb 100644
+--- a/host-raw-gadget.h
++++ b/host-raw-gadget.h
+@@ -100,6 +100,9 @@ struct usb_raw_transfer_io {
+ 	// Userspace-only metadata, outside the buffer passed to the kernel.
+ 	uint64_t injection_deadline_ns = 0;
+ 	uint64_t mouse_generation = 0;
++	uint64_t click_client = 0;
++	uint64_t click_command = 0;
++	bool click_final_release = false;
+ };
+ 
+ /*----------------------------------------------------------------------*/
+diff --git a/proxy.cpp b/proxy.cpp
+index fe95da9..7400d09 100644
+--- a/proxy.cpp
++++ b/proxy.cpp
+@@ -164,6 +164,7 @@ void *ep_loop_write(void *arg) {
+ 				perror("usb_raw_ep_write()");
+ 				exit(EXIT_FAILURE);
+ 			}
++			mouse_write_completed(io);
+ 			if (debug_level >= 3) {
+ 				printf("EP%x(%s_%s): wrote %d bytes to host: ", ep.bEndpointAddress,
+ 					transfer_type.c_str(), dir.c_str(), rv);
+diff --git a/tests/udp_test.cpp b/tests/udp_test.cpp
+index 402620d..da015d9 100644
+--- a/tests/udp_test.cpp
++++ b/tests/udp_test.cpp
+@@ -29,7 +29,7 @@ int main() {
+         std::unique_lock<std::mutex> lock(mutex);
+         assert(cond.wait_for(lock,std::chrono::seconds(1),[&]{return !queue.empty();}));
+         auto io=queue.front();queue.pop_front();lock.unlock();cond.notify_all();
+-        assert(merge_mouse_report(0x81,io));return io;
++        assert(merge_mouse_report(0x81,io));mouse_write_completed(io);return io;
+     };
+     assert(command("+mousedown 2")=="ok");assert(pop().data[0]==3);
+     physical.data[0]=0;assert(merge_mouse_report(0x81,physical));assert(physical.data[0]==2);
+@@ -61,6 +61,29 @@ int main() {
+     {std::lock_guard<std::mutex> lock(mutex);queue.front().injection_deadline_ns=1;}
+     auto expired=pop();assert(expired.data[1]==0 && expired.data[0]==1);
+     assert(command("+release")=="ok");assert(pop().data[0]==0);
++    auto click_packet=[&](uint64_t client,uint64_t id,uint8_t button,uint16_t count,
++                          uint16_t press,uint16_t interval) {
++        std::array<uint8_t,32> p{};std::memcpy(p.data(),"UPC1",4);
++        proxy_telemetry::put64(p.data()+4,client);proxy_telemetry::put64(p.data()+12,id);p[20]=button;
++        p[22]=uint8_t(count>>8);p[23]=uint8_t(count);p[24]=uint8_t(press>>8);p[25]=uint8_t(press);
++        p[26]=uint8_t(interval>>8);p[27]=uint8_t(interval);return p;
++    };
++    auto click_reply=[&](const std::array<uint8_t,32>& p) {
++        assert(send(fd,p.data(),p.size(),0)==ssize_t(p.size()));
++        std::array<uint8_t,32> response{};assert(recv(fd,response.data(),response.size(),0)==32);
++        assert(!std::memcmp(response.data(),"UPA1",4)&&proxy_telemetry::u64(response.data()+16)==proxy_telemetry::u64(p.data()+4)&&proxy_telemetry::u64(response.data()+24)==proxy_telemetry::u64(p.data()+12));
++        return response[4];
++    };
++    auto scheduled=click_packet(77,1,1,2,5,5);
++    assert(click_reply(scheduled)==1);assert(click_reply(scheduled)==2);
++    assert(pop().data[0]==1);
++    snapshot(6,7,2);auto concurrent=pop();assert(concurrent.data[0]==3&&concurrent.data[1]==7);
++    assert(pop().data[0]==2);assert(pop().data[0]==3);assert(pop().data[0]==2);
++    std::array<uint8_t,32> completed{};assert(recv(fd,completed.data(),completed.size(),0)==32);
++    assert(completed[4]==3&&proxy_telemetry::u64(completed.data()+24)==1);
++    assert(click_reply(scheduled)==3);
++    auto unsupported=click_packet(77,2,2,1,5,0);assert(click_reply(unsupported)==5);
++    snapshot(7,0,0);assert(pop().data[0]==0);
+     std::array<uint8_t,24> watch{};std::memcpy(watch.data(),"UPS1",4);
+     proxy_telemetry::put64(watch.data()+8,123);proxy_telemetry::put64(watch.data()+16,456);
+     assert(send(fd,watch.data(),watch.size(),0)==ssize_t(watch.size()));
+@@ -79,7 +102,7 @@ int main() {
+     // Physical counters must not include any of the injected corrections above or below.
+     physical.data[0]=2;physical.data[1]=9;physical.data[2]=uint8_t(-4);
+     assert(merge_mouse_report(0x81,physical));
+-    snapshot(6,100,0);assert(pop().data[1]==100);
++    snapshot(8,100,0);assert(pop().data[1]==100);
+     watch[3]='2';proxy_telemetry::put64(watch.data()+16,457);
+     assert(send(fd,watch.data(),watch.size(),0)==ssize_t(watch.size()));
+     std::array<uint8_t,88> motion{};
+@@ -87,6 +110,11 @@ int main() {
+     assert(!std::memcmp(motion.data(),"UPT2",4)&&motion[5]==2);
+     assert(proxy_telemetry::u32(motion.data()+72)==9&&proxy_telemetry::u32(motion.data()+76)==uint32_t(-4));
+     assert(proxy_telemetry::u64(motion.data()+56)>0&&proxy_telemetry::u64(motion.data()+64)>0);
++    std::this_thread::sleep_for(std::chrono::milliseconds(150));
++    while(recv(fd,motion.data(),motion.size(),MSG_DONTWAIT)>0){}
++    uint8_t last_status=0;
++    for(uint64_t id=3;id<=19;++id)last_status=click_reply(click_packet(77,id,1,1,1000,0));
++    assert(last_status==7); // 16 commands are active/queued; the seventeenth is backpressured.
+     server.stop();close(fd);unregister_mouse_endpoint(&info);
+     puts("UDP integration: splitting, buttons, timers, watchdog, sequencing and freshness passed");
+ }
+diff --git a/udp_server.cpp b/udp_server.cpp
+index 8b01df2..045810c 100644
+--- a/udp_server.cpp
++++ b/udp_server.cpp
+@@ -8,6 +8,8 @@
+ #include <sstream>
+ #include <cstdlib>
+ #include <array>
++#include <deque>
++#include <optional>
+ #include <random>
+ #include "telemetry_protocol.h"
+ 
+@@ -17,6 +19,9 @@ constexpr uint16_t INJECTED=0x8000;
+ constexpr uint16_t LATEST=0x4000;
+ uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
+ std::mutex registry_mutex;
++struct ClickCompletion {uint64_t client=0,command=0;};
++std::mutex completion_mutex;
++std::vector<ClickCompletion> click_completions;
+ struct Endpoint {
+     thread_info* info=nullptr;
+     int interface_number=0;
+@@ -37,7 +42,8 @@ bool ready() {
+     auto it=endpoints.find(selected);
+     return it!=endpoints.end() && !it->second.latest.empty();
+ }
+-bool enqueue(const MouseCommand& c, bool latest=false) {
++bool enqueue(const MouseCommand& c, bool latest=false, uint64_t click_client=0,
++             uint64_t click_command=0, bool click_final_release=false) {
+     std::lock_guard<std::mutex> guard(registry_mutex);
+     auto found=endpoints.find(selected);
+     if(found==endpoints.end() || found->second.latest.empty())return false;
+@@ -57,13 +63,17 @@ bool enqueue(const MouseCommand& c, bool latest=false) {
+     }
+     if(keep+parts.size()>32)return false;
+     queue.resize(keep);
+-    for(const auto& part:parts) {
++    for(size_t index=0;index<parts.size();++index) {
++        const auto& part=parts[index];
+         usb_raw_transfer_io io{};
+         io.inner.ep=e.info->ep_num;io.inner.flags=INJECTED;
+         if(latest&&!c.wheel&&!c.pan)io.inner.flags|=LATEST;
+         io.inner.length=e.profile.size;
+         io.injection_deadline_ns=latest ? now_ns()+25000000 : 0;
+         io.mouse_generation=e.generation;
++        if(click_final_release && index+1==parts.size()) {
++            io.click_client=click_client;io.click_command=click_command;io.click_final_release=true;
++        }
+         std::memcpy(io.data,e.latest.data(),e.latest.size());
+         e.profile.encode(part,reinterpret_cast<uint8_t*>(io.data));
+         queue.push_back(io);
+@@ -71,6 +81,11 @@ bool enqueue(const MouseCommand& c, bool latest=false) {
+     e.info->data_cond->notify_all();
+     return true;
+ }
++bool button_supported(int button) {
++    std::lock_guard<std::mutex> lock(registry_mutex);
++    auto it=endpoints.find(selected);
++    return it!=endpoints.end()&&!it->second.latest.empty()&&it->second.profile.buttons.count(button);
++}
+ std::string state() {
+     std::lock_guard<std::mutex> lock(registry_mutex);
+     auto it=endpoints.find(selected);
+@@ -92,6 +107,11 @@ proxy_telemetry::Snapshot telemetry_snapshot() {
+     return s;
+ }
+ }
++void mouse_write_completed(const usb_raw_transfer_io& io) {
++    if(!io.click_final_release||!io.click_client||!io.click_command)return;
++    std::lock_guard<std::mutex> lock(completion_mutex);
++    click_completions.push_back({io.click_client,io.click_command});
++}
+ // Caller holds registry_mutex. Invalidate reports encoded for the previous layout.
+ static void invalidate_interface(int number) {
+     for(auto& item:endpoints)if(item.second.interface_number==number) {
+@@ -192,11 +212,40 @@ void UdpServer::server_loop() {
+     sockaddr_in subscriber{};
+     uint64_t last_telemetry=0;
+     uint8_t requested_buttons=0;
++    uint8_t scheduled_buttons=0;
++    struct ClickRecord {
++        sockaddr_in peer{};uint8_t button=0;uint16_t count=0,press_ms=0,interval_ms=0;
++        uint8_t status=1;
++    };
++    using ClickKey=std::pair<uint64_t,uint64_t>;
++    struct ActiveClick {ClickKey key{};uint16_t remaining=0;bool pressed=false;Clock::time_point at{};};
++    std::map<ClickKey,ClickRecord> click_records;
++    std::deque<ClickKey> click_queue;
++    std::optional<ActiveClick> active_click;
++    uint64_t last_click_client=0,last_click_command=0;
+     sockaddr_in owner{};bool owned=false,have_sequence=false;uint32_t last_sequence=0;
+     auto last=Clock::now();std::array<Clock::time_point,8> release_at{};
+     in_addr allowed{};const char* peer=std::getenv("USB_PROXY_PEER");
+     if(peer&&inet_pton(AF_INET,peer,&allowed)!=1){fprintf(stderr,"Invalid USB_PROXY_PEER\n");return;}
+     while(running) {
++        auto send_ack=[&](const sockaddr_in& to,uint8_t status,uint64_t client,uint64_t command) {
++            std::array<uint8_t,32> packet{};std::memcpy(packet.data(),"UPA1",4);packet[4]=status;
++            proxy_telemetry::put64(packet.data()+8,telemetry_session);
++            proxy_telemetry::put64(packet.data()+16,client);proxy_telemetry::put64(packet.data()+24,command);
++            sendto(sockfd,packet.data(),packet.size(),MSG_DONTWAIT,reinterpret_cast<const sockaddr*>(&to),sizeof(to));
++        };
++        std::vector<ClickCompletion> completed;
++        {
++            std::lock_guard<std::mutex> lock(completion_mutex);
++            completed.swap(click_completions);
++        }
++        for(const auto& item:completed) {
++            auto found=click_records.find({item.client,item.command});
++            if(found!=click_records.end()&&found->second.status==1) {
++                found->second.status=3;
++                send_ack(found->second.peer,3,item.client,item.command);
++            }
++        }
+         // Network publication lives on this worker, never on the USB writer.
+         // A physical state change is observed on the next loop (poll <= 2 ms).
+         auto telemetry_now=now_ns();
+@@ -208,7 +257,14 @@ void UdpServer::server_loop() {
+                 previous_snapshot=snapshot;last_telemetry=telemetry_now;
+             }
+         }
+-        if(!ready()) {requested_buttons=0;release_at={};owned=false;have_sequence=false;}
++        if(!ready()) {
++            for(auto& item:click_records)if(item.second.status==1) {
++                item.second.status=5;
++                send_ack(item.second.peer,5,item.first.first,item.first.second);
++            }
++            requested_buttons=scheduled_buttons=0;release_at={};owned=false;have_sequence=false;
++            active_click.reset();click_queue.clear();
++        }
+         auto now=Clock::now();
+         uint8_t desired=requested_buttons;
+         for(int i=0;i<8;++i)if(release_at[i]!=Clock::time_point{}&&now>=release_at[i]) {
+@@ -217,13 +273,44 @@ void UdpServer::server_loop() {
+         bool expired=owned&&now-last>std::chrono::milliseconds(250);
+         if(expired)desired=0;
+         if(desired!=requested_buttons) {
+-            MouseCommand c;c.buttons=desired;
++            MouseCommand c;c.buttons=desired|scheduled_buttons;
+             if(enqueue(c)) {
+                 requested_buttons=desired;
+                 for(int i=0;i<8;++i)if(!(desired&(1u<<i)))release_at[i]={};
+             }
+         }
+-        if(expired && requested_buttons==0){owned=false;have_sequence=false;}
++        if(!active_click && !click_queue.empty()) {
++            auto key=click_queue.front();click_queue.pop_front();
++            auto found=click_records.find(key);
++            if(found!=click_records.end()&&found->second.status!=3)
++                active_click=ActiveClick{key,found->second.count,false,now};
++        }
++        if(active_click && now>=active_click->at) {
++            auto found=click_records.find(active_click->key);
++            if(found==click_records.end())active_click.reset();
++            else {
++                auto& record=found->second;uint8_t bit=uint8_t(1u<<(record.button-1));
++                if(!active_click->pressed) {
++                    MouseCommand c;c.buttons=requested_buttons|scheduled_buttons|bit;
++                    if(enqueue(c)) {
++                        scheduled_buttons|=bit;active_click->pressed=true;
++                        active_click->at=now+std::chrono::milliseconds(record.press_ms);
++                    }
++                } else {
++                    bool final=active_click->remaining==1;
++                    MouseCommand c;c.buttons=requested_buttons|uint8_t(scheduled_buttons&~bit);
++                    if(enqueue(c,false,active_click->key.first,active_click->key.second,final)) {
++                        scheduled_buttons&=uint8_t(~bit);
++                        if(final)active_click.reset();
++                        else {
++                            --active_click->remaining;active_click->pressed=false;
++                            active_click->at=now+std::chrono::milliseconds(record.interval_ms);
++                        }
++                    }
++                }
++            }
++        }
++        if(expired && requested_buttons==0&&!active_click&&!click_queue.size()){owned=false;have_sequence=false;}
+         pollfd poller{sockfd,POLLIN,0};if(poll(&poller,1,2)<=0)continue;
+         uint8_t data[1024];sockaddr_in from{};socklen_t length=sizeof(from);
+         int n=recvfrom(sockfd,data,sizeof(data),MSG_TRUNC,reinterpret_cast<sockaddr*>(&from),&length);
+@@ -238,6 +325,35 @@ void UdpServer::server_loop() {
+         std::string text(reinterpret_cast<char*>(data),n);
+         while(!text.empty()&&(text.back()=='\n'||text.back()=='\r'))text.pop_back();
+         if(text=="+state") {reply(state());continue;}
++        if(n==32&&!std::memcmp(data,"UPC1",4)) {
++            auto click_client=proxy_telemetry::u64(data+4),click_command=proxy_telemetry::u64(data+12);
++            int button=data[20];uint16_t count=uint16_t(data[22])<<8|data[23];
++            uint16_t press_ms=uint16_t(data[24])<<8|data[25],interval_ms=uint16_t(data[26])<<8|data[27];
++            auto respond=[&](uint8_t status){send_ack(from,status,click_client,click_command);};
++            uint64_t total=uint64_t(count)*press_ms+uint64_t(count?count-1:0)*interval_ms;
++            if(!click_client||!click_command||data[21]||proxy_telemetry::u32(data+28)||!count||!press_ms||
++               press_ms>1000||interval_ms>1000||total>60000){respond(6);continue;}
++            if(owned&&(from.sin_addr.s_addr!=owner.sin_addr.s_addr||from.sin_port!=owner.sin_port)) {
++                respond(4);continue;
++            }
++            ClickKey key{click_client,click_command};auto previous=click_records.find(key);
++            if(previous!=click_records.end()) {
++                last=now;respond(previous->second.status==1?2:previous->second.status);continue;
++            }
++            if((click_client==last_click_client&&click_command<=last_click_command)) {respond(6);continue;}
++            if(!button_supported(button)||(requested_buttons&(1u<<(button-1)))) {respond(5);continue;}
++            if(click_queue.size()+(active_click?1:0)>=16) {respond(7);continue;}
++            if(click_records.size()>=64) {
++                auto old=std::find_if(click_records.begin(),click_records.end(),
++                    [](const auto& item){return item.second.status!=1;});
++                if(old==click_records.end()){respond(7);continue;}
++                click_records.erase(old);
++            }
++            if(click_client!=last_click_client){last_click_client=click_client;last_click_command=0;}
++            last_click_command=click_command;
++            click_records[key]=ClickRecord{from,uint8_t(button),count,press_ms,interval_ms,1};
++            click_queue.push_back(key);owner=from;owned=true;last=now;respond(1);continue;
++        }
+         if(owned&&(from.sin_addr.s_addr!=owner.sin_addr.s_addr||from.sin_port!=owner.sin_port)) {reply("busy");continue;}
+         MouseCommand c;c.buttons=requested_buttons;
+         bool valid=false,binary=false;uint32_t seq=0;int click=-1, cancel_timer=-1;
+@@ -284,7 +400,8 @@ void UdpServer::server_loop() {
+             if(stream>>extra)valid=false;
+         }
+         if(!valid){reply("error command");continue;}
+-        if(!enqueue(c,binary)){reply("error not_ready_range_or_queue_full");continue;}
++        MouseCommand wire=c;wire.buttons|=scheduled_buttons;
++        if(!enqueue(wire,binary)){reply("error not_ready_range_or_queue_full");continue;}
+         requested_buttons=c.buttons;owner=from;owned=true;last=Clock::now();
+         if(binary){last_sequence=seq;have_sequence=true;release_at={};}
+         else {
+diff --git a/udp_server.h b/udp_server.h
+index 16d47c2..f0448de 100644
+--- a/udp_server.h
++++ b/udp_server.h
+@@ -9,6 +9,8 @@ void learn_mouse_descriptor(int interface_number, const uint8_t* data, unsigned
+ void set_mouse_protocol(int interface_number, bool boot);
+ void unregister_mouse_endpoint(thread_info* info);
+ bool merge_mouse_report(uint8_t endpoint, usb_raw_transfer_io& io);
++// Called only after a report was successfully submitted by the USB writer.
++void mouse_write_completed(const usb_raw_transfer_io& io);
+ class UdpServer {
+ public:
+     explicit UdpServer(int port) : port(port) {}
+diff --git a/usb_replay.cpp b/usb_replay.cpp
+index 587c2c6..e65f564 100644
+--- a/usb_replay.cpp
++++ b/usb_replay.cpp
+@@ -37,8 +37,10 @@ void write_endpoint(Endpoint* e) {
+         if(!timed&&!merge_mouse_report(e->info.endpoint.bEndpointAddress,io))continue;
+         int result=usb_raw_ep_write(e->info.fd,&io.inner);
+         if(result<0)break;
++        if(!timed)mouse_write_completed(io);
+         std::lock_guard<std::mutex> lock(e->mutex);
+         e->last=io;
++        e->last.click_client=e->last.click_command=0;e->last.click_final_release=false;
+         // GET_REPORT and idle repetition must never replay relative movement.
+         for(const auto& f:e->profile.relative)f.put(reinterpret_cast<uint8_t*>(e->last.data),0);
+     }

@@ -20,6 +20,7 @@ def main():
     parser.add_argument('executable')
     parser.add_argument('--page',choices=pages,default='setup')
     parser.add_argument('--all-pages',action='store_true')
+    parser.add_argument('--compact',action='store_true',help='Render at the minimum supported window size')
     args=parser.parse_args()
     for page in pages if args.all_pages else [args.page]:
         pi=MockPi(port=free_port()).start()
@@ -27,14 +28,16 @@ def main():
         sender=Sender(port=port).start()
         try:
             result=subprocess.run([str(Path(args.executable).resolve()),'--smoke-test','--page='+page,
-                '--test-frame-port='+str(port),'--test-pi-port='+str(pi.sock.getsockname()[1])],timeout=20,
+                '--test-frame-port='+str(port),'--test-pi-port='+str(pi.sock.getsockname()[1])]
+                + (['--compact'] if args.compact else []),timeout=20,
                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
             assert result.returncode==0, f'{page}: GUI returned {result.returncode}'
             assert pi.commands and all(not c['dx'] and not c['dy'] and not c['buttons'] for c in pi.commands), \
                 'Disarmed GUI may emit only fail-safe shutdown release snapshots'
             assert Path('gui-smoke.bmp').stat().st_size>10000
-            shutil.copyfile('gui-smoke.bmp','gui-smoke-'+page+'.bmp')
-            print(page+': rendering, preview, sync, telemetry and disarmed startup passed.',flush=True)
+            suffix = '-compact' if args.compact else ''
+            shutil.copyfile('gui-smoke.bmp','gui-smoke-'+page+suffix+'.bmp')
+            print(page+suffix+': rendering, preview, sync, telemetry and disarmed startup passed.',flush=True)
         finally:
             sender.stop(); pi.stop()
 if __name__=='__main__': main()
