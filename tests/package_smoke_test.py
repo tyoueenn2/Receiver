@@ -25,7 +25,7 @@ def main():
                      'docs/technical/BUILD.md', 'docs/licenses/json.txt',
                      'docs/licenses/ultralytics.txt', 'profiles/default.json',
                      'models/yolo11n.onnx', 'models/yolo11n.onnx.json',
-                     'tests/fault_worker.py', 'src/preprocess_kernel.cuh',
+                     'tests/fault_worker.py', 'tests/process_identity.py', 'src/preprocess_kernel.cuh',
                      'src/engine_precision_kernel.cuh'):
         assert (root / filename).is_file(), f'Package missing {filename}'
     if os.name == 'nt':

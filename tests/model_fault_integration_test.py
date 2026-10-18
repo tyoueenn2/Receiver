@@ -1,8 +1,6 @@
 """Production App + real worker processes + independent loopback Pi under faults."""
 import argparse
-import ctypes
 import json
-import os
 from pathlib import Path
 import queue
 import subprocess
@@ -10,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from process_identity import alive
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from mock_pi import MockPi
@@ -60,27 +59,6 @@ class Control:
                 self.process.communicate(timeout=5)
                 raise
         assert self.process.returncode == 0, self.process.stderr.read()
-
-
-def alive(pid):
-    if os.name != 'nt':
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
-    kernel.OpenProcess.restype = ctypes.c_void_p
-    handle = kernel.OpenProcess(0x1000 | 0x100000, False, pid)
-    if not handle:
-        return False
-    try:
-        kernel.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
-        return kernel.WaitForSingleObject(handle, 0) == 258
-    finally:
-        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-        kernel.CloseHandle(handle)
 
 
 def movement(pi):
@@ -182,16 +160,19 @@ def main():
             stall = model('stall', mode='stall_load')
             assert control.request('configure', settings=dict(model=stall))['ok']
             deadline = time.monotonic() + 5
-            while not Path(stall + '.pids').exists() and time.monotonic() < deadline:
+            record = Path(stall + '.pids')
+            while (not record.exists() or not record.stat().st_size) and time.monotonic() < deadline:
                 time.sleep(.01)
-            assert Path(stall + '.pids').exists(), 'Stalled worker never launched'
+            assert record.exists() and record.stat().st_size, 'Stalled worker never recorded its identity'
             control.close()
             phases.append('shutdown cancels a stalled worker')
-            pids = [int(line) for file in root.glob('*.pids') for line in file.read_text().splitlines()]
+            workers = [json.loads(line) for file in root.glob('*.pids') for line in file.read_text().splitlines()]
             deadline = time.monotonic() + 5
-            while any(alive(pid) for pid in pids) and time.monotonic() < deadline:
+            survivors = [worker for worker in workers if alive(worker)]
+            while survivors and time.monotonic() < deadline:
                 time.sleep(.02)
-            assert not any(alive(pid) for pid in pids), 'Worker process survived cleanup'
+                survivors = [worker for worker in workers if alive(worker)]
+            assert not survivors, 'Worker processes survived cleanup: ' + json.dumps(survivors)
             print('\n'.join('Passed: ' + phase for phase in phases), flush=True)
         finally:
             control.close()
@@ -199,7 +180,7 @@ def main():
             pi.stop()
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        args.report.write_text(json.dumps(dict(phases=phases, workers=len(pids)), indent=2))
+        args.report.write_text(json.dumps(dict(phases=phases, workers=len(workers)), indent=2))
 
 
 if __name__ == '__main__':

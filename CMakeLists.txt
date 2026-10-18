@@ -124,6 +124,7 @@ target_link_libraries(receiver_backend_tests PRIVATE receiver_core)
 add_test(NAME receiver_backends COMMAND receiver_backend_tests)
 find_package(Python3 QUIET COMPONENTS Interpreter)
 if(Python3_Interpreter_FOUND)
+  add_test(NAME receiver_process_identity COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_identity_test.py")
   add_test(NAME receiver_omni_worker COMMAND receiver_backend_tests
            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/omni_fixture.py")
   set_tests_properties(receiver_omni_worker PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 30)

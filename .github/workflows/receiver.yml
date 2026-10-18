@@ -37,6 +37,9 @@ jobs:
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --output-junit junit.xml
       - name: Repeat reload, settings and preference pipeline stress checks
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:20 -R "receiver_workflows|receiver_reliability|receiver_class_preference_pipeline" --output-junit stress.xml
+      - name: Repeat Windows worker cleanup regression
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:3 -R "^receiver_model_faults$" --output-junit worker-cleanup.xml
       - name: Build and test extracted release package
         if: matrix.configuration == 'Release'
         run: python tools/package_ci.py --build build/ci --name Receiver-${{ matrix.os }}-${{ matrix.compiler }}-${{ github.sha }}

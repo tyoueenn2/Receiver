@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import struct
 import time
+from process_identity import identity
 
 
 def exact(stream, length):
@@ -47,7 +48,7 @@ def main():
         weights = Path(request['model'])
         spec = json.loads(weights.read_text())
         with Path(str(weights) + '.pids').open('a') as output:
-            output.write(str(os.getpid()) + '\n')
+            output.write(json.dumps(identity()) + '\n')
         mode = spec.get('mode', 'ok')
         time.sleep(spec.get('load_delay', 0))
         if mode == 'stall_load':

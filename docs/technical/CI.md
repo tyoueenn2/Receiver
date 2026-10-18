@@ -33,6 +33,11 @@ an unchanged Pi connection during reloads, cleared synthetic holds, disarmed out
 and termination of every launched worker. All network peers use loopback, and the
 scenario runner rejects local cursor injection and non-loopback settings.
 
+Worker cleanup compares both PID and OS process creation time, so a reused PID
+cannot be mistaken for a leaked worker. A separate lifecycle regression verifies
+live, terminated and reused process identities. Windows native jobs repeat the
+full worker fault/cleanup test three times in addition to the ordinary suite.
+
 ## Results and packages
 
 Each native job uploads JUnit results, CTest failure logs, model fault reports and
