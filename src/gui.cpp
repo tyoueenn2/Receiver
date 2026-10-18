@@ -590,6 +590,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         simulate = true;
         names = {"Example object"};
         settings.preview = true;
+        if (smoke && options.find("--test-preference=global") != std::string::npos)
+            settings.class_preference = {0, "Example object", 0, 32};
+        if (smoke && options.find("--test-preference=near") != std::string::npos)
+            settings.class_preference = {0, "Example object", 1, 32};
         app.start(settings, true);
     }
     auto busy = [&]() {
@@ -2040,6 +2044,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                                                     {"label", item.label},
                                                     {"visible", visible},
                                                     {"armed", result.armed},
+                                                    {"preferred_class", settings.class_preference.class_id},
+                                                    {"preference_type", settings.class_preference.mode},
                                                     {"width", ImGui::GetIO().DisplaySize.x},
                                                     {"navigation_overflow", navigation_overflow}}
                                          .dump(2);

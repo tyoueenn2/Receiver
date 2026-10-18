@@ -71,12 +71,20 @@ def main():
                 os._exit(17)
             if mode == 'stall_run':
                 time.sleep(60)
-            reply = dict(status='result', candidates=100001 if mode == 'bad_shape' else 1,
+            boxes = spec.get('detections')
+            if boxes is None:
+                columns = [[.6 * size, .5 * size, .15 * size, .1 * size] +
+                           [.9 if name == 'object' else .1 for name in names]]
+            else:
+                # Explicit pixel-space scenes independently exercise App decoding/selection.
+                columns = [[coordinate * size / 320 for coordinate in box[:4]] +
+                           [box[5] if c == box[4] else .01 for c in range(len(names))]
+                           for box in boxes]
+            reply = dict(status='result', candidates=100001 if mode == 'bad_shape' else len(columns),
                          classes=len(names) + (mode == 'bad_classes'),
                          inference_ms=-1 if mode == 'bad_timing' else .2)
             send_json(stream, reply, mode == 'chunked')
-            values = [.6 * size, .5 * size, .15 * size, .1 * size]
-            values += [.9 if name == 'object' else .1 for name in names]
+            values = [column[row] for row in range(4 + len(names)) for column in columns]
             data = struct.pack('<' + 'f' * len(values), *values)
             if mode == 'truncated':
                 stream.sendall(data[:4])
