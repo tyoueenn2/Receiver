@@ -27,6 +27,8 @@ target_include_directories(receiver_core PUBLIC include)
 target_link_libraries(receiver_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
 if(WIN32)
   target_compile_definitions(receiver_core PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
+  # FileRenameInfoEx (Windows 10 1607); unsupported file systems use the legacy fallback.
+  target_compile_definitions(receiver_core PRIVATE _WIN32_WINNT=0x0A00 NTDDI_VERSION=0x0A000002)
   target_link_libraries(receiver_core PUBLIC ws2_32 winmm bcrypt user32)
 endif()
 if(MSVC)

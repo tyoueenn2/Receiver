@@ -2,8 +2,11 @@
 #include "receiver/preferences.hpp"
 #include "receiver/network.hpp"
 #include <cmath>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <thread>
@@ -170,11 +173,44 @@ void write_json_atomic(const json& value, const std::filesystem::path& path) {
                 throw std::runtime_error("Failed writing profile");
         }
 #ifdef _WIN32
+        // MoveFileEx rejects an open destination even when readers share DELETE.
+        // POSIX replacement leaves those handles on the old, complete version and
+        // immediately makes the new version available to subsequent readers.
+        const auto destination = std::filesystem::absolute(path).native();
+        const auto info_size = sizeof(FILE_RENAME_INFO) + destination.size() * sizeof(wchar_t);
+        auto storage = std::make_unique<std::byte[]>(info_size);
+        auto* info = reinterpret_cast<FILE_RENAME_INFO*>(storage.get());
+        info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        info->FileNameLength = DWORD(destination.size() * sizeof(wchar_t));
+        std::memcpy(info->FileName, destination.data(), info->FileNameLength);
+        bool posix = true;
         DWORD error = ERROR_SUCCESS;
         for (int attempt = 0; attempt < 40; ++attempt) {
-            if (MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+            if (posix) {
+                HANDLE handle =
+                    CreateFileW(temp.c_str(), DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (handle == INVALID_HANDLE_VALUE) {
+                    error = GetLastError();
+                } else {
+                    const bool replaced =
+                        SetFileInformationByHandle(handle, FileRenameInfoEx, info, DWORD(info_size)) != FALSE;
+                    error = replaced ? ERROR_SUCCESS : GetLastError();
+                    CloseHandle(handle);
+                }
+                // Older Windows/file systems may not support the extended rename.
+                if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED ||
+                    error == ERROR_INVALID_FUNCTION)
+                    posix = false;
+            }
+            if (!posix) {
+                const bool replaced =
+                    MoveFileExW(temp.c_str(), path.c_str(),
+                                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+                error = replaced ? ERROR_SUCCESS : GetLastError();
+            }
+            if (error == ERROR_SUCCESS)
                 return;
-            error = GetLastError();
             if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED)
                 break;
             std::this_thread::sleep_for(std::chrono::milliseconds(5));

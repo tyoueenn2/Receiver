@@ -7,6 +7,9 @@
 #include <iostream>
 #include <random>
 #include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 using namespace receiver;
 using test::rejects;
 namespace {
@@ -80,6 +83,53 @@ void metadata_boundaries() {
         CHECK(!parse_telemetry(packet));
     }
 }
+#ifdef _WIN32
+void settings_open_readers() {
+    test::TempDirectory temp;
+    const auto file = temp.path / L"settings-\u8a2d\u5b9a.json";
+    // Pin two generations, so success cannot depend on catching a gap between reads.
+    struct Reader {
+        HANDLE handle;
+        explicit Reader(const std::filesystem::path& path)
+            : handle(CreateFileW(path.c_str(), GENERIC_READ,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {
+            CHECK(handle != INVALID_HANDLE_VALUE);
+        }
+        ~Reader() {
+            CloseHandle(handle);
+        }
+        nlohmann::json read() {
+            char data[1024];
+            DWORD bytes = 0;
+            CHECK(ReadFile(handle, data, sizeof(data), &bytes, nullptr));
+            return nlohmann::json::parse(data, data + bytes);
+        }
+    };
+    const nlohmann::json first = {{"generation", 1}}, second = {{"generation", 2}},
+                         third = {{"generation", 3}};
+    write_json_atomic(first, file);
+    Reader old(file);
+    write_json_atomic(second, file);
+    Reader middle(file);
+    // Exercise a relative Unicode destination as well as an absolute one.
+    // The runner's working directory and TEMP can be on different drives.
+    struct RestoreDirectory {
+        std::filesystem::path previous = std::filesystem::current_path();
+        ~RestoreDirectory() {
+            std::error_code ignored;
+            std::filesystem::current_path(previous, ignored);
+        }
+    } restore;
+    std::filesystem::current_path(temp.path);
+    write_json_atomic(third, file.filename());
+    CHECK(old.read() == first);
+    CHECK(middle.read() == second);
+    CHECK(read_json_file(file) == third);
+    for (const auto& entry : std::filesystem::directory_iterator(temp.path))
+        CHECK(entry.path().extension() != L".tmp");
+}
+#endif
 void preferences_failures() {
     test::TempDirectory temp;
     auto root = temp.path / "settings";
@@ -214,6 +264,9 @@ void benchmark_failures() {
 int main() {
     try {
         metadata_boundaries();
+#ifdef _WIN32
+        settings_open_readers();
+#endif
         preferences_failures();
         benchmark_failures();
         std::cout << test::checks << " reliability checks passed\n";
