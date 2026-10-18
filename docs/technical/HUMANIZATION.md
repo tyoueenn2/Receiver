@@ -1,6 +1,6 @@
 # Humanization controls
 
-Open **Humanization** to adjust sensitivity, smoothing, the dead zone, sticky targeting, movement style, random variation, and direction-based strength. These controls are saved with your settings. Existing profiles load with the new effects off, preserving their previous movement behavior.
+Open **Movement** for sensitivity, smoothing, correction limits, movement path, jitter and directional strength. **Targeting** contains target lock, search radius, aim point and prediction. **Activation** contains the held/continuous mode and activation buttons. These controls are saved with your settings. Existing profiles load with the new effects off, preserving their previous movement behavior.
 
 ## Direction-based help
 
@@ -41,11 +41,11 @@ With the Pi connection, production physical mouse data comes from cumulative **U
 
 **Small random variations** adds bounded jitter in mouse units at a configurable interval. Both jitter and smooth noise fade within 20 picture pixels of the aim point and are disabled inside the dead zone. No variation occurs without a current eligible target. Smoothing is time-based exponential averaging. Shaping state resets on target change, deactivation, stale input, and configuration changes; no future path points are queued. Direction strength is applied after shaping/smoothing and before the existing device/per-update caps. Zero strength clears fractional and smoothed leftovers.
 
-Aimmy's [movement settings](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/Class/Dictionary.cs) and [movement implementation](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/InputLogic/MouseManager.cs) informed the selection of sensitivity, jitter, smoothing, sticky targeting, and movement-style controls. This is an independent implementation; its numerical behavior is not a port of Aimmy. Smooth noise uses interpolated random values rather than a Perlin routine. The humanization controller does not trigger clicks automatically; scheduled clicks are available separately through Receiver's synthetic-button API.
+Aimmy's [movement settings](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/Class/Dictionary.cs) and [movement implementation](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/InputLogic/MouseManager.cs) informed the selection of sensitivity, jitter, smoothing, sticky targeting, and movement-style controls. This is an independent implementation; its numerical behavior is not a port of Aimmy. Smooth noise uses interpolated random values rather than a Perlin routine. The humanization controller does not trigger clicks automatically; automatic clicks are configured separately in **Auto click** and require Pi output.
 
 ## Practice and checks
 
-The demo uses steady stationary simulated physical input by default. Start the launcher with `--cycle-motion` to cycle right, left, slowly right, then stationary every four seconds. Enable direction-based help and **Enable practice movement** to see the last calculated multiplier. These are simulated mouse readings, not your local desktop cursor. Your actual mouse is never moved by the simulator.
+The demo uses steady stationary simulated physical input by default. Start the launcher with `--cycle-motion` to cycle right, left, slowly right, then stationary every four seconds. Enable direction-based help and **Arm practice assistance** to see the last calculated multiplier. These are simulated mouse readings, not your local desktop cursor. Your actual mouse is never moved by the simulator.
 
 Run the CMake tests and `python tests/direction_integration_test.py path/to/receiver_headless.exe` to check both angle modes, the slow-input fallback, missing/stale telemetry, a motion-generation restart, and activation release. Pi USB operation and deployment-GPU latency still require hardware validation.
 
@@ -53,19 +53,19 @@ Run the CMake tests and `python tests/direction_integration_test.py path/to/rece
 
 These controls follow the configuration concepts in Aimmy's [settings](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/Class/Dictionary.cs) and [prediction manager](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/AILogic/PredictionManager.cs). They are independent implementations, not numerically identical ports.
 
-- **Lead moving targets:** choose Kalman filtering, exponentially averaged velocity, or a five-sample velocity history. Lead time and multiplier adjust how far ahead to aim; maximum lead distance limits displacement. Velocity averaging applies to the averaged-velocity method. Capture timestamps determine elapsed time. A missing detection, changed identity, deactivation, stale frame, or sample gap over 100 ms resets prediction. Predicted points stay within the picture and active search circle.
-- **Sticky target distance:** lets persistence match a current detection of the same class within a center-distance threshold, even when boxes no longer overlap. Zero uses overlap only. This is geometric matching, not a learned identity tracker.
-- **Dynamic search area:** holding a selected physical button substitutes another search radius. Releasing it restores the usual radius. It does not activate movement by itself.
-- **EMA smoothing:** replaces time-based movement smoothing with an adjustable per-update response. Smaller values respond more gradually. Unlike time-based smoothing, its feel depends on update frequency.
-- **Alternate activation:** the Mouse tab can enable a second hold-to-activate button. Either button works; enabling movement at the top is still required.
+- **Targeting > Predict target movement:** choose Kalman filtering, exponentially averaged velocity, or a five-sample velocity history. Lead time and multiplier adjust how far ahead to aim; maximum lead distance limits displacement. Velocity averaging applies to the averaged-velocity method. Capture timestamps determine elapsed time. A missing detection, changed identity, deactivation, stale frame, or sample gap over 100 ms resets prediction. Predicted points stay within the picture and active search circle.
+- **Targeting > Maximum target displacement:** lets persistence match a current detection of the same class within a center-distance threshold, even when boxes no longer overlap. Zero uses overlap only. This is geometric matching, not a learned identity tracker.
+- **Targeting > Change radius while holding a button:** holding a selected physical button substitutes another search radius. Releasing it restores the usual radius. It does not activate movement by itself.
+- **Movement > Smoothing method > Exponential moving average (EMA):** replaces time-based movement smoothing with an adjustable per-update response. Smaller values respond more gradually. Unlike time-based smoothing, its feel depends on update frequency.
+- **Alternate activation:** **Activation > Alternate button** enables a second hold-to-activate button. Either button works; arming assistance at the top is still required.
 
 ## Local Windows mouse testing
 
-1. Open the demo and press **Stop session**.
-2. Open **Mouse** and choose **Local Windows mouse** under Mouse connection.
+1. Open the demo and press **End session**.
+2. Open **Connections** and choose **This computer's Windows mouse** under **Output device**.
 3. Start practice. The example image uses a fixed detection, so it does not track desktop content.
-4. Enable **local cursor movement**, then press and hold your activation button (right mouse by default).
-5. Release it, press Delete, or select **Turn movement off** to stop.
+4. Enable **Arm local assistance**, then press and hold your activation button (right mouse by default).
+5. Release it, press Delete, or select **Disarm** to stop.
 
 This connection reads physical Windows mouse events and uses `SendInput` for relative cursor movement. Injected motion and buttons are excluded from the physical readings. It supports the five standard mouse buttons. Press the activation button after starting; a button already held at startup is not trusted.
 

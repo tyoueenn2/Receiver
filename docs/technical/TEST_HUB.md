@@ -1,6 +1,6 @@
 # Test Hub
 
-Open **Test Hub** and press **Run selected checks**, **Run all checks**, or **Run** beside one check. Starting tests disarms and stops the current receiver session. The interface stays responsive; Cancel stops the active test and its child processes. Closing Receiver also cancels testing. Tests never enable the local cursor-output backend.
+Open **Diagnostics > Setup checks** and press **Run selected checks**, **Run all checks**, or **Run** beside one check. Starting tests disarms and stops the current receiver session. The interface stays responsive; Cancel stops the active test and its child processes. Closing Receiver also cancels testing. Tests never enable the local cursor-output backend.
 
 | Check | What it does | Requirements |
 |---|---|---|

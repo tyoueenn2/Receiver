@@ -10,6 +10,7 @@ __pycache__/
 *.csv
 *.log
 gui-smoke.bmp
+gui-smoke-state.json
 gui-smoke-*.bmp
 gui-smoke-*.png
 imgui.ini

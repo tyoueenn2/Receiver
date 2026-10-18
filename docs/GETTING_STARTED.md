@@ -4,27 +4,52 @@
 
 After building the app or unpacking a test build, install Python 3.12 or newer and double-click **Start Demo.cmd**. This opens the app with example pictures and a simulated mouse device already connected. Close the app to stop the demo helpers.
 
-- **Setup** explains how to connect devices or try practice mode.
-- **Models** switches models during a session, chooses image size automatically,
-  remembers each model's settings and measures real-model processing speed.
-- **Detection** controls which object is selected and where to point within its box.
-- **Mouse** controls the named button to hold and output limits.
-- **Humanization** contains sensitivity, smoothing, movement styles, jitter, and configurable direction-based strength. See [control details](technical/HUMANIZATION.md).
-- **Saved settings** searches, opens and exports profiles. Accepted settings
-  restore automatically next launch, with movement off.
+The sidebar groups settings by what you want to change. **Find a setting** accepts
+words such as `prediction`, `mouse sensitivity`, `spray`, or `dataset` and opens
+the matching category. Q/E moves between categories when you are not typing.
+
+| Category | What belongs here |
+| --- | --- |
+| Connections | Practice/live mode, mouse output device, sender/Pi addresses and network ports |
+| Model | Model library, input resolution, inference FPS limit, runtime and performance benchmark |
+| Activation | Held-button or continuous mode, activation buttons, cursor pause and maximum frame age |
+| Targeting | Confidence, classes, target priority/lock, search radius, aim point and movement prediction |
+| Movement | Sensitivity, smoothing, correction limits, movement path, jitter and directional strength |
+| Auto click | Enable automatic clicks, once/repeat behavior, click button and timing |
+| Preview | Live video, detection boxes, search-area circle, labels, target lines and overlay appearance |
+| Data capture | Save images, output folder, save interval and optional YOLO labels |
+| Profiles | Save/load Receiver profiles and import Aimmy configs |
+| App preferences | Window behavior, theme color and keyboard shortcuts |
+| Diagnostics | Setup checks and live connection/performance details |
+
+Choose **Connections**, select a **Model** for live detection, and start the
+session. Use **Preview** to inspect the video before arming assistance. The
+global **Arm assistance** control permits output; **Activation** determines when
+that output runs. **Disarm** or **Delete** stops it. Accepted settings restore
+automatically next launch, with assistance disarmed.
 
 See [model switching, automatic sizes and preferences](technical/MODEL_WORKFLOWS.md)
 for supported metadata, rollback behavior, library refresh and performance tuning.
 
-Use **Show preview** to see the picture. **Enable practice movement** sends commands only to the simulator; it never moves your actual mouse. The simulated device holds the right button for you. **Turn movement off** or **Delete** disables movement. Practice uses a fixed example detection, not YOLO inference. Technical settings and performance numbers are in expandable sections.
+In practice mode, **Arm practice assistance** sends commands only to the
+simulator; it never moves your actual mouse with the default simulated Pi output.
+The simulated device holds the right button for you. Practice uses a fixed example
+detection, not YOLO inference. Each category keeps advanced tuning beside the
+setting it affects. Movement reset affects only Movement, preserving Targeting.
 
 From a terminal, the same demo is `py tools/ui_demo.py`; use `--exe path/to/receiver.exe` for a custom build location.
 
 ## Local mouse and automated checks
 
-The Mouse page offers a **Local Windows mouse** connection for manual testing. It starts disarmed and requires a held physical activation button. Humanization includes three prediction methods, lead controls, sticky distance, dynamic FOV, and EMA response. See [Humanization](technical/HUMANIZATION.md).
+For manual cursor testing, end the session and choose **Connections > Mouse
+output > This computer's Windows mouse**. Set buttons or continuous mode in
+**Activation**, then start and arm the session. This output moves your real mouse.
+See [movement and tracking details](technical/HUMANIZATION.md).
 
-Open **Test Hub** to run individual or selected checks, inspect results, and save logs automatically. The demo launcher fills in Python automatically. See [Test Hub requirements](technical/TEST_HUB.md).
+Open **Diagnostics > Setup checks** to run individual or selected checks, inspect
+results, and save logs automatically. The demo launcher fills in Python
+automatically. **Live status and timing** contains telemetry and performance
+reports. See [check requirements](technical/TEST_HUB.md).
 
 ## Use your own model or connect devices
 
