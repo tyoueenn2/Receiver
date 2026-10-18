@@ -6,6 +6,7 @@
 #include <commdlg.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -29,6 +30,68 @@ ImFont* label_font = nullptr;
 ImFont* detail_font = nullptr;
 ImVec4 accent{.19f, .59f, 1.f, 1.f};
 constexpr ImVec4 muted{.53f, .59f, .68f, 1.f};
+
+enum class Page {
+    connections,
+    targeting,
+    activation,
+    profiles,
+    movement,
+    diagnostics,
+    models,
+    preferences,
+    auto_click,
+    preview,
+    capture
+};
+struct PageInfo {
+    Page page;
+    const char* slug;
+    const char* label;
+    const char* group;
+    const char* description;
+    const char* keywords;
+};
+constexpr PageInfo settings_pages[] = {
+    {Page::connections, "connections", "Connections", "GET STARTED",
+     "Choose the video source and where mouse commands are sent.",
+     "setup practice demo network ip address ports raspberry pi mouse backend local windows"},
+    {Page::models, "models", "Model", "GET STARTED",
+     "Load a detection model and choose its speed and input size.",
+     "onnx pt engine python runtime gpu fps performance benchmark image resolution inference"},
+    {Page::activation, "activation", "Activation", "ASSISTANCE",
+     "Choose when assistance runs and when it should pause.",
+     "aim keybind primary secondary button constant tracking continuous cursor frame age stop safety "
+     "maximum"},
+    {Page::targeting, "targeting", "Targeting", "ASSISTANCE",
+     "Choose what to follow, where to aim, and how to track moving targets.",
+     "detection confidence class fov search radius sticky persistence prediction kalman lead offset "
+     "crosshair"},
+    {Page::movement, "movement", "Movement", "ASSISTANCE",
+     "Adjust sensitivity, smoothing, and the path of each mouse correction.",
+     "motion humanization ema gain speed deadzone curve bezier jitter noise direction strength maximum "
+     "correction limits response units counts"},
+    {Page::auto_click, "auto-click", "Auto click", "ASSISTANCE",
+     "Click automatically when a selected target stays under the crosshair.",
+     "trigger spray fire repeat interval delay press duration button mouse hold timing first"},
+    {Page::preview, "preview", "Preview", "WORKSPACE",
+     "Inspect the received image and customize its detection overlays.",
+     "display visual boxes fov circle confidence labels tracers color opacity border font lines detected "
+     "targets search area label text size"},
+    {Page::capture, "data-capture", "Data capture", "WORKSPACE",
+     "Save received images and optional training labels to a local folder.",
+     "dataset collection frames save images yolo auto label interval directory recording output"},
+    {Page::profiles, "profiles", "Profiles", "WORKSPACE",
+     "Save a setup, restore a profile, or import an Aimmy configuration.",
+     "saved settings load open file json cfg import export configuration"},
+    {Page::preferences, "app", "App preferences", "WORKSPACE",
+     "Customize this window and its keyboard shortcuts.",
+     "settings theme accent always top stream guard capture exclusion model switch hotkey"},
+    {Page::diagnostics, "diagnostics", "Diagnostics", "TOOLS",
+     "Run setup checks and inspect live connection and performance details.",
+     "test hub troubleshooting timings latency metrics error reports logs telemetry"},
+};
+
 void release_target() {
     if (target) {
         target->Release();
@@ -91,7 +154,6 @@ void section(const char* title, const char* description) {
     ImGui::PopStyleColor();
     ImGui::PopFont();
     hint(description);
-    ImGui::Spacing();
 }
 void field_label(const char* label, const char* value = nullptr) {
     const float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
@@ -354,7 +416,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     style.WindowPadding = ImVec2(24, 20);
     style.FramePadding = ImVec2(10, 4);
     style.CellPadding = ImVec2(12, 5);
-    style.SeparatorTextPadding = ImVec2(0, 8);
+    style.SeparatorTextPadding = ImVec2(0, 5);
     style.SeparatorTextBorderSize = 1;
     style.Colors[ImGuiCol_Text] = ImVec4(.88f, .90f, .94f, 1);
     style.Colors[ImGuiCol_TextDisabled] = muted;
@@ -397,23 +459,32 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     uint64_t previous_frames = 0;
     int64_t last_frame = 0;
     std::string notice;
-    int page = 2;
-    if (options.find("--page=setup") != std::string::npos)
-        page = 0;
-    if (options.find("--page=settings") != std::string::npos)
-        page = 7;
-    if (options.find("--page=detect") != std::string::npos)
-        page = 1;
-    if (options.find("--page=mouse") != std::string::npos)
-        page = 2;
-    if (options.find("--page=human") != std::string::npos)
-        page = 4;
-    if (options.find("--page=saved") != std::string::npos)
-        page = 3;
-    if (options.find("--page=hub") != std::string::npos)
-        page = 5;
-    if (options.find("--page=models") != std::string::npos)
-        page = 6;
+
+    Page page = Page::connections;
+    std::array<char, 128> settings_search{};
+    auto go_to = [&](Page destination) {
+        page = destination;
+        settings_search.fill(0);
+    };
+    if (smoke) {
+        const auto find = options.find("--find=");
+        if (find != std::string::npos) {
+            auto value = options.substr(find + 7, options.find(' ', find) - (find + 7));
+            std::replace(value.begin(), value.end(), '+', ' ');
+            std::snprintf(settings_search.data(), settings_search.size(), "%s", value.c_str());
+        }
+    }
+    for (const auto& item : settings_pages)
+        if (options.find(std::string("--page=") + item.slug) != std::string::npos)
+            page = item.page;
+    // Keep existing launch links compatible.
+    const std::pair<const char*, Page> aliases[] = {
+        {"setup", Page::connections}, {"detect", Page::targeting}, {"mouse", Page::activation},
+        {"human", Page::movement},    {"saved", Page::profiles},   {"settings", Page::preferences},
+        {"hub", Page::diagnostics}};
+    for (const auto& [name, destination] : aliases)
+        if (options.find(std::string("--page=") + name) != std::string::npos)
+            page = destination;
     if (smoke) {
         auto port = [&](const std::string& key, int current) {
             auto pos = options.find(key);
@@ -497,6 +568,14 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         for (auto& c : query)
             c = char(std::tolower(static_cast<unsigned char>(c)));
         return value.find(query) != std::string::npos;
+    };
+    auto matches_settings = [&](std::string text, const std::string& query) {
+        std::istringstream words(query);
+        std::string word;
+        while (words >> word)
+            if (!matches(text, word))
+                return false;
+        return true;
     };
     std::future<void> operation;
     Texture texture;
@@ -592,14 +671,17 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                            simulate                 ? "PRACTICE MODE"
                            : settings.model.empty() ? "NO MODEL SELECTED"
                                                     : "MODEL SELECTED");
-        hint("VISION ASSISTANCE  /  CONTROL CENTER");
+        hint("DEVICE SETUP  /  TARGETING  /  ASSISTANCE");
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Separator, accent);
         ImGui::Separator();
         ImGui::PopStyleColor();
-        const std::pair<const char*, int> pages[] = {{"AIM", 2},    {"DETECTION", 1}, {"MOTION", 4},
-                                                     {"MODELS", 6}, {"PROFILES", 3},  {"SETTINGS", 7},
-                                                     {"SETUP", 0},  {"TEST HUB", 5}};
+
+        std::vector<const PageInfo*> visible_pages;
+        for (const auto& item : settings_pages)
+            if (matches_settings(std::string(item.label) + " " + item.description + " " + item.keywords,
+                                 settings_search.data()))
+                visible_pages.push_back(&item);
         std::array<bool, 256> pressed{};
         for (int key = 8; key < 255; ++key) {
             const bool down = (GetAsyncKeyState(key) & 0x8000) != 0;
@@ -620,9 +702,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 if (pressed[VK_ESCAPE])
                     capture_model_key = false;
             } else if (pressed['Q'] || pressed['E']) {
-                for (int i = 0; i < 8; ++i)
-                    if (page == pages[i].second) {
-                        page = pages[(i + (pressed['E'] ? 1 : 7)) % 8].second;
+                for (size_t i = 0; i < visible_pages.size(); ++i)
+                    if (page == visible_pages[i]->page) {
+                        page = visible_pages[(i + (pressed['E'] ? 1 : visible_pages.size() - 1)) %
+                                             visible_pages.size()]
+                                   ->page;
                         break;
                     }
             } else if (settings.ui.model_switch && pressed[settings.ui.model_switch_key] && !busy() &&
@@ -638,35 +722,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     app.arm(false);
                     open_model(models[next]);
                 } else
-                    notice = "Add a model in Models before using the switch key.";
+                    notice = "Add a model in Model before using the switch key.";
             }
         }
-        const float navigation_width = (ImGui::GetContentRegionAvail().x - 7 * style.ItemSpacing.x) / 8;
-        ImGui::PushFont(label_font);
-        for (int i = 0; i < 8; ++i) {
-            if (i)
-                ImGui::SameLine();
-            const bool selected = page == pages[i].second;
-            ImGui::PushStyleColor(ImGuiCol_Button,
-                                  selected ? ImVec4(.08f, .16f, .25f, 1) : ImVec4(0, 0, 0, 0));
-            ImGui::PushStyleColor(ImGuiCol_Text, selected ? style.Colors[ImGuiCol_Text] : muted);
-            if (ImGui::Button(pages[i].first, ImVec2(navigation_width, 38)))
-                page = pages[i].second;
-            if (selected) {
-                const auto a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-                ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x, b.y), b,
-                                                    ImGui::ColorConvertFloat4ToU32(accent), 2);
-            }
-            ImGui::PopStyleColor(2);
-        }
-        ImGui::PopFont();
-        ImGui::Spacing();
         const char* next_step =
             !stats.error.empty() ? "Something needs attention. Stop, check the details below, then try again."
             : stats.model_loading || stats.benchmarking || busy()
                 ? "Getting ready. Loading a new model can take a few minutes."
-            : !stats.running ? "Choose your setup below, then press Start. Mouse control starts turned off."
-            : !receiving     ? "Waiting for pictures. Start the picture sender on the sending computer."
+            : !stats.running
+                ? "Choose Connections and Model, then start the session. Assistance starts disarmed."
+            : !receiving          ? "Waiting for pictures. Start the picture sender on the sending computer."
             : !stats.synchronized ? "Pictures are arriving. Waiting for the sender's timing check."
             : !stats.pi_ready && settings.mouse_backend == 1 ? "Waiting for the local Windows mouse reader."
             : !stats.pi_ready ? "Waiting for the mouse device. Check the Pi address and install its receiver "
@@ -676,10 +741,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             : settings.direction.enabled && !stats.motion_available
                 ? "Waiting for physical mouse movement data. Install the Pi motion update or turn "
                   "direction-based help off."
-            : !stats.armed  ? "Ready to preview. Turn on mouse control only when you want to test movement."
-            : !stats.active ? "Mouse control is enabled. Hold your chosen mouse button to activate it."
-            : settings.mouse_backend == 1
-                ? "Local cursor control is active. Release your activation button to stop."
+            : !stats.armed
+                ? "Session ready. Arm assistance to allow movement; use Preview to inspect the video first."
+            : !stats.active               ? "Assistance is armed. Activation settings determine when it runs."
+            : settings.mouse_backend == 1 ? "Local assistance is active. Press Delete to disarm."
             : simulate
                 ? "Practice is active. Commands go to the simulator; your real mouse is unaffected."
                 : "Mouse control is enabled. Movement requires a fresh picture and a matching detection.";
@@ -700,7 +765,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                                        [&, cfg, use_simulation] { app.start(cfg, use_simulation); });
             }
         } else {
-            if (ImGui::Button("Stop session", ImVec2(150, 34))) {
+            if (ImGui::Button("End session", ImVec2(150, 34))) {
                 app.arm(false);
                 operation = std::async(std::launch::async, [&] { app.stop(); });
             }
@@ -709,9 +774,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         if (stats.running) {
             ImGui::SameLine(0, 20);
             bool armed = stats.armed;
-            if (ImGui::Checkbox(settings.mouse_backend == 1 ? "Enable local cursor movement"
-                                : simulate                  ? "Enable practice movement"
-                                                            : "Enable mouse control",
+            if (ImGui::Checkbox(settings.mouse_backend == 1 ? "Arm local assistance"
+                                : simulate                  ? "Arm practice assistance"
+                                                            : "Arm assistance",
                                 &armed))
                 app.arm(armed);
         }
@@ -719,7 +784,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 220);
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(.22f, .11f, .15f, 1));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.40f, .15f, .20f, 1));
-        if (ImGui::Button("Turn movement off  [Delete]", ImVec2(220, 34)))
+        if (ImGui::Button("Disarm  [Delete]", ImVec2(220, 34)))
             app.arm(false);
         ImGui::PopStyleColor(2);
         hint(next_step);
@@ -734,761 +799,614 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         if (!notice.empty())
             ImGui::TextWrapped("%s", notice.c_str());
         ImGui::Spacing();
-        const bool show_hub = page == 5;
+
         const float body_height = std::max(100.f, ImGui::GetContentRegionAvail().y - 34);
-        const float controls_width =
-            show_hub
-                ? ImGui::GetContentRegionAvail().x
-                : ImGui::GetContentRegionAvail().x -
-                      std::clamp(ImGui::GetContentRegionAvail().x * .31f, 300.f, 440.f) - style.ItemSpacing.x;
-        const std::string controls_id = "Controls##" + std::to_string(page);
-        ImGui::BeginChild(controls_id.c_str(), ImVec2(controls_width, body_height), ImGuiChildFlags_Borders);
-        ImGui::PushItemWidth(-1);
-        {
-            if (page == 0) {
-                const bool columns = setting_columns("Setup groups");
-                section("1. Choose how to use Receiver",
-                        "Try the controls first, or connect your two computers.");
-                ImGui::BeginDisabled(stats.running || busy());
-                if (ImGui::RadioButton("Practice on this computer", simulate)) {
-                    simulate = true;
-                    settings.sender_ip = settings.pi_ip = "127.0.0.1";
-                    mark_preferences();
-                }
-#ifndef RECEIVER_HAS_TENSORRT
-                hint("This build can run .pt models with the Python runtime installed. "
-                     "Exported .onnx and .engine models need the TensorRT build.");
-#endif
-                if (ImGui::RadioButton("Connect my computers and Raspberry Pi", !simulate)) {
-                    simulate = false;
-                    mark_preferences();
-                }
-                if (columns)
-                    ImGui::TableNextColumn();
-                if (simulate) {
-                    section("2. Prepare the practice pictures",
-                            "The demo launcher starts a picture sender and simulated mouse device for you. "
-                            "No Raspberry Pi or model is needed.");
-                    hint("If you opened this app directly, double-click Start Demo in the app folder. "
-                         "Practice uses a fixed example detection.");
-                    // Profiles may contain real addresses. Practice always uses local peers.
-                    settings.sender_ip = settings.pi_ip = "127.0.0.1";
-                } else {
-                    section("2. Connect your devices", "Enter the local network addresses of the computer "
-                                                       "sending pictures and your Raspberry Pi.");
-                    changed |= input_string("Sending computer address", settings.sender_ip);
-                    changed |= input_string("Raspberry Pi address", settings.pi_ip);
-                    hint("An address looks like 192.168.1.20. Both devices must be on your local network. "
-                         "The picture sender is a separate program.");
-                    hint("Choose your detection model on the Models page.");
-                }
-                if (ImGui::CollapsingHeader("Advanced connection settings")) {
-                    changed |= input_string("Local listen address", settings.bind_ip);
-                    changed |= number_input("Picture port", &settings.frame_port);
-                    changed |= number_input("Mouse device port", &settings.pi_port);
-                    hint("Keep the defaults unless your sender or Pi uses different ports. Model metadata is "
-                         "found automatically beside the model when this field is empty.");
-                }
-                ImGui::EndDisabled();
-                if (stats.running || busy())
-                    hint("Stop the session to change connections. Models can switch on the Models page.");
-                section("Next: Start and check the preview",
-                        "Press Start at the top. You can view detections with mouse control turned off.");
-                if (columns)
-                    ImGui::EndTable();
-            }
-            if (page == 6) {
-                const bool columns = setting_columns("Model groups");
-                section("Choose a model", "Switch models without reconnecting. Your previous model stays "
-                                          "available if loading fails.");
-                ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking ||
-                                     (stats.running && simulate));
-                input_string("Model file", model_draft);
-                if (ImGui::Button("Load selected model"))
-                    open_model(model_draft);
-                ImGui::SameLine();
-                if (ImGui::Button("Browse..."))
-                    if (auto path = choose_file(window, false, true))
-                        open_model(*path);
-                hint("Models and profiles in your chosen folders refresh automatically. Settings are "
-                     "remembered separately for each model.");
-                input_string("Search models", model_filter);
-                ImGui::BeginChild("Model library", ImVec2(0, 115), ImGuiChildFlags_Borders);
-                bool found_model = false;
-                for (const auto& item : library)
-                    if (item.model && matches(item.name, model_filter)) {
-                        found_model = true;
-                        ImGui::PushID(item.path.string().c_str());
-                        if (ImGui::Selectable(item.name.c_str(), item.path.string() == settings.model))
-                            open_model(item.path.string());
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("%s", item.path.string().c_str());
-                        ImGui::PopID();
-                    }
-                if (!found_model)
-                    hint("No matching models. Use Browse to add a model file.");
-                ImGui::EndChild();
-                section("Image size", "Fixed-size models always use their required size. Dynamic models can "
-                                      "use a saved size or a performance recommendation.");
-                changed |= ImGui::Checkbox("Choose size from model", &settings.auto_size);
-                if (!settings.auto_size)
-                    changed |= number_input("Processing size", &settings.input_size, 32, 160);
-                ImGui::Text("Current size: %d x %d", settings.input_size, settings.input_size);
-                if (!stats.running && settings.auto_size)
-                    hint("The model's preferred size will be read when you start.");
-                changed |= number_input("Processing FPS (0 = unlimited)", &settings.inference_fps, 10);
-                if (ImGui::CollapsingHeader("Model options")) {
-                    const char* backends[]{"Auto", "TensorRT (.onnx / .engine)", "YOLO-Omni / PyTorch (.pt)"};
-                    int backend = settings.inference_backend == "tensorrt"    ? 1
-                                  : settings.inference_backend == "yolo_omni" ? 2
-                                                                              : 0;
-                    if (combo("Detection backend", &backend, backends, 3)) {
-                        settings.inference_backend = backend == 1   ? "tensorrt"
-                                                     : backend == 2 ? "yolo_omni"
-                                                                    : "auto";
-                        changed = true;
-                    }
-                    input_string("Python executable", settings.omni_python);
-                    if (ImGui::IsItemDeactivatedAfterEdit())
-                        changed = true;
-                    input_string("YOLO-Omni source folder", settings.omni_source);
-                    if (ImGui::IsItemDeactivatedAfterEdit())
-                        changed = true;
-                    int device = settings.omni_device == "cpu" ? 1 : 0;
-                    if (combo("PyTorch device", &device, "NVIDIA GPU\0CPU (testing)\0")) {
-                        settings.omni_device = device == 1 ? "cpu" : "cuda:0";
-                        changed = true;
-                    }
-                    input_string("Model metadata file", settings.metadata);
-                    if (ImGui::IsItemDeactivatedAfterEdit())
-                        changed = true;
-                    hint("Object names and supported image sizes are read from the model. An optional "
-                         "companion file can supply missing metadata.");
-                }
-                ImGui::EndDisabled();
-                if (columns)
-                    ImGui::TableNextColumn();
-                section("Performance helper",
-                        "Measures this model on a received picture at supported sizes. Mouse control stays "
-                        "off. This measures speed, not detection accuracy or network delay.");
-                combo("Preference", &performance_goal, "Fastest\0Balanced\0Lower GPU load\0");
-                ImGui::BeginDisabled(!stats.running || simulate || stats.model_loading ||
-                                     stats.benchmarking || busy());
-                if (ImGui::Button("Measure model performance")) {
-                    try {
-                        app.benchmark(receiver::PerformanceGoal(performance_goal));
-                        error.clear();
-                    } catch (const std::exception& e) {
-                        error = e.what();
-                    }
-                }
-                ImGui::EndDisabled();
-                if (stats.benchmarking && ImGui::Button("Cancel measurement"))
-                    app.cancel_benchmark();
-                if (!stats.benchmark.samples.empty() &&
-                    ImGui::BeginTable("Model performance", 4, ImGuiTableFlags_Borders)) {
-                    for (auto label : {"Size", "FPS", "Average ms", "95% ms"})
-                        ImGui::TableSetupColumn(label);
-                    ImGui::TableHeadersRow();
-                    for (const auto& sample : stats.benchmark.samples) {
-                        ImGui::TableNextRow();
-                        ImGui::TableNextColumn();
-                        ImGui::Text("%d", sample.size);
-                        ImGui::TableNextColumn();
-                        if (!sample.error.empty()) {
-                            ImGui::TextUnformatted("Unavailable");
-                            if (ImGui::IsItemHovered())
-                                ImGui::SetTooltip("%s", sample.error.c_str());
-                        } else
-                            ImGui::Text("%.1f", sample.fps);
-                        ImGui::TableNextColumn();
-                        ImGui::Text("%.2f", sample.mean_ms);
-                        ImGui::TableNextColumn();
-                        ImGui::Text("%.2f", sample.p95_ms);
-                    }
-                    ImGui::EndTable();
-                }
-                if (stats.benchmark.recommended_size) {
-                    ImGui::Text("Suggested: %d pixels, %d FPS", stats.benchmark.recommended_size,
-                                stats.benchmark.recommended_fps);
-                    ImGui::BeginDisabled(stats.model_loading || stats.benchmarking || busy());
-                    if (ImGui::Button("Apply recommendation")) {
-                        settings.input_size = stats.benchmark.recommended_size;
-                        settings.inference_fps = stats.benchmark.recommended_fps;
-                        settings.auto_size = false;
-                        changed = true;
-                    }
-                    ImGui::EndDisabled();
-                }
-                if (columns)
-                    ImGui::EndTable();
-            }
-            if (page == 1) {
-                const bool columns = setting_columns("Detection groups");
-                section("Target selection", "Choose which detections the app follows.");
-                changed |= percent_slider("Minimum certainty", settings.confidence);
-                hint("Higher values hide uncertain matches. Start at 45% and raise it if you see unwanted "
-                     "detections.");
-                std::string selected_class =
-                    settings.classes.empty() ? "All object types" : "Custom selection";
-                if (settings.classes.size() == 1 && size_t(settings.classes[0]) < names.size())
-                    selected_class = names[settings.classes[0]];
-                if (begin_combo("Object type", selected_class.c_str())) {
-                    if (ImGui::Selectable("All object types", settings.classes.empty())) {
-                        settings.classes.clear();
-                        settings.selected_class_names.clear();
-                        class_text.clear();
-                        changed = true;
-                    }
-                    for (size_t i = 0; i < names.size(); ++i) {
-                        ImGui::PushID(int(i));
-                        if (ImGui::Selectable(names[i].c_str(),
-                                              settings.classes == std::vector<int>{int(i)})) {
-                            settings.classes = {int(i)};
-                            settings.selected_class_names = {names[i]};
-                            class_text = std::to_string(i);
-                            changed = true;
-                        }
-                        ImGui::PopID();
-                    }
-                    ImGui::EndCombo();
-                }
-                if (names.empty())
-                    hint("Object names appear automatically after the model loads. "
-                         "Advanced settings also accept numeric object IDs.");
-                changed |= slider_float("Search radius", &settings.fov_radius, 0, 1024, "%.0f pixels");
-                hint("Only aim points inside the circle in the preview are eligible.");
-                int selection = settings.highest_confidence ? 1 : 0;
-                if (combo("Choose an object", &selection, "Nearest to the center\0Most certain match\0")) {
-                    settings.highest_confidence = selection == 1;
-                    changed = true;
-                }
-                changed |= ImGui::Checkbox("Keep the same object when possible", &settings.persistence);
-                hint("Reduces switching between objects. Movement stops if the selected object disappears.");
-                if (columns)
-                    ImGui::TableNextColumn();
-                section("Aim position", "Choose a point within the detected box.");
-                if (ImGui::Button("Center of box")) {
-                    settings.aim_x = settings.aim_y = .5f;
-                    changed = true;
-                }
-                ImGui::SameLine();
-                if (ImGui::Button("Upper center")) {
-                    settings.aim_x = .5f;
-                    settings.aim_y = .25f;
-                    changed = true;
-                }
-                changed |= percent_slider("Left to right", settings.aim_x);
-                changed |= percent_slider("Top to bottom", settings.aim_y);
-                if (ImGui::CollapsingHeader("Advanced detection settings")) {
-                    changed |= slider_float("Duplicate box overlap", &settings.nms_iou, 0, 1);
-                    hint("Overlapping detections of the same type are combined. Usually leave this at 0.45.");
-                    changed |= slider_float("Same-object overlap", &settings.persistence_iou, .01f, 1);
-                    changed |= number_input("Center X (-1 = automatic)", &settings.reference_x);
-                    changed |= number_input("Center Y (-1 = automatic)", &settings.reference_y);
-                    changed |= number_input("Extra horizontal offset", &settings.offset_x);
-                    changed |= number_input("Extra vertical offset", &settings.offset_y);
-                    hint("Centers and offsets use pixels in the received picture. Positive offsets go right "
-                         "and down.");
-                    if (input_string("Object IDs", class_text)) {
-                        try {
-                            std::vector<int> ids;
-                            std::stringstream text(class_text);
-                            std::string part;
-                            while (std::getline(text, part, ',')) {
-                                size_t used = 0;
-                                int id = std::stoi(part, &used);
-                                if (part.find_first_not_of(" \t", used) != std::string::npos || id < 0 ||
-                                    id > 9999)
-                                    throw std::runtime_error("Invalid object ID");
-                                ids.push_back(id);
-                            }
-                            settings.classes = std::move(ids);
-                            settings.selected_class_names.clear();
-                            changed = true;
-                        } catch (...) {
-                            error = "Use object numbers separated by commas, or leave the field empty for "
-                                    "all types.";
-                        }
-                    }
-                }
-                if (columns)
-                    ImGui::EndTable();
-            }
-            if (page == 2) {
-                const bool columns = setting_columns("Mouse groups");
-                section("Aim assist", "Activation and automatic firing are independent of movement shaping.");
-                changed |= ImGui::Checkbox("Constant AI tracking", &settings.constant_tracking);
-                hint("Track continuously after enabling mouse control. Changing this option disarms "
-                     "movement.");
-                ImGui::BeginDisabled(settings.mouse_backend != 1);
-                changed |= ImGui::Checkbox("Pause when the cursor is visible", &settings.cursor_check);
-                ImGui::EndDisabled();
-                hint("Cursor check uses the local Windows cursor. It is available with the local mouse "
-                     "connection.");
-                section("Auto trigger",
-                        "Click after a selected box stays under the crosshair. Requires Pi UPT3.");
-                ImGui::BeginDisabled(settings.mouse_backend != 0);
-                changed |= ImGui::Checkbox("Enable auto trigger", &settings.trigger.enabled);
-                changed |= ImGui::Checkbox("Spray while target stays centered", &settings.trigger.spray);
-                changed |= slider_int("Trigger delay", &settings.trigger.delay_ms, 0, 1000, "%d ms");
-                if (settings.trigger.spray)
-                    changed |=
-                        slider_int("Repeat interval", &settings.trigger.interval_ms, 10, 1000, "%d ms");
-                if (ImGui::CollapsingHeader("Trigger button and press time")) {
-                    int trigger_button = settings.trigger.button - 1;
-                    if (combo("Click button", &trigger_button, mouse_buttons, 8)) {
-                        settings.trigger.button = trigger_button + 1;
-                        changed = true;
-                    }
-                    changed |= slider_int("Press duration", &settings.trigger.press_ms, 1, 1000, "%d ms");
-                }
-                ImGui::EndDisabled();
-                hint("Single mode fires once per target acquisition. Spray repeats with one pending click at "
-                     "a time.");
-                if (settings.trigger.enabled)
-                    ImGui::TextWrapped("Trigger: %s", stats.trigger_status.empty()
-                                                          ? "Waiting for activation"
-                                                          : stats.trigger_status.c_str());
-                if (columns)
-                    ImGui::TableNextColumn();
-                section("Mouse connection", "Choose where movement commands are sent.");
-                ImGui::BeginDisabled(stats.running || busy());
-                if (combo("Mouse connection", &settings.mouse_backend,
-                          "Raspberry Pi / simulator\0Local Windows mouse\0")) {
-                    settings.activation_button = 2;
-                    settings.secondary_button = 0;
-                    settings.tracking.fov_button = 1;
-                    changed = true;
-                }
-                ImGui::EndDisabled();
-                hint("Stop the session to change connections. Local mouse output moves your real cursor.");
-                section("Activation",
-                        "Turn on mouse control at the top, then hold this button on the mouse connected "
-                        "through your selected connection.");
-                int button = settings.activation_button - 1;
-                if (combo("Hold to activate", &button, mouse_buttons, settings.mouse_backend == 1 ? 5 : 8)) {
-                    settings.activation_button = button + 1;
-                    changed = true;
-                }
-                const char* secondary[] = {
-                    "None",          "Left mouse button", "Right mouse button", "Middle mouse button",
-                    "Side button 1", "Side button 2",     "Button 6",           "Button 7",
-                    "Button 8"};
-                changed |= combo("Alternate activation", &settings.secondary_button, secondary,
-                                 settings.mouse_backend == 1 ? 6 : 9);
-                if (simulate && settings.mouse_backend == 0)
-                    hint("The practice device pretends the right button is held. Your real mouse buttons do "
-                         "not control the simulator.");
-                hint(
-                    "Sensitivity, smoothing, movement styles, and direction-based help are in Humanization.");
-                if (ImGui::CollapsingHeader("Advanced movement limits")) {
-                    changed |= slider_int("Largest movement per update", &settings.max_step, 1, 127);
-                    hint("Measured in mouse movement units, not screen pixels. The device's own limit also "
-                         "applies.");
-                    changed |= slider_int("Oldest allowed picture", &settings.max_age_ms, 1, 250, "%d ms");
-                    hint("Pictures older than this cannot move the mouse. The default is 50 milliseconds.");
-                }
-                section("Stopping is always available",
-                        "In held mode, release the chosen button. Press Delete or use Turn movement off for "
-                        "either activation mode. Lost "
-                        "connections and old pictures also stop new movement.");
-                if (columns)
-                    ImGui::EndTable();
-            }
-            if (page == 4) {
-                auto& d = settings.direction;
-                auto& h = settings.humanization;
-                const bool columns = setting_columns("Humanization groups");
-                section("Direction assistance", "Adjust how assistance responds to your hand movement.");
-                changed |= ImGui::Checkbox("Adjust help to my mouse direction", &d.enabled);
-                if (ImGui::CollapsingHeader("Direction-based strength", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    ImGui::TextUnformatted("Assistance behavior");
-                    ImGui::SetNextItemWidth(-1);
-                    changed |= combo("##direction mode", &d.mode,
-                                     "More help when moving away from the target\0More help when "
-                                     "moving toward the target\0Different help for left and right\0");
-                    changed |= percent_slider("Strength of this effect", d.strength);
-                    hint("0% keeps both directions equal. 100% allows the full difference. Angles in between "
-                         "change gradually.");
-                    if (d.mode != 2) {
-                        float toward = 1 + (d.mode == 0 ? -d.strength : d.strength);
-                        ImGui::Text("Toward: %.0f%% help   |   Away: %.0f%% help", toward * 100,
-                                    (2 - toward) * 100);
-                    } else {
-                        float left = d.left_strength * 100, right = d.right_strength * 100;
-                        if (slider_float("Leftward help", &left, 0, 200, "%.0f%%")) {
-                            d.left_strength = left / 100;
-                            changed = true;
-                        }
-                        if (slider_float("Rightward help", &right, 0, 200, "%.0f%%")) {
-                            d.right_strength = right / 100;
-                            changed = true;
-                        }
-                        hint("Applies when your hand moves toward a target on that side. Moving away keeps "
-                             "the normal strength. The effect slider blends these values with normal "
-                             "strength.");
-                    }
-                    float slow = d.slow_strength * 100;
-                    if (slider_float("Help when barely moving", &slow, 0, 200, "%.0f%%")) {
-                        d.slow_strength = slow / 100;
-                        changed = true;
-                    }
-                    changed |= slider_float("Slow movement threshold", &d.slow_speed, 1, 500, "%.0f units/s");
-                    hint("Below this speed, assistance gradually uses the barely-moving value. Lower the "
-                         "threshold if small, slow movements should count as intentional direction.");
-                    if (d.enabled) {
-                        if (!stats.motion_available)
-                            hint("Waiting for physical movement data. The Pi needs the updated "
-                                 "public proxy with cumulative UPT3 telemetry (or legacy 88-byte UPT2). "
-                                 "Assistance pauses until this data is ready.");
-                        else
-                            ImGui::Text("Physical mouse speed: %.0f units/s", stats.mouse_speed);
-                        if (stats.active)
-                            ImGui::Text("Last calculated help: %.0f%%", stats.assist_strength * 100);
-                    }
-                    if (simulate && settings.mouse_backend == 0)
-                        hint("Practice uses steady simulated input. Enable practice movement above to "
-                             "see its effect.");
-                    if (ImGui::TreeNode("Advanced direction filtering")) {
-                        changed |= slider_float("Direction averaging", &d.window_ms, 5, 100, "%.0f ms");
-                        hint("Higher values reduce direction flicker but react more slowly to a change in "
-                             "your hand movement.");
-                        ImGui::TreePop();
-                    }
-                }
-                if (columns)
-                    ImGui::TableNextColumn();
-                section("Movement configuration", "Fine-tune sensitivity, smoothing, and prediction.");
-                if (ImGui::CollapsingHeader("Sensitivity and smoothing", ImGuiTreeNodeFlags_DefaultOpen)) {
-                    changed |= slider_float("Horizontal sensitivity", &settings.gain_x, 0, 2, "%.2f");
-                    changed |= slider_float("Vertical sensitivity", &settings.gain_y, 0, 2, "%.2f");
-                    changed |= slider_float("Movement smoothing", &settings.smoothing_ms, 0, 100, "%.0f ms");
-                    hint(
-                        "Higher sensitivity moves farther. Smoothing makes changes gradual; 0 turns it off.");
-                    changed |= ImGui::Checkbox("Use EMA smoothing", &h.ema_enabled);
-                    if (h.ema_enabled)
-                        changed |= slider_float("EMA response", &h.ema_alpha, .01f, 1.f, "%.2f");
-                    hint("EMA replaces time-based smoothing. Lower response feels softer; higher response "
-                         "follows changes faster.");
-                    changed |=
-                        slider_float("Ignore tiny adjustments", &settings.deadzone, 0, 20, "%.1f pixels");
-                    changed |= ImGui::Checkbox("Keep the same target when possible", &settings.persistence);
-                    hint("Reduces target switching. No movement is sent toward a target that has "
-                         "disappeared.");
-                }
-                if (ImGui::CollapsingHeader("Prediction and target tracking")) {
-                    auto& t = settings.tracking;
-                    changed |= ImGui::Checkbox("Lead moving targets", &t.prediction);
-                    ImGui::SetNextItemWidth(-1);
-                    changed |= combo("##prediction method", &t.prediction_method,
-                                     "Kalman - filter noisy motion\0Smoothed velocity - gradual "
-                                     "response\0Velocity history - average recent motion\0");
-                    changed |= slider_float("Prediction lead time", &t.lead_ms, 0, 300, "%.0f ms");
-                    changed |= slider_float("Lead multiplier", &t.lead_multiplier, 0, 5, "%.2fx");
-                    changed |= slider_float("Maximum lead distance", &t.max_lead, 0, 500, "%.0f pixels");
-                    if (t.prediction_method == 1)
-                        changed |=
-                            slider_float("Velocity averaging", &t.velocity_smoothing_ms, 1, 200, "%.0f ms");
-                    hint("Prediction uses recent target motion. Higher lead can overshoot. "
-                         "Missing targets never receive predicted movement.");
-                    changed |= ImGui::Checkbox("Prefer the current target", &settings.persistence);
-                    changed |=
-                        slider_float("Sticky target distance", &t.sticky_distance, 0, 500, "%.0f pixels");
-                    hint("Allows the same object to move this far between pictures without switching "
-                         "identity. 0 uses box overlap only; large values may mix nearby objects of the same "
-                         "type.");
-                }
-                if (ImGui::CollapsingHeader("Dynamic search area")) {
-                    auto& t = settings.tracking;
-                    changed |= ImGui::Checkbox("Change search area while holding a button", &t.dynamic_fov);
-                    int button = t.fov_button - 1;
-                    if (combo("Search-area button", &button, mouse_buttons,
-                              settings.mouse_backend == 1 ? 5 : 8)) {
-                        t.fov_button = button + 1;
-                        changed = true;
-                    }
-                    changed |=
-                        slider_float("Search radius while held", &t.held_radius, 1, 1024, "%.0f pixels");
-                    hint("Releasing the button restores the normal search circle. "
-                         "This does not activate movement on its own.");
-                }
-
-                if (ImGui::CollapsingHeader("Movement style and variation")) {
-                    changed |= ImGui::Checkbox("Enable movement shaping", &h.enabled);
-                    ImGui::SetNextItemWidth(-1);
-                    changed |= combo(
-                        "##movement style", &h.path,
-                        "Direct - straight corrections\0Curved - gentle Bezier bend\0Ease in - build up "
-                        "gradually\0Adaptive - gentler near the target\0Smooth noise - flowing variation\0");
-                    if (h.path == 1)
-                        changed |= percent_slider("Curve amount", h.curve);
-                    if (h.path == 1 || h.path == 2) {
-                        changed |= slider_float("Build-up time", &h.duration_ms, 10, 1000, "%.0f ms");
-                        hint("Restarts when the target changes or assistance is interrupted. No future "
-                             "movements are queued.");
-                    }
-                    if (h.path == 2)
-                        changed |= slider_float("Ease-in intensity", &h.exponent, 1, 5);
-                    if (h.path == 3)
-                        changed |= slider_float("Gentle approach distance", &h.adaptive_distance, 1, 500,
-                                                "%.0f pixels");
-                    if (h.path == 4) {
-                        changed |= slider_float("Smooth variation amount", &h.noise, 0, 20, "%.1f units");
-                        changed |=
-                            slider_float("Variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
-                    }
-                    changed |= slider_float("Small random variations", &h.jitter, 0, 20, "%.1f units");
-                    changed |=
-                        slider_float("Random change interval", &h.jitter_interval_ms, 8, 250, "%.0f ms");
-                    hint("Start at 0; extra variation can reduce accuracy. Variation fades near the aim "
-                         "point and stops inside the dead zone.");
-                }
-                if (ImGui::Button("Reset humanization")) {
-                    settings.tracking = {};
-                    h = {};
-                    d = {};
-                    settings.gain_x = settings.gain_y = .2f;
-                    settings.smoothing_ms = 0;
-                    settings.deadzone = 1;
-                    changed = true;
-                }
-                hint("All these settings are included when you save your setup.");
-                if (columns)
-                    ImGui::EndTable();
-            }
-            if (page == 5) {
-                section("Check your setup", "Run the checks below without a Pi. Starting tests stops your "
-                                            "current session. Automatic checks never move your real cursor.");
-                auto launch = [&](std::vector<bool> chosen) {
-                    app.arm(false);
-                    auto opts = test_options;
-                    operation = std::async(std::launch::async, [&, chosen, opts] {
-                        app.stop();
-                        test_hub.start(chosen, opts);
-                    });
-                };
-                ImGui::BeginDisabled(busy() || test_hub.running());
-                if (ImGui::Button("Run selected checks", ImVec2(180, 36)))
-                    launch(test_selection);
-                ImGui::SameLine();
-                if (ImGui::Button("Run all checks", ImVec2(160, 36)))
-                    launch(std::vector<bool>(test_selection.size(), true));
-                ImGui::EndDisabled();
-                if (test_hub.running()) {
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel tests", ImVec2(140, 36)))
-                        test_hub.cancel();
-                    hint("Tests are running in separate processes. You can read results while they finish.");
-                }
-                auto entries = test_hub.entries();
-                if (ImGui::BeginTable("Automatic checks", 4,
-                                      ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                          ImGuiTableFlags_ScrollY,
-                                      ImVec2(0, 280))) {
-                    ImGui::TableSetupColumn("Use", ImGuiTableColumnFlags_WidthFixed, 40);
-                    ImGui::TableSetupColumn("Check", ImGuiTableColumnFlags_WidthStretch);
-                    ImGui::TableSetupColumn("Result", ImGuiTableColumnFlags_WidthFixed, 110);
-                    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 70);
-                    ImGui::TableSetupScrollFreeze(0, 1);
-                    ImGui::TableHeadersRow();
-                    for (size_t i = 0; i < entries.size(); ++i) {
-                        auto& entry = entries[i];
-                        ImGui::PushID(int(i));
-                        ImGui::TableNextRow();
-                        ImGui::TableNextColumn();
-                        bool checked = test_selection[i];
-                        if (ImGui::Checkbox("##use", &checked))
-                            test_selection[i] = checked;
-                        ImGui::TableNextColumn();
-                        if (ImGui::Selectable(entry.name.c_str(), selected_test == int(i)))
-                            selected_test = int(i);
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("%s", entry.description.c_str());
-                        ImGui::TableNextColumn();
-                        auto color = entry.status == "Passed"   ? ImVec4(.3f, .85f, .65f, 1)
-                                     : entry.status == "Failed" ? ImVec4(1, .5f, .45f, 1)
-                                                                : ImVec4(.8f, .8f, .8f, 1);
-                        ImGui::TextColored(color, "%s", entry.status.c_str());
-                        ImGui::TableNextColumn();
-                        ImGui::BeginDisabled(busy() || test_hub.running());
-                        if (ImGui::SmallButton("Run")) {
-                            auto chosen = std::vector<bool>(entries.size(), false);
-                            chosen[i] = true;
-                            selected_test = int(i);
-                            launch(chosen);
-                        }
-                        ImGui::EndDisabled();
-                        ImGui::PopID();
-                    }
-                    ImGui::EndTable();
-                }
-                if (selected_test >= 0 && size_t(selected_test) < entries.size()) {
-                    const auto& entry = entries[selected_test];
-                    ImGui::Text("%s  |  %s  |  %.2f s", entry.name.c_str(), entry.status.c_str(),
-                                entry.seconds);
-                    hint(entry.description.c_str());
-                    ImGui::BeginChild("Test result details", ImVec2(0, 110), ImGuiChildFlags_Borders);
-                    ImGui::TextWrapped("%s", entry.details.empty()
-                                                 ? "Select Run to see the result and its explanation here."
-                                                 : entry.details.c_str());
-                    ImGui::EndChild();
-                }
-                if (ImGui::CollapsingHeader("Test settings and optional GPU checks")) {
-                    ImGui::BeginDisabled(test_hub.running() || busy());
-                    input_string("Python executable", test_options.python);
-                    if (ImGui::Button("Choose Python..."))
-                        if (auto file = choose_file(window, false, 2))
-                            test_options.python = *file;
-                    hint("The first four checks need no Python. The demo launcher fills this path "
-                         "automatically. Optional checks require their model files and Python dependencies.");
-                    input_string("YOLO11n model file", test_options.model);
-                    input_string("Reference image file", test_options.image);
-                    input_string("CUDA NVRTC DLL", test_options.nvrtc);
-                    input_string("GPU settings file", test_options.profile);
-                    input_string("Raw RGB test image", test_options.raw);
-                    number_input("Raw image width", &test_options.width);
-                    number_input("Raw image height", &test_options.height);
-                    ImGui::EndDisabled();
-                }
-                auto report = test_hub.report_path();
-                if (!report.empty()) {
-                    hint("Detailed logs and a JSON report are saved here:");
-                    ImGui::TextWrapped("%s", report.c_str());
-                }
-            }
-
-            if (page == 3) {
-                section("Keep a setup you like",
-                        "Save your connections, detection settings, and mouse preferences together. Mouse "
-                        "control is never turned on by loading a file.");
-                ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
-                if (ImGui::Button("Import Aimmy config...", ImVec2(190, 36))) {
-                    if (auto path = choose_file(window, false, 3)) {
-                        try {
-                            auto imported = receiver::import_aimmy(*path, settings);
-                            app.arm(false);
-                            settings = imported.settings;
-                            import_notes = std::move(imported.notes);
-                            profile.clear();
-                            changed = true;
-                            notice = "Aimmy settings imported. Review the import details in Profiles.";
-                            error.clear();
-                        } catch (const std::exception& e) {
-                            error = e.what();
-                        }
-                    }
-                }
-                ImGui::EndDisabled();
-                if (!import_notes.empty() &&
-                    ImGui::CollapsingHeader("Import details", ImGuiTreeNodeFlags_DefaultOpen))
-                    for (const auto& note : import_notes)
-                        hint(note.c_str());
-                if (ImGui::Button("Save settings as...", ImVec2(190, 36))) {
-                    if (auto path = choose_file(window, true)) {
-                        try {
-                            receiver::save_settings(settings, *path);
-                            profile = *path;
-                            preferences.add_directory(std::filesystem::absolute(*path).parent_path(), false);
-                            library_updated = 0;
-                            mark_preferences();
-                            notice = "Settings saved.";
-                            error.clear();
-                        } catch (const std::exception& e) {
-                            error = e.what();
-                        }
-                    }
-                }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16, 14));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8, 4));
+        ImGui::BeginChild("Settings navigation", ImVec2(190, body_height), ImGuiChildFlags_Borders);
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputTextWithHint("##find-settings", "Find a setting...", settings_search.data(),
+                                 settings_search.size());
+        visible_pages.clear();
+        for (const auto& item : settings_pages)
+            if (matches_settings(std::string(item.label) + " " + item.description + " " + item.keywords,
+                                 settings_search.data()))
+                visible_pages.push_back(&item);
+        if (settings_search[0] && !visible_pages.empty() &&
+            std::none_of(visible_pages.begin(), visible_pages.end(),
+                         [&](const auto* item) { return item->page == page; }))
+            page = visible_pages.front()->page;
+        const char* last_group = nullptr;
+        ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0, .5f));
+        for (const auto* item : visible_pages) {
+            if (!last_group || std::string(last_group) != item->group) {
                 ImGui::Spacing();
-                hint(
-                    "Your latest settings restore automatically next time. Mouse control always starts off.");
-                ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
-                if (ImGui::Button("Open saved settings...", ImVec2(190, 36)))
-                    if (auto path = choose_file(window, false))
-                        open_profile(*path);
-                input_string("Search saved settings", profile_filter);
-                for (const auto& item : library)
-                    if (!item.model && matches(item.name, profile_filter)) {
-                        ImGui::PushID(item.path.string().c_str());
-                        if (ImGui::Selectable(item.name.c_str(), item.path.string() == profile))
-                            open_profile(item.path.string());
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("%s", item.path.string().c_str());
-                        ImGui::PopID();
-                    }
-                ImGui::EndDisabled();
-                hint("A profile with different connection addresses requires stopping the session first.");
-                if (!profile.empty()) {
-                    ImGui::Spacing();
-                    hint("Current settings file");
-                    ImGui::TextWrapped("%s", profile.c_str());
-                }
+                ImGui::PushFont(detail_font);
+                ImGui::TextDisabled("%s", item->group);
+                ImGui::PopFont();
+                last_group = item->group;
             }
+            const bool selected = item->page == page;
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                  selected ? ImVec4(.08f, .16f, .25f, 1) : ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Text, selected ? style.Colors[ImGuiCol_Text] : muted);
+            if (ImGui::Button(item->label, ImVec2(-1, 25)))
+                page = item->page;
+            if (selected) {
+                const auto a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddLine(a, ImVec2(a.x, b.y),
+                                                    ImGui::ColorConvertFloat4ToU32(accent), 2);
+            }
+            ImGui::PopStyleColor(2);
         }
-        if (page == 7) {
-            const bool columns = setting_columns("Appearance groups");
-            auto& v = settings.visual;
-            section("Preview overlays", "Customize the received-image preview.");
-            changed |= ImGui::Checkbox("Show detection boxes", &v.boxes);
-            changed |= ImGui::Checkbox("Show field of view", &v.fov);
-            changed |= ImGui::Checkbox("Show confidence labels", &v.confidence);
-            changed |= ImGui::Checkbox("Show tracers", &v.tracers);
-            if (v.tracers)
-                changed |= combo("Tracer origin", &v.tracer_origin, "Bottom\0Center\0Top\0");
-            changed |= slider_float("Overlay opacity", &v.opacity, .1f, 1, "%.2f");
-            changed |= slider_float("Border thickness", &v.thickness, 1, 6, "%.1f px");
-            changed |= slider_float("Box corner radius", &v.corner_radius, 0, 30, "%.0f px");
-            changed |= slider_float("Confidence font size", &v.font_size, 10, 32, "%.0f px");
-            changed |= ImGui::ColorEdit3("Detection color", v.box_color.data(), ImGuiColorEditFlags_NoInputs);
-            changed |= ImGui::ColorEdit3("FOV color", v.fov_color.data(), ImGuiColorEditFlags_NoInputs);
+        ImGui::PopStyleVar();
+        if (visible_pages.empty()) {
+            hint("No matching category.");
+            if (ImGui::Button("Clear search"))
+                settings_search.fill(0);
+        }
+        const float navigation_overflow = ImGui::GetScrollMaxY();
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::SameLine();
+        const Page rendered_page = page;
+        const std::string controls_id = "Settings content##" + std::to_string(static_cast<int>(page));
+        ImGui::BeginChild(controls_id.c_str(), ImVec2(0, body_height), ImGuiChildFlags_Borders);
+        ImGui::PushItemWidth(-1);
+        for (const auto& item : settings_pages)
+            if (item.page == page) {
+                ImGui::PushFont(title_font);
+                ImGui::TextUnformatted(item.label);
+                ImGui::PopFont();
+                hint(item.description);
+                ImGui::Spacing();
+                ImGui::Separator();
+                break;
+            }
+        if (rendered_page == Page::connections) {
+
+            const bool columns = setting_columns("Connections groups");
+            section("Session mode", "Practice with simulated devices, or connect a live video feed.");
+            ImGui::BeginDisabled(stats.running || busy());
+            if (ImGui::RadioButton("Practice with simulated devices", simulate)) {
+                simulate = true;
+                settings.sender_ip = settings.pi_ip = "127.0.0.1";
+                mark_preferences();
+            }
+            if (ImGui::RadioButton("Use connected devices", !simulate)) {
+                simulate = false;
+                mark_preferences();
+            }
+            section("Mouse output", "Choose which device receives the corrections.");
+            if (combo("Output device", &settings.mouse_backend,
+                      "Raspberry Pi / simulated Pi\0This computer's Windows mouse\0")) {
+                settings.activation_button = 2;
+                settings.secondary_button = 0;
+                settings.tracking.fov_button = 1;
+                changed = true;
+            }
+            hint("Windows output moves this computer's real cursor when assistance is armed.");
             if (columns)
                 ImGui::TableNextColumn();
-            section("Application", "Window behavior and shortcuts on this computer.");
-            changed |= ImGui::Checkbox("Always on top", &settings.ui.always_on_top);
-            changed |= ImGui::Checkbox("Exclude this window from capture", &settings.ui.stream_guard);
-            changed |=
-                ImGui::ColorEdit3("Accent color", settings.ui.accent.data(), ImGuiColorEditFlags_NoInputs);
-            changed |= ImGui::Checkbox("Enable model switch shortcut", &settings.ui.model_switch);
-            char key_name[64]{};
-            const UINT scan = MapVirtualKeyA(settings.ui.model_switch_key, MAPVK_VK_TO_VSC);
-            if (!GetKeyNameTextA(LONG(scan << 16), key_name, sizeof(key_name)))
-                std::snprintf(key_name, sizeof(key_name), "Key %d", settings.ui.model_switch_key);
-            ImGui::Text("Model switch: %s", key_name);
-            if (ImGui::Button(capture_model_key ? "Press a key (Esc cancels)" : "Change shortcut"))
-                capture_model_key = !capture_model_key;
-            hint("Q / E changes tabs. The model shortcut cycles your library while this window is focused. "
-                 "Delete always disarms.");
-            section("Frame collection", "Save received frames locally for your dataset.");
-            changed |= ImGui::Checkbox("Collect received frames", &settings.collection.enabled);
-            changed |= ImGui::Checkbox("Auto label with current detections", &settings.collection.auto_label);
-            changed |=
-                slider_int("Collection interval", &settings.collection.interval_ms, 100, 10000, "%d ms");
-            changed |= input_string("Dataset directory", settings.collection.directory);
-            hint("Writes lossless PPM images and optional YOLO labels. Review generated labels before "
-                 "training. Disk writes can reduce inference speed.");
-            ImGui::Text("Frames saved: %llu", static_cast<unsigned long long>(stats.collected_frames));
-            if (!stats.collection_error.empty())
-                ImGui::TextWrapped("Collection: %s", stats.collection_error.c_str());
+            section("Video and network", "Enter addresses on the same local network as Receiver.");
+            if (simulate) {
+                settings.sender_ip = settings.pi_ip = "127.0.0.1";
+                hint("Run Start Demo.cmd to launch the example video sender and simulated Pi. No model or "
+                     "hardware is required.");
+            } else {
+                changed |= input_string("Video sender IP address", settings.sender_ip);
+                ImGui::BeginDisabled(settings.mouse_backend != 0);
+                changed |= input_string("Raspberry Pi IP address", settings.pi_ip);
+                ImGui::EndDisabled();
+                hint("For example: 192.168.1.20. The video sender runs on the capture computer.");
+            }
+            if (ImGui::CollapsingHeader("Advanced network options")) {
+                changed |= input_string("Listen on IP address", settings.bind_ip);
+                changed |= number_input("Video UDP port", &settings.frame_port);
+                ImGui::BeginDisabled(settings.mouse_backend != 0);
+                changed |= number_input("Pi command UDP port", &settings.pi_port);
+                ImGui::EndDisabled();
+                hint("0.0.0.0 listens on every local interface. Ports must match the sender and Pi.");
+            }
+            ImGui::EndDisabled();
+            if (stats.running || busy())
+                hint("End the session before changing connections.");
+            section("Next step", "Choose a model for live detection, then start the session. Preview works "
+                                 "while assistance is disarmed.");
+            if (ImGui::Button("Choose model"))
+                go_to(Page::models);
+            ImGui::SameLine();
+            if (ImGui::Button("Open preview"))
+                go_to(Page::preview);
             if (columns)
                 ImGui::EndTable();
         }
-        ImGui::PopItemWidth();
-        ImGui::EndChild();
-        if (!show_hub) {
-            ImGui::SameLine();
-            ImGui::BeginChild("Monitor", ImVec2(0, body_height), ImGuiChildFlags_Borders);
-            ImGui::PushFont(label_font);
-            ImGui::TextColored(accent, "LIVE PREVIEW");
-            ImGui::PopFont();
-            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 74);
-            changed |= ImGui::Checkbox("Show", &settings.preview);
-            hint(simulate ? "Practice feed with a fixed example target."
-                          : "Detections, search area, and selected aim point.");
-            ImGui::Separator();
-            if (settings.preview && !receiving)
-                hint(stats.running ? "No recent picture. Any image below is the last received frame."
-                                   : "Preview paused. Start a session to receive pictures.");
 
+        if (rendered_page == Page::models) {
+
+            const bool columns = setting_columns("Model groups");
+            section("Choose a model", "Switch models without reconnecting. Your previous model stays "
+                                      "available if loading fails.");
+            ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking ||
+                                 (stats.running && simulate));
+            input_string("Model file", model_draft);
+            if (ImGui::Button("Load selected model"))
+                open_model(model_draft);
+            ImGui::SameLine();
+            if (ImGui::Button("Browse..."))
+                if (auto path = choose_file(window, false, true))
+                    open_model(*path);
+            hint("Models and profiles in your chosen folders refresh automatically. Settings are "
+                 "remembered separately for each model.");
+            input_string("Search models", model_filter);
+            ImGui::BeginChild("Model library", ImVec2(0, 115), ImGuiChildFlags_Borders);
+            bool found_model = false;
+            for (const auto& item : library)
+                if (item.model && matches(item.name, model_filter)) {
+                    found_model = true;
+                    ImGui::PushID(item.path.string().c_str());
+                    if (ImGui::Selectable(item.name.c_str(), item.path.string() == settings.model))
+                        open_model(item.path.string());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", item.path.string().c_str());
+                    ImGui::PopID();
+                }
+            if (!found_model)
+                hint("No matching models. Use Browse to add a model file.");
+            ImGui::EndChild();
+            section("Inference settings",
+                    "Fixed-size models always use their required size. Dynamic models can "
+                    "use a saved size or a performance recommendation.");
+            changed |= ImGui::Checkbox("Use model-recommended input size", &settings.auto_size);
+            if (!settings.auto_size)
+                changed |= number_input("Input resolution", &settings.input_size, 32, 160);
+            ImGui::Text("Current size: %d x %d", settings.input_size, settings.input_size);
+            if (!stats.running && settings.auto_size)
+                hint("The model's preferred size will be read when you start.");
+            changed |= number_input("Inference FPS limit (0 = unlimited)", &settings.inference_fps, 10);
+            if (ImGui::CollapsingHeader("Advanced model runtime")) {
+                const char* backends[]{"Auto", "TensorRT (.onnx / .engine)", "YOLO-Omni / PyTorch (.pt)"};
+                int backend = settings.inference_backend == "tensorrt"    ? 1
+                              : settings.inference_backend == "yolo_omni" ? 2
+                                                                          : 0;
+                if (combo("Detection backend", &backend, backends, 3)) {
+                    settings.inference_backend = backend == 1   ? "tensorrt"
+                                                 : backend == 2 ? "yolo_omni"
+                                                                : "auto";
+                    changed = true;
+                }
+                input_string("Python executable", settings.omni_python);
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                    changed = true;
+                input_string("YOLO-Omni source folder", settings.omni_source);
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                    changed = true;
+                int device = settings.omni_device == "cpu" ? 1 : 0;
+                if (combo("PyTorch device", &device, "NVIDIA GPU\0CPU (testing)\0")) {
+                    settings.omni_device = device == 1 ? "cpu" : "cuda:0";
+                    changed = true;
+                }
+                input_string("Model metadata file", settings.metadata);
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                    changed = true;
+                hint("Object names and supported image sizes are read from the model. An optional "
+                     "companion file can supply missing metadata.");
+            }
+            ImGui::EndDisabled();
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Performance benchmark",
+                    "Measures this model on a received picture at supported sizes. Mouse control stays "
+                    "off. This measures speed, not detection accuracy or network delay.");
+            combo("Optimization goal", &performance_goal, "Fastest\0Balanced\0Lower GPU load\0");
+            ImGui::BeginDisabled(!stats.running || simulate || stats.model_loading || stats.benchmarking ||
+                                 busy());
+            if (ImGui::Button("Measure model performance")) {
+                try {
+                    app.benchmark(receiver::PerformanceGoal(performance_goal));
+                    error.clear();
+                } catch (const std::exception& e) {
+                    error = e.what();
+                }
+            }
+            ImGui::EndDisabled();
+            if (stats.benchmarking && ImGui::Button("Cancel measurement"))
+                app.cancel_benchmark();
+            if (!stats.benchmark.samples.empty() &&
+                ImGui::BeginTable("Model performance", 4, ImGuiTableFlags_Borders)) {
+                for (auto label : {"Size", "FPS", "Average ms", "95% ms"})
+                    ImGui::TableSetupColumn(label);
+                ImGui::TableHeadersRow();
+                for (const auto& sample : stats.benchmark.samples) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%d", sample.size);
+                    ImGui::TableNextColumn();
+                    if (!sample.error.empty()) {
+                        ImGui::TextUnformatted("Unavailable");
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("%s", sample.error.c_str());
+                    } else
+                        ImGui::Text("%.1f", sample.fps);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.2f", sample.mean_ms);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.2f", sample.p95_ms);
+                }
+                ImGui::EndTable();
+            }
+            if (stats.benchmark.recommended_size) {
+                ImGui::Text("Suggested: %d pixels, %d FPS", stats.benchmark.recommended_size,
+                            stats.benchmark.recommended_fps);
+                ImGui::BeginDisabled(stats.model_loading || stats.benchmarking || busy());
+                if (ImGui::Button("Apply recommendation")) {
+                    settings.input_size = stats.benchmark.recommended_size;
+                    settings.inference_fps = stats.benchmark.recommended_fps;
+                    settings.auto_size = false;
+                    changed = true;
+                }
+                ImGui::EndDisabled();
+            }
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::activation) {
+
+            const bool columns = setting_columns("Activation groups");
+            section("Activation mode",
+                    "Arming permits output. This mode determines when that output is active.");
+            int mode = settings.constant_tracking ? 1 : 0;
+            if (combo("Run assistance", &mode,
+                      "While an activation button is held\0Continuously while armed\0")) {
+                settings.constant_tracking = mode == 1;
+                changed = true;
+            }
+            hint("Changing activation mode disarms assistance. Arm it again using the control at the top.");
+            section("Activation buttons", "Use either button on the mouse selected in Connections.");
+            ImGui::BeginDisabled(settings.constant_tracking);
+            int button = settings.activation_button - 1;
+            if (combo("Primary button", &button, mouse_buttons, settings.mouse_backend == 1 ? 5 : 8)) {
+                settings.activation_button = button + 1;
+                changed = true;
+            }
+            const char* secondary[] = {
+                "None",          "Left mouse button", "Right mouse button", "Middle mouse button",
+                "Side button 1", "Side button 2",     "Button 6",           "Button 7",
+                "Button 8"};
+            changed |= combo("Alternate button", &settings.secondary_button, secondary,
+                             settings.mouse_backend == 1 ? 6 : 9);
+            ImGui::EndDisabled();
+            if (settings.constant_tracking)
+                hint("Activation buttons are unused in continuous mode.");
+            if (simulate && settings.mouse_backend == 0)
+                hint("The simulated Pi reports the right button as held. Your real buttons do not control "
+                     "it.");
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Pause conditions", "These checks still apply in continuous mode.");
+            ImGui::BeginDisabled(settings.mouse_backend != 1);
+            changed |= ImGui::Checkbox("Pause while the Windows cursor is visible", &settings.cursor_check);
+            ImGui::EndDisabled();
+            hint("Cursor visibility is available only with Windows mouse output. The other computer's cursor "
+                 "cannot be inspected.");
+            changed |= slider_int("Maximum frame age", &settings.max_age_ms, 1, 250, "%d ms");
+            hint("Older images cannot produce movement or automatic clicks. Fresh video and mouse telemetry "
+                 "are always required.");
+            section("Stop assistance", "Delete or Disarm at the top stops output in either activation mode. "
+                                       "In held mode, releasing the button also pauses assistance.");
+            if (ImGui::Button("Change mouse output"))
+                go_to(Page::connections);
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::targeting) {
+
+            const bool columns = setting_columns("Targeting groups");
+            auto& t = settings.tracking;
+            section("Detection filters", "Choose which model detections can become targets.");
+            changed |= percent_slider("Minimum confidence", settings.confidence);
+            hint("Higher values reject uncertain detections.");
+            std::string selected_class = settings.classes.empty() ? "All classes" : "Custom selection";
+            if (settings.classes.size() == 1 && size_t(settings.classes[0]) < names.size())
+                selected_class = names[settings.classes[0]];
+            if (begin_combo("Target class", selected_class.c_str())) {
+                if (ImGui::Selectable("All classes", settings.classes.empty())) {
+                    settings.classes.clear();
+                    settings.selected_class_names.clear();
+                    class_text.clear();
+                    changed = true;
+                }
+                for (size_t i = 0; i < names.size(); ++i) {
+                    ImGui::PushID(int(i));
+                    if (ImGui::Selectable(names[i].c_str(), settings.classes == std::vector<int>{int(i)})) {
+                        settings.classes = {int(i)};
+                        settings.selected_class_names = {names[i]};
+                        class_text = std::to_string(i);
+                        changed = true;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            if (names.empty())
+                hint("Object names appear automatically after the model loads. "
+                     "Advanced detection filters also accept class IDs.");
+
+            int selection = settings.highest_confidence ? 1 : 0;
+            if (combo("Target priority", &selection, "Closest to crosshair\0Highest confidence\0")) {
+                settings.highest_confidence = selection == 1;
+                changed = true;
+            }
+            changed |= ImGui::Checkbox("Keep the current target", &settings.persistence);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(
+                    "Reduce switching between nearby detections. Matching options appear when enabled.");
+            if (settings.persistence) {
+                changed |= slider_float("Maximum target displacement", &t.sticky_distance, 0, 500, "%.0f px");
+                hint("0 matches by box overlap only. Large distances can confuse nearby objects of the same "
+                     "class.");
+                if (ImGui::CollapsingHeader("Advanced target matching"))
+                    changed |=
+                        slider_float("Required box overlap", &settings.persistence_iou, .01f, 1, "%.2f IoU");
+            }
+            section("Search area", "Only target aim points inside this radius can be selected.");
+            changed |= slider_float("Search radius", &settings.fov_radius, 0, 1024, "%.0f px");
+            if (ImGui::CollapsingHeader("Change radius while holding a button")) {
+                changed |= ImGui::Checkbox("Use a second search radius", &t.dynamic_fov);
+                ImGui::BeginDisabled(!t.dynamic_fov);
+                int button = t.fov_button - 1;
+                if (combo("Radius-change button", &button, mouse_buttons,
+                          settings.mouse_backend == 1 ? 5 : 8)) {
+                    t.fov_button = button + 1;
+                    changed = true;
+                }
+                changed |= slider_float("Radius while held", &t.held_radius, 1, 1024, "%.0f px");
+                ImGui::EndDisabled();
+                hint("Releasing this button restores the normal radius. This button does not activate "
+                     "assistance.");
+            }
+            if (ImGui::CollapsingHeader("Advanced detection filters")) {
+                changed |= slider_float("Duplicate-box threshold", &settings.nms_iou, 0, 1, "%.2f IoU");
+                hint("Combines overlapping detections of the same class. The default is 0.45.");
+                if (input_string("Class IDs (comma-separated)", class_text)) {
+
+                    try {
+                        std::vector<int> ids;
+                        std::stringstream text(class_text);
+                        std::string part;
+                        while (std::getline(text, part, ',')) {
+                            size_t used = 0;
+                            int id = std::stoi(part, &used);
+                            if (part.find_first_not_of(" \t", used) != std::string::npos || id < 0 ||
+                                id > 9999)
+                                throw std::runtime_error("Invalid object ID");
+                            ids.push_back(id);
+                        }
+                        settings.classes = std::move(ids);
+                        settings.selected_class_names.clear();
+                        changed = true;
+                    } catch (...) {
+                        error = "Use object numbers separated by commas, or leave the field empty for "
+                                "all types.";
+                    }
+                }
+            }
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Aim point inside the box",
+                    "Percentages position the point within each selected detection.");
+            if (ImGui::Button("Box center")) {
+                settings.aim_x = settings.aim_y = .5f;
+                changed = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Upper center")) {
+                settings.aim_x = .5f;
+                settings.aim_y = .25f;
+                changed = true;
+            }
+            changed |= percent_slider("Horizontal position", settings.aim_x);
+            changed |= percent_slider("Vertical position", settings.aim_y);
+            if (ImGui::CollapsingHeader("Fine-tune with pixel offsets")) {
+                changed |= slider_float("Horizontal offset", &settings.offset_x, -1024, 1024, "%.0f px");
+                changed |= slider_float("Vertical offset", &settings.offset_y, -1024, 1024, "%.0f px");
+                hint("Offsets are added after the box position. Positive values move right or down.");
+            }
+            if (ImGui::CollapsingHeader("Custom crosshair location")) {
+                bool center = settings.reference_x < 0 && settings.reference_y < 0;
+                if (ImGui::Checkbox("Use the image center", &center)) {
+                    settings.reference_x = center ? -1 : stats.width > 0 ? stats.width * .5f : 160;
+                    settings.reference_y = center ? -1 : stats.height > 0 ? stats.height * .5f : 160;
+                    changed = true;
+                }
+                if (!center) {
+                    changed |= number_input("Crosshair X", &settings.reference_x);
+                    changed |= number_input("Crosshair Y", &settings.reference_y);
+                    hint("Coordinates use the received image. -1 follows the center on that axis.");
+                }
+            }
+            section("Movement prediction", "Aim ahead of a moving target using its recent positions.");
+            changed |= ImGui::Checkbox("Predict target movement", &t.prediction);
+            if (t.prediction) {
+                changed |= combo("Prediction method", &t.prediction_method,
+                                 "Kalman filter\0Smoothed velocity\0Recent velocity average\0");
+                changed |= slider_float("Look-ahead time", &t.lead_ms, 0, 300, "%.0f ms");
+                changed |= slider_float("Maximum lead distance", &t.max_lead, 0, 500, "%.0f px");
+                if (ImGui::CollapsingHeader("Advanced prediction tuning")) {
+                    changed |= slider_float("Lead multiplier", &t.lead_multiplier, 0, 5, "%.2fx");
+                    if (t.prediction_method == 1)
+                        changed |=
+                            slider_float("Velocity smoothing", &t.velocity_smoothing_ms, 1, 200, "%.0f ms");
+                }
+            }
+            hint("Prediction only applies to visible detections. Too much lead can overshoot.");
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::movement) {
+
+            auto& h = settings.humanization;
+            auto& d = settings.direction;
+            const bool columns = setting_columns("Movement groups");
+            section("Sensitivity", "How strongly the mouse corrects the distance to the aim point.");
+            changed |= slider_float("Horizontal sensitivity", &settings.gain_x, 0, 2, "%.2f");
+            changed |= slider_float("Vertical sensitivity", &settings.gain_y, 0, 2, "%.2f");
+            section("Smoothing", "Reduce sudden changes between corrections.");
+            int smoothing = h.ema_enabled ? 2 : settings.smoothing_ms > 0 ? 1 : 0;
+            if (combo("Smoothing method", &smoothing,
+                      "None\0Time-based\0Exponential moving average (EMA)\0")) {
+                h.ema_enabled = smoothing == 2;
+                if (smoothing == 0)
+                    settings.smoothing_ms = 0;
+                if (smoothing == 1 && settings.smoothing_ms == 0)
+                    settings.smoothing_ms = 20;
+                changed = true;
+            }
+            if (smoothing == 1)
+                changed |= slider_float("Smoothing time", &settings.smoothing_ms, 1, 100, "%.0f ms");
+            if (smoothing == 2)
+                changed |= slider_float("EMA response", &h.ema_alpha, .01f, 1, "%.2f");
+            hint("Longer smoothing times or lower EMA response make movement smoother and slower to react.");
+            section("Correction limits", "Limit individual movements and ignore tiny remaining errors.");
+            changed |= slider_int("Maximum correction per update", &settings.max_step, 1, 127, "%d counts");
+            changed |= slider_float("Dead zone around aim point", &settings.deadzone, 0, 20, "%.1f px");
+            hint("Counts are mouse movement units. Pixels refer to the received image.");
+            if (ImGui::Button("Reset movement settings")) {
+                h = {};
+                d = {};
+                settings.gain_x = settings.gain_y = .2f;
+                settings.smoothing_ms = 0;
+                settings.deadzone = 1;
+                settings.max_step = 32;
+                changed = true;
+            }
+            hint("Resets this page only. Targeting and activation are kept.");
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Movement path", "Shape each correction as it approaches the target.");
+            changed |= ImGui::Checkbox("Customize movement path", &h.enabled);
+            ImGui::BeginDisabled(!h.enabled);
+            changed |= combo("Path style", &h.path,
+                             "Straight\0Curved (Bezier)\0Gradual acceleration\0Slower near the "
+                             "target\0Smooth random variation\0");
+            if (h.path == 1)
+                changed |= percent_slider("Curve strength", h.curve);
+            if (h.path == 1 || h.path == 2)
+                changed |= slider_float("Ramp-up duration", &h.duration_ms, 10, 1000, "%.0f ms");
+            if (h.path == 2)
+                changed |= slider_float("Acceleration exponent", &h.exponent, 1, 5);
+            if (h.path == 3)
+                changed |= slider_float("Slow-down distance", &h.adaptive_distance, 1, 500, "%.0f px");
+            if (h.path == 4) {
+                changed |= slider_float("Smooth variation strength", &h.noise, 0, 20, "%.1f counts");
+                changed |= slider_float("Smooth variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
+            }
+            if (ImGui::CollapsingHeader("Random jitter")) {
+                changed |= slider_float("Jitter amount", &h.jitter, 0, 20, "%.1f counts");
+                changed |= slider_float("Jitter interval", &h.jitter_interval_ms, 8, 250, "%.0f ms");
+                hint("0 removes jitter. Extra variation can reduce accuracy.");
+            }
+            ImGui::EndDisabled();
+            section("Directional assistance",
+                    "Change correction strength based on your physical mouse movement.");
+            changed |= ImGui::Checkbox("Adapt to my mouse direction", &d.enabled);
+            if (d.enabled) {
+                changed |= combo("Assistance behavior", &d.mode,
+                                 "Stronger when moving away\0Stronger when moving toward\0Different strength "
+                                 "for left and right\0");
+                changed |= percent_slider("Direction effect", d.strength);
+                if (d.mode == 2) {
+                    float left = d.left_strength * 100, right = d.right_strength * 100;
+                    if (slider_float("Left-side strength", &left, 0, 200, "%.0f%%")) {
+                        d.left_strength = left / 100;
+                        changed = true;
+                    }
+                    if (slider_float("Right-side strength", &right, 0, 200, "%.0f%%")) {
+                        d.right_strength = right / 100;
+                        changed = true;
+                    }
+                }
+                float slow = d.slow_strength * 100;
+                if (slider_float("Strength at rest", &slow, 0, 200, "%.0f%%")) {
+                    d.slow_strength = slow / 100;
+                    changed = true;
+                }
+                changed |= slider_float("Low-speed threshold", &d.slow_speed, 1, 500, "%.0f counts/s");
+                if (ImGui::CollapsingHeader("Advanced direction filtering"))
+                    changed |= slider_float("Direction smoothing", &d.window_ms, 5, 100, "%.0f ms");
+                if (!stats.motion_available)
+                    hint("Waiting for physical mouse readings. Pi output requires motion telemetry.");
+                else
+                    ImGui::Text("Physical mouse speed: %.0f counts/s", stats.mouse_speed);
+            }
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::auto_click) {
+
+            const bool columns = setting_columns("Auto click groups");
+            section("Automatic clicking", "Uses the selected target and crosshair from Targeting.");
+            ImGui::BeginDisabled(settings.mouse_backend != 0);
+            changed |= ImGui::Checkbox("Enable automatic clicks", &settings.trigger.enabled);
+            ImGui::BeginDisabled(!settings.trigger.enabled);
+            int repeat = settings.trigger.spray ? 1 : 0;
+            if (combo("Click behavior", &repeat, "Once per target\0Repeat while target stays centered\0")) {
+                settings.trigger.spray = repeat == 1;
+                changed = true;
+            }
+            int button = settings.trigger.button - 1;
+            if (combo("Mouse button to click", &button, mouse_buttons, 8)) {
+                settings.trigger.button = button + 1;
+                changed = true;
+            }
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Click timing", "All times are measured in milliseconds.");
+            changed |= slider_int("Wait before first click", &settings.trigger.delay_ms, 0, 1000, "%d ms");
+            if (settings.trigger.spray)
+                changed |=
+                    slider_int("Time between clicks", &settings.trigger.interval_ms, 10, 1000, "%d ms");
+            changed |= slider_int("Button hold duration", &settings.trigger.press_ms, 1, 1000, "%d ms");
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            section("Requirements and status",
+                    "Assistance must be armed and active. Changing click settings disarms it.");
+            if (settings.mouse_backend != 0)
+                hint("Automatic clicks require Raspberry Pi output. Windows mouse output supports movement "
+                     "only.");
+            else
+                hint("Requires current Pi telemetry with scheduled-click support. A physical hold on the "
+                     "click button prevents another automatic click.");
+            ImGui::TextWrapped("Status: %s", !settings.trigger.enabled      ? "Off"
+                                             : stats.trigger_status.empty() ? "Waiting for activation"
+                                                                            : stats.trigger_status.c_str());
+            ImGui::Text("Clicks submitted: %llu", static_cast<unsigned long long>(stats.auto_triggered));
+            if (ImGui::Button("Configure activation"))
+                go_to(Page::activation);
+            ImGui::SameLine();
+            if (ImGui::Button("Configure target selection"))
+                go_to(Page::targeting);
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::preview) {
+
+            const bool columns = ImGui::BeginTable("Preview layout", 2, ImGuiTableFlags_SizingStretchProp);
+            if (columns) {
+                ImGui::TableSetupColumn("Live feed", ImGuiTableColumnFlags_WidthStretch, 1.3f);
+                ImGui::TableSetupColumn("Overlay controls", ImGuiTableColumnFlags_WidthStretch, 1.f);
+                ImGui::TableNextColumn();
+            }
+            section("Live video", "The image received from your sender, with the current overlays.");
+            changed |= ImGui::Checkbox("Show live video", &settings.preview);
+            if (!receiving)
+                hint(stats.running ? "Waiting for fresh video. Any image below is the last received frame."
+                                   : "Start the session to receive video.");
             if (settings.preview) {
                 auto p = app.preview();
                 if (p.frame) {
@@ -1496,8 +1414,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     if (texture.view) {
                         float scale =
                             std::min(2.f, std::min(ImGui::GetContentRegionAvail().x / texture.w,
-                                                   std::min(std::clamp(body_height * .42f, 160.f, 300.f),
-                                                            ImGui::GetContentRegionAvail().y - 90.f) /
+                                                   std::min(std::clamp(body_height * .65f, 200.f, 520.f),
+                                                            ImGui::GetContentRegionAvail().y - 20.f) /
                                                        texture.h));
                         scale = std::max(.1f, scale);
                         const float margin = (ImGui::GetContentRegionAvail().x - texture.w * scale) * .5f;
@@ -1565,168 +1483,418 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 texture.clear();
                 ImGui::BeginChild("Preview off", ImVec2(0, 250), ImGuiChildFlags_Borders);
                 ImGui::Spacing();
-                section(
-                    "See what the app sees",
-                    "Turn on Show preview to check the picture, detections, and search area. You can turn it "
-                    "off later to reduce the display's workload.");
-                if (ImGui::Button("Show preview", ImVec2(150, 36))) {
+                section("See what the app sees", "Turn on Show live video to check the picture, detections, "
+                                                 "and search area. You can turn it "
+                                                 "off later to reduce the display's workload.");
+                if (ImGui::Button("Show live video", ImVec2(150, 36))) {
                     settings.preview = true;
                     changed = true;
                 }
                 ImGui::EndChild();
             }
 
-            if (simulate) {
-                hint("White cross: center. Bullseye: test target.");
-            }
-            ImGui::Spacing();
+            if (simulate)
+                hint("Practice shows a fixed example detection; it does not run the model.");
             if (stats.inferred)
-                ImGui::TextDisabled("%d x %d  /  %llu frames", stats.width, stats.height,
-                                    static_cast<unsigned long long>(stats.inferred));
-            const char* guide_titles[] = {"Getting connected", "Target selection",     "Mouse activation",
-                                          "Your saved setups", "Tuning your movement", "Testing your setup",
-                                          "Choosing a model",  "Make it yours"};
-            const char* guides[] = {
-                "Start with practice mode to check the controls. Connect your devices when you are ready.",
-                "Raise certainty to filter weak matches. Use the search radius to limit selection, then "
-                "choose where to aim inside each box.",
-                "Choose a connection, enable movement above, then hold your activation button. Delete "
-                "turns movement off at any time.",
-                "Save a setup you like and load it later. Loading a profile always turns mouse control off.",
-                "Start with small adjustments. Higher sensitivity moves farther; smoothing makes changes "
-                "more gradual. Expand a group for more options.",
-                "Run automatic checks to verify the receiver without moving your real cursor.",
-                "Browse for an ONNX, engine, or PyTorch model. Settings are remembered for each model. "
-                "Performance checks help choose an input size.",
-                "Overlay options apply to this preview. Frame collection saves only received images. Model "
-                "switching always turns mouse control off."};
-            section(guide_titles[page], guides[page]);
-            if (simulate && ImGui::CollapsingHeader("About practice mode")) {
-                hint("The target stays fixed; this is not YOLO detection. The picture does not react to "
-                     "your desktop cursor. The simulator does not move your real mouse.");
-                ImGui::TextWrapped("Movement: %s", stats.status.c_str());
-                ImGui::Text("Corrections sent: %llu", static_cast<unsigned long long>(stats.sent));
+                ImGui::Text("%d x %d | %llu frames processed", stats.width, stats.height,
+                            static_cast<unsigned long long>(stats.inferred));
+            if (columns)
+                ImGui::TableNextColumn();
+            auto& v = settings.visual;
+            section("Overlay content", "These controls change the preview drawing, not target selection.");
+            changed |= ImGui::Checkbox("Detection boxes", &v.boxes);
+            changed |= ImGui::Checkbox("Search-area circle", &v.fov);
+            changed |= ImGui::Checkbox("Confidence labels", &v.confidence);
+            changed |= ImGui::Checkbox("Lines to detected targets", &v.tracers);
+            if (v.tracers)
+                changed |= combo("Line starting point", &v.tracer_origin,
+                                 "Bottom of image\0Image center\0Top of image\0");
+            section("Overlay appearance", "Colors and sizes are saved with your settings.");
+            changed |= slider_float("Overlay opacity", &v.opacity, .1f, 1, "%.2f");
+            changed |= slider_float("Line thickness", &v.thickness, 1, 6, "%.1f px");
+            changed |= slider_float("Box corner radius", &v.corner_radius, 0, 30, "%.0f px");
+            changed |= slider_float("Label text size", &v.font_size, 10, 32, "%.0f px");
+            changed |= ImGui::ColorEdit3("Target color", v.box_color.data(), ImGuiColorEditFlags_NoInputs);
+            changed |=
+                ImGui::ColorEdit3("Search-area color", v.fov_color.data(), ImGuiColorEditFlags_NoInputs);
+            if (ImGui::Button("Change search radius"))
+                go_to(Page::targeting);
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::capture) {
+
+            const bool columns = setting_columns("Capture groups");
+            section("Image capture", "Save the video images Receiver actually processes.");
+            changed |= ImGui::Checkbox("Save received images", &settings.collection.enabled);
+            changed |= input_string("Output folder", settings.collection.directory);
+            float interval = settings.collection.interval_ms / 1000.f;
+            if (slider_float("Time between saved images", &interval, .1f, 10, "%.1f s")) {
+                settings.collection.interval_ms = int(std::round(interval * 1000));
+                changed = true;
             }
-            if (ImGui::CollapsingHeader("Performance and troubleshooting")) {
-                hint("Technical details for checking connections and measuring performance.");
-                ImGui::TextWrapped("%s | %s", stats.status.c_str(), stats.backend.c_str());
-                ImGui::Text("Sender timing: %s | Uncertainty: %.3f ms",
-                            stats.synchronized ? "ready" : "waiting", stats.clock_uncertainty_ms);
-                ImGui::Text("Last picture age bound: %.2f ms", stats.frame_age_ms);
-                ImGui::Text("Commands sent: %llu | Physical buttons: 0x%02x",
-                            static_cast<unsigned long long>(stats.sent), stats.physical);
-                ImGui::Text("Desired persistent: 0x%02x", stats.injection.persistent_mask);
-                if (stats.pi_ready && stats.injection.has_upt3) {
-                    ImGui::Text("Pi applied persistent: 0x%02x | Pi scheduled: 0x%02x | Poll: %u us",
-                                stats.injection.pi_applied_persistent_mask, stats.injection.pi_scheduled_mask,
-                                stats.injection.endpoint_poll_us);
-                } else {
-                    ImGui::TextUnformatted("Pi applied/scheduled state: unavailable (fresh UPT3 required)");
-                }
-                ImGui::Text("Pending click commands: %llu",
-                            static_cast<unsigned long long>(stats.injection.pending_clicks));
-                ImGui::Text("Submitted locally: %llu | Accepted by Pi: %llu | Completed by USB writer: %llu",
-                            static_cast<unsigned long long>(stats.injection.click_submitted),
-                            static_cast<unsigned long long>(stats.injection.click_accepted),
-                            static_cast<unsigned long long>(stats.injection.click_completed));
-                ImGui::Text("Rejected before acceptance: %llu | Accepted then cancelled/failed: %llu",
-                            static_cast<unsigned long long>(stats.injection.click_rejected_before_acceptance),
-                            static_cast<unsigned long long>(stats.injection.click_accepted_failed));
-                ImGui::Text("Click retries: %llu | Response timeouts: %llu | QueueFull: %llu",
-                            static_cast<unsigned long long>(stats.injection.click_retries),
-                            static_cast<unsigned long long>(stats.injection.click_timeouts),
-                            static_cast<unsigned long long>(stats.injection.click_queue_full));
-                ImGui::Text(
-                    "Release retries: %llu | Superseded cancellations: %llu | Server-epoch resets: %llu",
-                    static_cast<unsigned long long>(stats.injection.release_retries),
-                    static_cast<unsigned long long>(stats.injection.release_superseded),
-                    static_cast<unsigned long long>(stats.injection.click_epoch_resets));
-                ImGui::Text("Last release: %s | ReleaseAll: %s", stats.injection.last_release_reason.c_str(),
-                            stats.injection.last_release_all_state.c_str());
-                if (stats.pi_ready && stats.injection.has_upt3) {
-                    ImGui::Text("Pi click totals accepted/completed: %u/%u | Active/queued sequences: %u/%u",
-                                stats.injection.pi_accepted_click_total,
-                                stats.injection.pi_completed_click_total, stats.injection.pi_active_sequences,
-                                stats.injection.pi_queued_sequences);
-                    ImGui::Text(
-                        "Pi output/pending depths: %u/%u | Physical reports received/submitted: %u/%u",
-                        stats.injection.pi_output_queue_depth, stats.injection.pi_pending_synthetic_depth,
-                        stats.injection.pi_physical_reports_received,
-                        stats.injection.pi_physical_reports_submitted);
-                    ImGui::Text("Pi superseded movement: %u | USB writer failures: %u",
-                                stats.injection.pi_superseded_synthetic, stats.injection.pi_writer_failures);
-                }
-                for (const auto& command : stats.injection.commands) {
-                    ImGui::Text("Command %llu (%s, button %u): %s [accepted %u, completed %u/%u]",
-                                static_cast<unsigned long long>(command.id),
-                                command.operation == receiver::ClickOperation::release_all ? "ReleaseAll"
-                                                                                           : "click",
-                                unsigned(command.button), receiver::local_command_state_name(command.state),
-                                command.accepted_clicks, command.completed_clicks, command.requested_clicks);
-                }
-                ImGui::Text("Frame pool: 28 MiB | GPU free at load: %.0f / %.0f MiB", stats.gpu_free_mib,
-                            stats.gpu_total_mib);
-                ImGui::Text("Expired: %llu | Replaced: %llu | Stale: %llu",
-                            static_cast<unsigned long long>(stats.network.expired),
-                            static_cast<unsigned long long>(stats.replaced),
-                            static_cast<unsigned long long>(stats.stale));
-                ImGui::Text("Invalid: %llu | Duplicates: %llu | Pool drops: %llu",
-                            static_cast<unsigned long long>(stats.network.invalid),
-                            static_cast<unsigned long long>(stats.network.duplicates),
-                            static_cast<unsigned long long>(stats.network.pool_drops));
-                if (ImGui::BeginTable("Timings", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-                    for (auto label : {"Stage", "p50 ms", "p95 ms", "p99 ms"})
-                        ImGui::TableSetupColumn(label);
-                    ImGui::TableHeadersRow();
-                    for (auto pair : {std::pair{"Build picture", &stats.reassembly},
-                                      {"Wake movement worker", &stats.control_handoff},
-                                      {"Prepare image", &stats.upload},
-                                      {"Run model", &stats.inference},
-                                      {"Filter results", &stats.postprocess},
-                                      {"Send command", &stats.submit},
-                                      {"Receive to send", &stats.receiver_total}}) {
-                        ImGui::TableNextRow();
-                        ImGui::TableNextColumn();
-                        ImGui::TextUnformatted(pair.first);
-                        for (double percentile : {.5, .95, .99}) {
-                            ImGui::TableNextColumn();
-                            ImGui::Text("%.3f", pair.second->percentile(percentile));
-                        }
-                    }
-                    ImGui::EndTable();
-                }
-                hint("p50 is the median; p95 and p99 show slower cases. Practice skips the model, so its "
-                     "timings "
-                     "do not measure real detection speed.");
-                latency[graph++ % latency.size()] = float(stats.receiver_total.percentile(.95));
-                ImGui::PlotLines("p95 ms", latency.data(), int(latency.size()), int(graph % latency.size()),
-                                 nullptr, 0, 50, ImVec2(0, 70));
-                if (ImGui::Button("Save performance report")) {
+            hint("Capture runs during a session, including while assistance is disarmed. Short intervals can "
+                 "reduce processing speed.");
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Training labels", "Optionally save the model's boxes and class IDs beside each image.");
+            changed |= ImGui::Checkbox("Save YOLO labels with each image", &settings.collection.auto_label);
+            hint("Images go in images/ as lossless PPM files. Labels go in labels/ as normalized YOLO text "
+                 "files. Predictions need review before training.");
+            section("Capture status", "Only received images are saved; this does not record your desktop.");
+            ImGui::Text("Capture: %s", !settings.collection.enabled ? "Off"
+                                       : stats.running              ? "Saving received images"
+                                                                    : "Waiting for a session");
+            ImGui::Text("Images saved: %llu", static_cast<unsigned long long>(stats.collected_frames));
+            if (!stats.collection_error.empty())
+                ImGui::TextWrapped("Capture error: %s", stats.collection_error.c_str());
+            if (ImGui::Button("View incoming video"))
+                go_to(Page::preview);
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::profiles) {
+
+            section("Save and restore profiles",
+                    "Save your connections, detection settings, and mouse preferences together. Mouse "
+                    "control is never turned on by loading a file.");
+            ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
+            if (ImGui::Button("Import Aimmy config...", ImVec2(190, 36))) {
+                if (auto path = choose_file(window, false, 3)) {
                     try {
-                        app.export_metrics("metrics.csv");
-                        notice = "Performance report saved to metrics.csv in the app folder.";
+                        auto imported = receiver::import_aimmy(*path, settings);
+                        app.arm(false);
+                        settings = imported.settings;
+                        import_notes = std::move(imported.notes);
+                        profile.clear();
+                        changed = true;
+                        notice = "Aimmy settings imported. Review the import details in Profiles.";
                         error.clear();
                     } catch (const std::exception& e) {
                         error = e.what();
                     }
                 }
-                hint("Timing ends when a command is sent. It does not measure when the other computer "
-                     "actually "
-                     "moves its cursor.");
             }
-            ImGui::EndChild();
+            ImGui::EndDisabled();
+            if (!import_notes.empty() &&
+                ImGui::CollapsingHeader("Import details", ImGuiTreeNodeFlags_DefaultOpen))
+                for (const auto& note : import_notes)
+                    hint(note.c_str());
+            if (ImGui::Button("Save profile as...", ImVec2(190, 36))) {
+                if (auto path = choose_file(window, true)) {
+                    try {
+                        receiver::save_settings(settings, *path);
+                        profile = *path;
+                        preferences.add_directory(std::filesystem::absolute(*path).parent_path(), false);
+                        library_updated = 0;
+                        mark_preferences();
+                        notice = "Settings saved.";
+                        error.clear();
+                    } catch (const std::exception& e) {
+                        error = e.what();
+                    }
+                }
+            }
+            ImGui::Spacing();
+            hint("Your latest settings restore automatically next time. Mouse control always starts off.");
+            ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
+            if (ImGui::Button("Load profile...", ImVec2(190, 36)))
+                if (auto path = choose_file(window, false))
+                    open_profile(*path);
+            input_string("Search profiles", profile_filter);
+            for (const auto& item : library)
+                if (!item.model && matches(item.name, profile_filter)) {
+                    ImGui::PushID(item.path.string().c_str());
+                    if (ImGui::Selectable(item.name.c_str(), item.path.string() == profile))
+                        open_profile(item.path.string());
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("%s", item.path.string().c_str());
+                    ImGui::PopID();
+                }
+            ImGui::EndDisabled();
+            hint("A profile with different connection addresses requires stopping the session first.");
+            if (!profile.empty()) {
+                ImGui::Spacing();
+                hint("Current settings file");
+                ImGui::TextWrapped("%s", profile.c_str());
+            }
         }
+
+        if (rendered_page == Page::preferences) {
+
+            const bool columns = setting_columns("App groups");
+            section("Window and theme", "Preferences for the Receiver application window.");
+            changed |= ImGui::Checkbox("Keep Receiver above other windows", &settings.ui.always_on_top);
+            changed |= ImGui::Checkbox("Hide Receiver from screen capture", &settings.ui.stream_guard);
+            hint("Capture exclusion applies to this window and depends on Windows and the recording "
+                 "software.");
+            changed |= ImGui::ColorEdit3("Interface accent color", settings.ui.accent.data(),
+                                         ImGuiColorEditFlags_NoInputs);
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Keyboard shortcuts",
+                    "Shortcuts apply while Receiver is focused, except the global Delete stop key.");
+            ImGui::TextUnformatted("Delete  -  Disarm assistance");
+            ImGui::TextUnformatted("Q / E   -  Previous / next category");
+            changed |= ImGui::Checkbox("Enable next-model shortcut", &settings.ui.model_switch);
+            char key_name[64]{};
+            const UINT scan = MapVirtualKeyA(settings.ui.model_switch_key, MAPVK_VK_TO_VSC);
+            if (!GetKeyNameTextA(LONG(scan << 16), key_name, sizeof(key_name)))
+                std::snprintf(key_name, sizeof(key_name), "Key %d", settings.ui.model_switch_key);
+            ImGui::Text("Next model: %s", key_name);
+            if (ImGui::Button(capture_model_key ? "Press a key (Esc cancels)" : "Change model shortcut"))
+                capture_model_key = !capture_model_key;
+            hint("Cycles the model library and disarms assistance. Shortcuts do not run while typing in a "
+                 "field.");
+            if (columns)
+                ImGui::EndTable();
+        }
+
+        if (rendered_page == Page::diagnostics) {
+
+            if (ImGui::BeginTabBar("Diagnostic views")) {
+                if (ImGui::BeginTabItem("Setup checks")) {
+
+                    section("Check your setup",
+                            "Run the checks below without a Pi. Starting tests stops your "
+                            "current session. Automatic checks never move your real cursor.");
+                    auto launch = [&](std::vector<bool> chosen) {
+                        app.arm(false);
+                        auto opts = test_options;
+                        operation = std::async(std::launch::async, [&, chosen, opts] {
+                            app.stop();
+                            test_hub.start(chosen, opts);
+                        });
+                    };
+                    ImGui::BeginDisabled(busy() || test_hub.running());
+                    if (ImGui::Button("Run selected checks", ImVec2(180, 36)))
+                        launch(test_selection);
+                    ImGui::SameLine();
+                    if (ImGui::Button("Run all checks", ImVec2(160, 36)))
+                        launch(std::vector<bool>(test_selection.size(), true));
+                    ImGui::EndDisabled();
+                    if (test_hub.running()) {
+                        ImGui::SameLine();
+                        if (ImGui::Button("Cancel tests", ImVec2(140, 36)))
+                            test_hub.cancel();
+                        hint("Tests are running in separate processes. You can read results while they "
+                             "finish.");
+                    }
+                    auto entries = test_hub.entries();
+                    if (ImGui::BeginTable("Automatic checks", 4,
+                                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                              ImGuiTableFlags_ScrollY,
+                                          ImVec2(0, 280))) {
+                        ImGui::TableSetupColumn("Use", ImGuiTableColumnFlags_WidthFixed, 40);
+                        ImGui::TableSetupColumn("Check", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableSetupColumn("Result", ImGuiTableColumnFlags_WidthFixed, 110);
+                        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 70);
+                        ImGui::TableSetupScrollFreeze(0, 1);
+                        ImGui::TableHeadersRow();
+                        for (size_t i = 0; i < entries.size(); ++i) {
+                            auto& entry = entries[i];
+                            ImGui::PushID(int(i));
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            bool checked = test_selection[i];
+                            if (ImGui::Checkbox("##use", &checked))
+                                test_selection[i] = checked;
+                            ImGui::TableNextColumn();
+                            if (ImGui::Selectable(entry.name.c_str(), selected_test == int(i)))
+                                selected_test = int(i);
+                            if (ImGui::IsItemHovered())
+                                ImGui::SetTooltip("%s", entry.description.c_str());
+                            ImGui::TableNextColumn();
+                            auto color = entry.status == "Passed"   ? ImVec4(.3f, .85f, .65f, 1)
+                                         : entry.status == "Failed" ? ImVec4(1, .5f, .45f, 1)
+                                                                    : ImVec4(.8f, .8f, .8f, 1);
+                            ImGui::TextColored(color, "%s", entry.status.c_str());
+                            ImGui::TableNextColumn();
+                            ImGui::BeginDisabled(busy() || test_hub.running());
+                            if (ImGui::SmallButton("Run")) {
+                                auto chosen = std::vector<bool>(entries.size(), false);
+                                chosen[i] = true;
+                                selected_test = int(i);
+                                launch(chosen);
+                            }
+                            ImGui::EndDisabled();
+                            ImGui::PopID();
+                        }
+                        ImGui::EndTable();
+                    }
+                    if (selected_test >= 0 && size_t(selected_test) < entries.size()) {
+                        const auto& entry = entries[selected_test];
+                        ImGui::Text("%s  |  %s  |  %.2f s", entry.name.c_str(), entry.status.c_str(),
+                                    entry.seconds);
+                        hint(entry.description.c_str());
+                        ImGui::BeginChild("Test result details", ImVec2(0, 110), ImGuiChildFlags_Borders);
+                        ImGui::TextWrapped("%s",
+                                           entry.details.empty()
+                                               ? "Select Run to see the result and its explanation here."
+                                               : entry.details.c_str());
+                        ImGui::EndChild();
+                    }
+                    if (ImGui::CollapsingHeader("Test settings and optional GPU checks")) {
+                        ImGui::BeginDisabled(test_hub.running() || busy());
+                        input_string("Python executable", test_options.python);
+                        if (ImGui::Button("Choose Python..."))
+                            if (auto file = choose_file(window, false, 2))
+                                test_options.python = *file;
+                        hint("The first four checks need no Python. The demo launcher fills this path "
+                             "automatically. Optional checks require their model files and Python "
+                             "dependencies.");
+                        input_string("YOLO11n model file", test_options.model);
+                        input_string("Reference image file", test_options.image);
+                        input_string("CUDA NVRTC DLL", test_options.nvrtc);
+                        input_string("GPU settings file", test_options.profile);
+                        input_string("Raw RGB test image", test_options.raw);
+                        number_input("Raw image width", &test_options.width);
+                        number_input("Raw image height", &test_options.height);
+                        ImGui::EndDisabled();
+                    }
+                    auto report = test_hub.report_path();
+                    if (!report.empty()) {
+                        hint("Detailed logs and a JSON report are saved here:");
+                        ImGui::TextWrapped("%s", report.c_str());
+                    }
+
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Live status and timing")) {
+
+                    hint("Technical details for checking connections and measuring performance.");
+                    ImGui::TextWrapped("%s | %s", stats.status.c_str(), stats.backend.c_str());
+                    ImGui::Text("Sender timing: %s | Uncertainty: %.3f ms",
+                                stats.synchronized ? "ready" : "waiting", stats.clock_uncertainty_ms);
+                    ImGui::Text("Last picture age bound: %.2f ms", stats.frame_age_ms);
+                    ImGui::Text("Commands sent: %llu | Physical buttons: 0x%02x",
+                                static_cast<unsigned long long>(stats.sent), stats.physical);
+                    ImGui::Text("Desired persistent: 0x%02x", stats.injection.persistent_mask);
+                    if (stats.pi_ready && stats.injection.has_upt3) {
+                        ImGui::Text("Pi applied persistent: 0x%02x | Pi scheduled: 0x%02x | Poll: %u us",
+                                    stats.injection.pi_applied_persistent_mask,
+                                    stats.injection.pi_scheduled_mask, stats.injection.endpoint_poll_us);
+                    } else {
+                        ImGui::TextUnformatted(
+                            "Pi applied/scheduled state: unavailable (fresh UPT3 required)");
+                    }
+                    ImGui::Text("Pending click commands: %llu",
+                                static_cast<unsigned long long>(stats.injection.pending_clicks));
+                    ImGui::Text(
+                        "Submitted locally: %llu | Accepted by Pi: %llu | Completed by USB writer: %llu",
+                        static_cast<unsigned long long>(stats.injection.click_submitted),
+                        static_cast<unsigned long long>(stats.injection.click_accepted),
+                        static_cast<unsigned long long>(stats.injection.click_completed));
+                    ImGui::Text(
+                        "Rejected before acceptance: %llu | Accepted then cancelled/failed: %llu",
+                        static_cast<unsigned long long>(stats.injection.click_rejected_before_acceptance),
+                        static_cast<unsigned long long>(stats.injection.click_accepted_failed));
+                    ImGui::Text("Click retries: %llu | Response timeouts: %llu | QueueFull: %llu",
+                                static_cast<unsigned long long>(stats.injection.click_retries),
+                                static_cast<unsigned long long>(stats.injection.click_timeouts),
+                                static_cast<unsigned long long>(stats.injection.click_queue_full));
+                    ImGui::Text(
+                        "Release retries: %llu | Superseded cancellations: %llu | Server-epoch resets: %llu",
+                        static_cast<unsigned long long>(stats.injection.release_retries),
+                        static_cast<unsigned long long>(stats.injection.release_superseded),
+                        static_cast<unsigned long long>(stats.injection.click_epoch_resets));
+                    ImGui::Text("Last release: %s | ReleaseAll: %s",
+                                stats.injection.last_release_reason.c_str(),
+                                stats.injection.last_release_all_state.c_str());
+                    if (stats.pi_ready && stats.injection.has_upt3) {
+                        ImGui::Text(
+                            "Pi click totals accepted/completed: %u/%u | Active/queued sequences: %u/%u",
+                            stats.injection.pi_accepted_click_total, stats.injection.pi_completed_click_total,
+                            stats.injection.pi_active_sequences, stats.injection.pi_queued_sequences);
+                        ImGui::Text(
+                            "Pi output/pending depths: %u/%u | Physical reports received/submitted: %u/%u",
+                            stats.injection.pi_output_queue_depth, stats.injection.pi_pending_synthetic_depth,
+                            stats.injection.pi_physical_reports_received,
+                            stats.injection.pi_physical_reports_submitted);
+                        ImGui::Text("Pi superseded movement: %u | USB writer failures: %u",
+                                    stats.injection.pi_superseded_synthetic,
+                                    stats.injection.pi_writer_failures);
+                    }
+                    for (const auto& command : stats.injection.commands) {
+                        ImGui::Text(
+                            "Command %llu (%s, button %u): %s [accepted %u, completed %u/%u]",
+                            static_cast<unsigned long long>(command.id),
+                            command.operation == receiver::ClickOperation::release_all ? "ReleaseAll"
+                                                                                       : "click",
+                            unsigned(command.button), receiver::local_command_state_name(command.state),
+                            command.accepted_clicks, command.completed_clicks, command.requested_clicks);
+                    }
+                    ImGui::Text("Frame pool: 28 MiB | GPU free at load: %.0f / %.0f MiB", stats.gpu_free_mib,
+                                stats.gpu_total_mib);
+                    ImGui::Text("Expired: %llu | Replaced: %llu | Stale: %llu",
+                                static_cast<unsigned long long>(stats.network.expired),
+                                static_cast<unsigned long long>(stats.replaced),
+                                static_cast<unsigned long long>(stats.stale));
+                    ImGui::Text("Invalid: %llu | Duplicates: %llu | Pool drops: %llu",
+                                static_cast<unsigned long long>(stats.network.invalid),
+                                static_cast<unsigned long long>(stats.network.duplicates),
+                                static_cast<unsigned long long>(stats.network.pool_drops));
+                    if (ImGui::BeginTable("Timings", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                        for (auto label : {"Stage", "p50 ms", "p95 ms", "p99 ms"})
+                            ImGui::TableSetupColumn(label);
+                        ImGui::TableHeadersRow();
+                        for (auto pair : {std::pair{"Build picture", &stats.reassembly},
+                                          {"Wake movement worker", &stats.control_handoff},
+                                          {"Prepare image", &stats.upload},
+                                          {"Run model", &stats.inference},
+                                          {"Filter results", &stats.postprocess},
+                                          {"Send command", &stats.submit},
+                                          {"Receive to send", &stats.receiver_total}}) {
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(pair.first);
+                            for (double percentile : {.5, .95, .99}) {
+                                ImGui::TableNextColumn();
+                                ImGui::Text("%.3f", pair.second->percentile(percentile));
+                            }
+                        }
+                        ImGui::EndTable();
+                    }
+                    hint("p50 is the median; p95 and p99 show slower cases. Practice skips the model, so its "
+                         "timings "
+                         "do not measure real detection speed.");
+                    latency[graph++ % latency.size()] = float(stats.receiver_total.percentile(.95));
+                    ImGui::PlotLines("p95 ms", latency.data(), int(latency.size()),
+                                     int(graph % latency.size()), nullptr, 0, 50, ImVec2(0, 70));
+                    if (ImGui::Button("Save performance report")) {
+                        try {
+                            app.export_metrics("metrics.csv");
+                            notice = "Performance report saved to metrics.csv in the app folder.";
+                            error.clear();
+                        } catch (const std::exception& e) {
+                            error = e.what();
+                        }
+                    }
+                    hint("Timing ends when a command is sent. It does not measure when the other computer "
+                         "actually "
+                         "moves its cursor.");
+
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+        }
+
+        ImGui::PopItemWidth();
+        ImGui::EndChild();
         ImGui::PushFont(detail_font);
         ImGui::Separator();
         if (ImGui::BeginTable("Connection overview", 3, ImGuiTableFlags_SizingStretchSame)) {
-            for (auto item : {std::pair{"PICTURES", receiving ? "Receiving" : "Waiting"},
+            for (auto item : {std::pair{"VIDEO", receiving ? "Receiving" : "Waiting"},
                               {settings.mouse_backend == 1 ? "WINDOWS MOUSE"
                                : simulate                  ? "SIMULATOR"
                                                            : "MOUSE DEVICE",
                                stats.pi_ready ? "Connected" : "Waiting"},
-                              {"MOUSE CONTROL", stats.active  ? "Active"
-                                                : stats.armed ? "Ready"
-                                                              : "Off"}}) {
+                              {"ASSISTANCE", stats.active  ? "Active"
+                                             : stats.armed ? "Armed"
+                                                           : "Disarmed"}}) {
                 ImGui::TableNextColumn();
                 ImGui::TextDisabled("%s", item.first);
                 ImGui::SameLine();
@@ -1772,6 +1940,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     if (!result.inferred || !result.pi_ready || !result.synchronized)
                         smoke_exit = 2;
                     app.export_metrics("gui-smoke-metrics.csv");
+                    std::vector<std::string> visible;
+                    for (const auto* item : visible_pages)
+                        visible.emplace_back(item->slug);
+                    for (const auto& item : settings_pages)
+                        if (item.page == page) {
+                            std::ofstream state("gui-smoke-state.json");
+                            state << nlohmann::json{{"page", item.slug},
+                                                    {"label", item.label},
+                                                    {"visible", visible},
+                                                    {"armed", result.armed},
+                                                    {"width", ImGui::GetIO().DisplaySize.x},
+                                                    {"navigation_overflow", navigation_overflow}}
+                                         .dump(2);
+                            break;
+                        }
                 } catch (...) {
                     smoke_exit = 3;
                 }

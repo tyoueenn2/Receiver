@@ -1,6 +1,6 @@
 # Model switching and remembered settings
 
-The **Models** page accepts trained `.pt` checkpoints, raw detection `.onnx`
+The **Model** category accepts trained `.pt` checkpoints, raw detection `.onnx`
 exports and TensorRT `.engine` files. Auto chooses the matching backend.
 Native checkpoints need the selected Python environment; ONNX and engines need
 the TensorRT build.

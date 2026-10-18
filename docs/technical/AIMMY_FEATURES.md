@@ -1,9 +1,9 @@
 # Interface and Aimmy feature coverage
 
-Receiver uses its native C++/ImGui interface with a dark blue theme, top navigation,
-two-column settings, a separate live preview, visible connection status and a
+Receiver uses its native C++/ImGui interface with a dark blue theme, a searchable
+task-based sidebar, two-column settings, a dedicated live preview, connection status and a
 persistent movement-off button. Settings stack into one column at narrow widths.
-The minimum window is 1060 x 740. Q/E cycles tabs when the window has focus and
+The minimum window is 1060 x 740. Q/E cycles categories when the window has focus and
 you are not typing. Mouse control starts disarmed.
 
 The comparison uses [Aimmy's V2 settings](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/Class/Dictionary.cs).
@@ -14,15 +14,15 @@ assets were copied.
 
 | Feature | Location and behavior |
 | --- | --- |
-| Constant AI tracking | **Aim**. After arming, selects targets without requiring an activation button. Changing this mode disarms. Delete still stops output. |
-| Auto trigger | **Aim**. A selected box must contain the configured crosshair for the full delay. Single mode fires once until a fresh result loses the target, it leaves the crosshair, or the user releases activation/disarms. Temporary stale input keeps the single-shot latch. |
-| Spray mode | **Aim**. Repeats with a configurable interval, one pending click at a time. Press time and button are configurable. Changing trigger settings disarms and cancels pending output. |
-| Cursor check | **Aim**, local Windows mouse only. Pauses assistance while the Windows cursor is visible. Receiver cannot inspect the other computer's cursor. |
-| Preview overlays | **Settings**. Independently show boxes, confidence and FOV; optional tracers from the top, center or bottom. Colors, opacity, box corner radius, thickness and confidence font size are saved. Geometry is clipped to the received image. |
-| Theme and window behavior | **Settings**. Accent color, always on top and Windows capture exclusion for the Receiver window. Capture exclusion depends on Windows and the capturing application's support. |
-| Model-switch shortcut | **Settings**. Rebindable key, default backslash/pipe. Cycles the discovered model library while Receiver is focused; switching disarms. Q/E and Delete are reserved. |
+| Continuous assistance (constant tracking) | **Activation > Run assistance > Continuously while armed**. Selects targets without requiring a held button. Changing this mode disarms. Delete still stops output. |
+| Automatic clicking (auto trigger) | **Auto click > Enable automatic clicks**. A selected box must contain the configured crosshair for the full delay. Once-per-target mode fires once until a fresh result loses the target, it leaves the crosshair, or the user releases activation/disarms. Temporary stale input keeps the single-shot latch. |
+| Repeated clicking (spray) | **Auto click > Click behavior > Repeat while target stays centered**. Repeats with a configurable interval, one pending click at a time. Press time and button are configurable. Changing click settings disarms and cancels pending output. |
+| Cursor check | **Activation**, local Windows mouse only. Pauses assistance while the Windows cursor is visible. Receiver cannot inspect the other computer's cursor. |
+| Preview overlays | **Preview**. Independently show boxes, confidence and FOV; optional tracers from the top, center or bottom. Colors, opacity, box corner radius, thickness and confidence font size are saved. Geometry is clipped to the received image. |
+| Theme and window behavior | **App preferences**. Accent color, always on top and Windows capture exclusion for the Receiver window. Capture exclusion depends on Windows and the capturing application's support. |
+| Model-switch shortcut | **App preferences**. Rebindable key, default backslash/pipe. Cycles the discovered model library while Receiver is focused; switching disarms. Q/E and Delete are reserved. |
 | Aimmy config import | **Profiles**. Reads flat JSON `.cfg` files and imports supported numeric/toggle values into the current Receiver setup. Shows conversion notes. Connections and model paths stay as selected. Save the result as a Receiver JSON profile. |
-| Frame collection and auto labels | **Settings**. Opt-in, interval-limited writes to the selected dataset directory. Lossless RGB PPM files go in `images/`; optional normalized YOLO text labels go in `labels/`. Uses received frames, including simulated frames in practice. Can run while disarmed. Review generated labels and class IDs before training. |
+| Frame collection and auto labels | **Data capture**. Opt-in, interval-limited writes to the selected dataset directory. Lossless RGB PPM files go in `images/`; optional normalized YOLO text labels go in `labels/`. Uses received frames, including simulated frames in practice. Can run while disarmed. Review generated labels and class IDs before training. |
 
 Auto trigger requires the Pi UDP connection with current UPT3 telemetry, valid USB
 endpoint timing and the existing UPC1 v2 click protocol. It does not send local
@@ -38,7 +38,7 @@ clicks through the existing release fence. No real hardware was needed for the
 automated checks; USB behavior still needs validation on the user's devices.
 
 Collection writes on the inference worker and can reduce throughput. Start with
-the default one-second interval. Output failures appear on Settings and do not
+the default one-second interval. Output failures appear in Data capture and do not
 terminate the session. Images and labels use unique session/frame names; generated
 datasets are ignored by Git. These labels contain model predictions, not ground
 truth. The class IDs follow the currently selected model.
@@ -50,10 +50,10 @@ confidence and class selection, input sizing and FPS limits, custom crosshair
 coordinates, pixel and percentage offsets, sticky targeting, dynamic FOV, three
 prediction filters, EMA smoothing, jitter, five movement paths, per-model settings,
 model hot swaps, profile libraries and a performance helper. These remain available
-through Detection, Motion, Models, Profiles and Test Hub.
+through Activation, Targeting, Movement, Model, Profiles and Diagnostics.
 
 Aimmy's third-person alignment is covered by Receiver's custom crosshair coordinates
-and box aim-position controls in Detection. Aimmy's FOV sizes are diameters; config
+and box aim-position controls in Targeting. Aimmy's FOV sizes are diameters; config
 import halves them to produce Receiver radii. Trigger delays and prediction lead
 times convert from seconds to milliseconds. Sensitivity stays unchanged because
 the two apps use different movement scales; the importer explicitly reports this.
@@ -75,18 +75,23 @@ pending output, single-shot latching through temporary input loss, stale dwell r
 Aimmy import, RGB conversion and normalized labels. `receiver_assist_pipeline`
 uses the production App with independent loopback sender, Pi and worker fixtures
 to verify disarmed collection, single trigger, spray, held/continuous activation
-and sender-loss behavior, plus cancellation of a long press on telemetry loss. GUI smoke checks render all eight pages, including
-Settings, at the normal or minimum window size:
+and sender-loss behavior, plus cancellation of a long press on telemetry loss.
+GUI smoke checks render all eleven categories and test keyword routing at the
+normal or minimum window size:
 
 ```powershell
 ctest --test-dir build/ci -C Release --output-on-failure
-python tests/gui_smoke.py build/ci/Release/receiver.exe --all-pages --compact
+python tests/gui_smoke.py build/ci/Release/receiver.exe --all-pages --compact --search-checks
 ```
 
 Validated on 2026-10-18 with a Windows Clang 23 Release build, no TensorRT:
-all 18 CTest checks, all eight minimum-size GUI renders, and the installed-package
+all 18 CTest checks and the installed-package
 smoke test passed. The package checks run the new unit and loopback tests and
 the existing model reload/fault scenarios from a separate working directory.
 Always-on-top, keyboard rebinding and capture exclusion are native Windows paths;
 their interactive behavior and real Pi/USB output were not exercised by the
 hidden-framebuffer checks.
+
+The settings reorganization adds eleven dedicated categories and seven search cases.
+The sidebar keeps every category visible at the minimum window size. JSON profile
+keys and the processing behavior are unchanged; older page launch names remain aliases.
