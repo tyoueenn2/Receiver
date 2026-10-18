@@ -83,6 +83,8 @@ struct CollectionSettings {
 };
 struct Settings {
     int version = 1;
+    std::string frame_source = "udp"; // udp or local (Windows Desktop Duplication)
+    int capture_output = 0; // Attached DXGI display index; independent of mouse output.
     std::string bind_ip = "0.0.0.0", sender_ip = "127.0.0.1", pi_ip = "127.0.0.1", model = "", metadata = "";
     std::string inference_backend = "auto"; // auto, tensorrt, yolo_omni
     std::string omni_python = "python", omni_source = "", omni_device = "cuda:0";

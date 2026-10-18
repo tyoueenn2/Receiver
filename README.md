@@ -6,6 +6,7 @@ command line.
 
 ## Features
 
+- Choose UDP video or local Windows desktop capture with a selectable display.
 - Switch models during a session, with automatic image sizing.
 - Remember settings for each model and restore saved profiles.
 - Adjust detection, tracking and movement while viewing a live preview.

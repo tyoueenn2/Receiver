@@ -39,8 +39,12 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend,
     secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
     selected_class_names, inference_fps, auto_size, constant_tracking, cursor_check, trigger, visual, ui,
-    collection)
+    collection, frame_source, capture_output)
 void validate(const Settings& s) {
+    if (s.frame_source != "udp" && s.frame_source != "local")
+        throw std::runtime_error("Frame source must be udp or local");
+    if (s.capture_output < 0 || s.capture_output > 1024)
+        throw std::runtime_error("Capture display index must be 0..1024");
     auto range = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
     const auto& v = s.visual;
     const auto& a = s.trigger;

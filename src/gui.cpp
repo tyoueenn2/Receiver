@@ -1,5 +1,6 @@
 #include "receiver/test_hub.hpp"
 #include "receiver/app.hpp"
+#include "receiver/capture.hpp"
 #include "receiver/preferences.hpp"
 #include "receiver/assist.hpp"
 #include <windows.h>
@@ -55,7 +56,7 @@ struct PageInfo {
 constexpr PageInfo settings_pages[] = {
     {Page::connections, "connections", "Connections", "GET STARTED",
      "Choose the video source and where mouse commands are sent.",
-     "setup practice demo network ip address ports raspberry pi mouse backend local windows"},
+     "setup practice demo network ip address ports raspberry pi mouse backend local windows capture udp display desktop"},
     {Page::models, "models", "Model", "GET STARTED",
      "Load a detection model and choose its speed and input size.",
      "onnx pt engine python runtime gpu fps performance benchmark image resolution inference"},
@@ -451,6 +452,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         test_selection[i] = true;
     int selected_test = 0;
     receiver::Settings settings;
+    std::vector<receiver::CaptureOutput> capture_displays;
+    bool capture_displays_loaded = false;
     bool simulate = false, done = false;
 #ifndef RECEIVER_HAS_TENSORRT
     simulate = true;
@@ -731,6 +734,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 ? "Getting ready. Loading a new model can take a few minutes."
             : !stats.running
                 ? "Choose Connections and Model, then start the session. Assistance starts disarmed."
+            : !receiving && settings.frame_source == "local"
+                ? "Waiting for a fresh desktop image. Keep the capture region visible on the selected display."
             : !receiving          ? "Waiting for pictures. Start the picture sender on the sending computer."
             : !stats.synchronized ? "Pictures are arriving. Waiting for the sender's timing check."
             : !stats.pi_ready && settings.mouse_backend == 1 ? "Waiting for the local Windows mouse reader."
@@ -888,21 +893,58 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             hint("Windows output moves this computer's real cursor when assistance is armed.");
             if (columns)
                 ImGui::TableNextColumn();
-            section("Video and network", "Enter addresses on the same local network as Receiver.");
+            section("Video source", "Capture this computer's desktop or receive pictures over UDP.");
+            int source = settings.frame_source == "local" ? 1 : 0;
+            if (combo("Picture source", &source, "UDP sender\0Local desktop capture\0")) {
+                settings.frame_source = source ? "local" : "udp";
+                changed = true;
+            }
+            if (settings.frame_source == "local") {
+                if (ImGui::Button("Refresh displays") || !capture_displays_loaded) {
+                    capture_displays_loaded = true;
+                    try {
+                        capture_displays = receiver::capture_outputs();
+                    } catch (const std::exception& e) {
+                        error = e.what();
+                    }
+                }
+                std::string selected = "Display " + std::to_string(settings.capture_output);
+                for (const auto& display : capture_displays)
+                    if (display.index == settings.capture_output)
+                        selected += " (" + display.name + ")";
+                if (ImGui::BeginCombo("Capture display", selected.c_str())) {
+                    for (const auto& display : capture_displays) {
+                        auto label = std::to_string(display.index) + ": " + display.name + "  " +
+                                     std::to_string(display.width) + " x " + std::to_string(display.height);
+                        if (ImGui::Selectable(label.c_str(), display.index == settings.capture_output)) {
+                            settings.capture_output = display.index;
+                            changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                hint("Captures an exact center crop matching the model input size. Keep Receiver outside "
+                     "that region. No separate sender is needed.");
+            }
             if (simulate) {
                 settings.sender_ip = settings.pi_ip = "127.0.0.1";
-                hint("Run Start Demo.cmd to launch the example video sender and simulated Pi. No model or "
-                     "hardware is required.");
+                hint(settings.frame_source == "local"
+                         ? "Practice uses desktop images with example detections and a simulated Pi."
+                         : "Run Start Demo.cmd to launch the example video sender and simulated Pi. No model or "
+                           "hardware is required.");
             } else {
-                changed |= input_string("Video sender IP address", settings.sender_ip);
+                if (settings.frame_source == "udp")
+                    changed |= input_string("Video sender IP address", settings.sender_ip);
                 ImGui::BeginDisabled(settings.mouse_backend != 0);
                 changed |= input_string("Raspberry Pi IP address", settings.pi_ip);
                 ImGui::EndDisabled();
-                hint("For example: 192.168.1.20. The video sender runs on the capture computer.");
+                hint("For example: 192.168.1.20. Addresses apply only to connected UDP devices.");
             }
             if (ImGui::CollapsingHeader("Advanced network options")) {
-                changed |= input_string("Listen on IP address", settings.bind_ip);
-                changed |= number_input("Video UDP port", &settings.frame_port);
+                if (settings.frame_source == "udp") {
+                    changed |= input_string("Listen on IP address", settings.bind_ip);
+                    changed |= number_input("Video UDP port", &settings.frame_port);
+                }
                 ImGui::BeginDisabled(settings.mouse_backend != 0);
                 changed |= number_input("Pi command UDP port", &settings.pi_port);
                 ImGui::EndDisabled();
@@ -1542,7 +1584,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             changed |= ImGui::Checkbox("Save YOLO labels with each image", &settings.collection.auto_label);
             hint("Images go in images/ as lossless PPM files. Labels go in labels/ as normalized YOLO text "
                  "files. Predictions need review before training.");
-            section("Capture status", "Only received images are saved; this does not record your desktop.");
+            section("Capture status", "Save images from the selected video source at the collection interval.");
             ImGui::Text("Capture: %s", !settings.collection.enabled ? "Off"
                                        : stats.running              ? "Saving received images"
                                                                     : "Waiting for a session");
@@ -1766,8 +1808,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
 
                     hint("Technical details for checking connections and measuring performance.");
                     ImGui::TextWrapped("%s | %s", stats.status.c_str(), stats.backend.c_str());
-                    ImGui::Text("Sender timing: %s | Uncertainty: %.3f ms",
-                                stats.synchronized ? "ready" : "waiting", stats.clock_uncertainty_ms);
+                    if (settings.frame_source == "local")
+                        ImGui::Text("Video: local display %d | Timing: receiver clock", settings.capture_output);
+                    else
+                        ImGui::Text("Video: UDP | Sender timing: %s | Uncertainty: %.3f ms",
+                                    stats.synchronized ? "ready" : "waiting", stats.clock_uncertainty_ms);
                     ImGui::Text("Last picture age bound: %.2f ms", stats.frame_age_ms);
                     ImGui::Text("Commands sent: %llu | Physical buttons: 0x%02x",
                                 static_cast<unsigned long long>(stats.sent), stats.physical);

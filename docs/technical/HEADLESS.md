@@ -24,6 +24,17 @@ For manual GUI startup, run `receiver.exe`, choose **Practice on this computer**
 
 ## Headless operation and logging
 
+`--frame-source udp|local` selects video input; existing profiles default to UDP.
+Local desktop capture is Windows-only. Use `--list-capture-outputs` to list attached
+display indices and `--capture-output N` to select one. For example:
+
+```powershell
+.\receiver_headless.exe --profile profiles/yolo11n.json --frame-source local --capture-output 0 --seconds 0
+```
+
+Put source options after `--profile` to override values loaded from the profile.
+The session starts disarmed unless `--arm` is supplied. See [local capture](LOCAL_CAPTURE.md).
+
 The headless executable logs lifecycle changes and a status summary every second by default. It writes normal logs to standard output and errors to standard error, making it suitable for a terminal, systemd, or another service supervisor.
 
 - `--log-level quiet|error|info|debug|trace` controls detail. `info` is the default; `debug` adds network, output, retry, and drop counters; `trace` also adds latency percentiles, clock uncertainty, control strength, and GPU memory.

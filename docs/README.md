@@ -12,6 +12,7 @@ in `licenses/`.
 | Guide | Contents |
 | --- | --- |
 | [Connect devices](technical/SETUP.md) | Sender, network and Raspberry Pi setup |
+| [Local desktop capture](technical/LOCAL_CAPTURE.md) | Windows display selection, center crops and capture behavior |
 | [Headless operation](technical/HEADLESS.md) | Command-line use, simulation and logging |
 | [Model workflows](technical/MODEL_WORKFLOWS.md) | Hot swaps, automatic sizing, saved settings and libraries |
 | [YOLO-Omni](technical/YOLO_OMNI.md) | Python runtime, native checkpoints and worker behavior |

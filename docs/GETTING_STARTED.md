@@ -10,7 +10,7 @@ the matching category. Q/E moves between categories when you are not typing.
 
 | Category | What belongs here |
 | --- | --- |
-| Connections | Practice/live mode, mouse output device, sender/Pi addresses and network ports |
+| Connections | Practice/live mode, UDP/local video source, capture display, mouse output and network ports |
 | Model | Model library, input resolution, inference FPS limit, runtime and performance benchmark |
 | Activation | Held-button or continuous mode, activation buttons, cursor pause and maximum frame age |
 | Targeting | Confidence, classes, target priority/lock, search radius, aim point and movement prediction |
@@ -41,6 +41,13 @@ From a terminal, the same demo is `py tools/ui_demo.py`; use `--exe path/to/rece
 
 ## Local mouse and automated checks
 
+For desktop capture on this PC, end the session and choose **Connections > Video
+source > Picture source > Local desktop capture**, then select a display. Receiver
+captures a centered square matching the current model input size. Keep the Receiver
+window outside that area, choose your model, and start with assistance disarmed.
+No sender program is needed. Mouse output remains a separate choice.
+See [local capture](technical/LOCAL_CAPTURE.md) for requirements and performance details.
+
 For manual cursor testing, end the session and choose **Connections > Mouse
 output > This computer's Windows mouse**. Set buttons or continuous mode in
 **Activation**, then start and arm the session. This output moves your real mouse.
@@ -61,5 +68,5 @@ reports. See [check requirements](technical/TEST_HUB.md).
 
 The downloadable CI builds support practice mode and native `.pt` models after
 installing the Python model runtime. ONNX and TensorRT engines require a
-TensorRT build. The supplied sender produces test frames; real desktop capture
-requires a sender that implements the documented protocol.
+TensorRT build. The supplied sender produces test frames. Use local capture for
+this Windows desktop, or a protocol-compatible sender for video from another PC.
