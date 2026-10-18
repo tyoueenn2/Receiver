@@ -12,6 +12,15 @@
 #endif
 namespace receiver {
 using nlohmann::json;
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(TriggerSettings, enabled, spray, button, delay_ms,
+                                                interval_ms, press_ms)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(VisualSettings, boxes, fov, confidence, tracers,
+                                                tracer_origin, thickness, corner_radius, opacity, font_size,
+                                                box_color, fov_color)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(InterfaceSettings, always_on_top, model_switch,
+                                                model_switch_key, accent, stream_guard)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(CollectionSettings, enabled, auto_label, interval_ms,
+                                                directory)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HumanizationSettings, enabled, path, curve, duration_ms,
                                                 exponent, adaptive_distance, jitter, jitter_interval_ms,
                                                 noise, noise_period_ms, ema_enabled, ema_alpha)
@@ -26,9 +35,28 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     preview, persistence_iou, aim_x, aim_y, offset_x, offset_y, gain_x, gain_y, smoothing_ms, deadzone,
     max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend,
     secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
-    selected_class_names, inference_fps, auto_size)
+    selected_class_names, inference_fps, auto_size, constant_tracking, cursor_check, trigger, visual, ui,
+    collection)
 void validate(const Settings& s) {
     auto range = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
+    const auto& v = s.visual;
+    const auto& a = s.trigger;
+    if (a.button < 1 || a.button > 8 || a.delay_ms < 0 || a.delay_ms > 5000 || a.interval_ms < 10 ||
+        a.interval_ms > 5000 || a.press_ms < 1 || a.press_ms > 1000)
+        throw std::runtime_error("Auto trigger timing or button is invalid");
+    if (v.tracer_origin < 0 || v.tracer_origin > 2 || !range(v.thickness, 1, 6) ||
+        !range(v.corner_radius, 0, 30) || !range(v.opacity, .1f, 1) || !range(v.font_size, 10, 32))
+        throw std::runtime_error("Preview appearance is invalid");
+    for (const auto& color : {v.box_color, v.fov_color, s.ui.accent})
+        for (float c : color)
+            if (!range(c, 0, 1))
+                throw std::runtime_error("Colors must contain values from 0 to 1");
+    if (s.ui.model_switch_key < 8 || s.ui.model_switch_key > 254 || s.ui.model_switch_key == 46 ||
+        s.ui.model_switch_key == 81 || s.ui.model_switch_key == 69)
+        throw std::runtime_error("Model switch key must not conflict with Delete or Q/E navigation");
+    if (s.collection.interval_ms < 100 || s.collection.interval_ms > 60000 ||
+        s.collection.directory.empty() || s.collection.directory.size() > 1024)
+        throw std::runtime_error("Collection needs an output directory and a 100..60000 ms interval");
     if (s.inference_fps < 0 || s.inference_fps > 1000 || s.selected_class_names.size() > 10000)
         throw std::runtime_error("Inference FPS must be 0..1000");
     if (s.version != 1)

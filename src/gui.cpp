@@ -1,6 +1,7 @@
 #include "receiver/test_hub.hpp"
 #include "receiver/app.hpp"
 #include "receiver/preferences.hpp"
+#include "receiver/assist.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -26,7 +27,7 @@ ID3D11RenderTargetView* target = nullptr;
 ImFont* title_font = nullptr;
 ImFont* label_font = nullptr;
 ImFont* detail_font = nullptr;
-constexpr ImVec4 accent{.19f, .59f, 1.f, 1.f};
+ImVec4 accent{.19f, .59f, 1.f, 1.f};
 constexpr ImVec4 muted{.53f, .59f, .68f, 1.f};
 void release_target() {
     if (target) {
@@ -105,8 +106,7 @@ void field_label(const char* label, const char* value = nullptr) {
     }
     ImGui::SetNextItemWidth(-1);
 }
-bool slider_float(const char* label, float* value, float low, float high,
-                  const char* format = "%.3f") {
+bool slider_float(const char* label, float* value, float low, float high, const char* format = "%.3f") {
     ImGui::PushID(label);
     char formatted[64];
     std::snprintf(formatted, sizeof(formatted), format, *value);
@@ -143,8 +143,7 @@ bool combo(const char* label, int* value, Items items, Args... args) {
     const std::string id = hidden ? label : std::string("##") + label;
     return ImGui::Combo(id.c_str(), value, items, args...);
 }
-template <typename Value, typename... Args>
-bool number_input(const char* label, Value* value, Args... args) {
+template <typename Value, typename... Args> bool number_input(const char* label, Value* value, Args... args) {
     field_label(label);
     const std::string id = std::string("##") + label;
     if constexpr (std::is_same_v<Value, int>)
@@ -173,9 +172,10 @@ std::optional<std::string> choose_file(HWND window, bool save, int model = 0) {
     dialog.hwndOwner = window;
     dialog.lpstrFile = path.data();
     dialog.nMaxFile = DWORD(path.size());
-    dialog.lpstrFilter = model == 2 ? "Programs (*.exe)\0*.exe\0\0"
-                         : model    ? "Detection models (*.onnx;*.pt;*.engine)\0*.onnx;*.pt;*.engine\0\0"
-                                    : "Saved settings (*.json)\0*.json\0\0";
+    dialog.lpstrFilter = model == 3   ? "Aimmy configs (*.cfg;*.json)\0*.cfg;*.json\0\0"
+                         : model == 2 ? "Programs (*.exe)\0*.exe\0\0"
+                         : model      ? "Detection models (*.onnx;*.pt;*.engine)\0*.onnx;*.pt;*.engine\0\0"
+                                      : "Saved settings (*.json)\0*.json\0\0";
     dialog.lpstrDefExt = model ? "onnx" : "json";
     dialog.Flags =
         OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
@@ -306,8 +306,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     WNDCLASSEXW wc{sizeof(wc), CS_CLASSDC, window_proc,          0,      0, instance, nullptr, nullptr,
                    nullptr,    nullptr,    L"UdpVisionReceiver", nullptr};
     RegisterClassExW(&wc);
-    HWND window = CreateWindowW(wc.lpszClassName, L"UDP Vision Receiver", WS_OVERLAPPEDWINDOW, 80, 60,
-                                compact ? 1060 : 1280, compact ? 740 : 900, nullptr, nullptr, instance, nullptr);
+    HWND window =
+        CreateWindowW(wc.lpszClassName, L"UDP Vision Receiver", WS_OVERLAPPEDWINDOW, 80, 60,
+                      compact ? 1060 : 1280, compact ? 740 : 900, nullptr, nullptr, instance, nullptr);
     DXGI_SWAP_CHAIN_DESC desc{};
     desc.BufferCount = 2;
     desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -348,10 +349,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     style.GrabRounding = 8;
     style.GrabMinSize = 12;
     style.ScrollbarSize = 6;
-    style.ItemSpacing = ImVec2(12, 9);
+    style.ItemSpacing = ImVec2(12, 7);
     style.ItemInnerSpacing = ImVec2(8, 5);
     style.WindowPadding = ImVec2(24, 20);
-    style.FramePadding = ImVec2(10, 6);
+    style.FramePadding = ImVec2(10, 4);
     style.CellPadding = ImVec2(12, 5);
     style.SeparatorTextPadding = ImVec2(0, 8);
     style.SeparatorTextBorderSize = 1;
@@ -396,7 +397,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     uint64_t previous_frames = 0;
     int64_t last_frame = 0;
     std::string notice;
-    int page = 0;
+    int page = 2;
+    if (options.find("--page=setup") != std::string::npos)
+        page = 0;
+    if (options.find("--page=settings") != std::string::npos)
+        page = 7;
     if (options.find("--page=detect") != std::string::npos)
         page = 1;
     if (options.find("--page=mouse") != std::string::npos)
@@ -418,6 +423,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         settings.pi_port = port("--test-pi-port=", settings.pi_port);
     }
     std::string profile, error, class_text;
+    std::vector<std::string> import_notes;
+    bool capture_model_key = false;
+    std::array<bool, 256> previous_keys{};
+    int last_topmost = -1;
+    int last_stream_guard = -1;
     receiver::Preferences preferences;
     bool preferences_dirty = false;
     int64_t preferences_changed = 0, library_updated = 0;
@@ -543,6 +553,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         if (!simulate && !stats.model_classes.empty())
             names = stats.model_classes;
         auto previous_settings = settings;
+        accent = ImVec4(settings.ui.accent[0], settings.ui.accent[1], settings.ui.accent[2], 1);
+        style.Colors[ImGuiCol_CheckMark] = style.Colors[ImGuiCol_SliderGrab] =
+            style.Colors[ImGuiCol_NavCursor] = accent;
+        if (!smoke && last_topmost != int(settings.ui.always_on_top)) {
+            SetWindowPos(window, settings.ui.always_on_top ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            last_topmost = int(settings.ui.always_on_top);
+        }
+        if (!smoke && last_stream_guard != int(settings.ui.stream_guard)) {
+            if (!SetWindowDisplayAffinity(window, settings.ui.stream_guard ? 0x11 : 0))
+                error = "Windows could not apply capture exclusion to this window.";
+            last_stream_guard = int(settings.ui.stream_guard);
+        }
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
@@ -566,31 +589,73 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 230);
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(simulate ? muted : accent, "%s",
-                           simulate ? "PRACTICE MODE" : settings.model.empty() ? "NO MODEL SELECTED"
-                                                                             : "MODEL SELECTED");
+                           simulate                 ? "PRACTICE MODE"
+                           : settings.model.empty() ? "NO MODEL SELECTED"
+                                                    : "MODEL SELECTED");
         hint("VISION ASSISTANCE  /  CONTROL CENTER");
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Separator, accent);
         ImGui::Separator();
         ImGui::PopStyleColor();
-        const std::pair<const char*, int> pages[] = {{"SETUP", 0}, {"MODELS", 6}, {"DETECTION", 1},
-                                                    {"MOUSE", 2}, {"HUMANIZATION", 4},
-                                                    {"SAVED SETTINGS", 3}, {"TEST HUB", 5}};
-        const float navigation_width = (ImGui::GetContentRegionAvail().x - 6 * style.ItemSpacing.x) / 7;
+        const std::pair<const char*, int> pages[] = {{"AIM", 2},    {"DETECTION", 1}, {"MOTION", 4},
+                                                     {"MODELS", 6}, {"PROFILES", 3},  {"SETTINGS", 7},
+                                                     {"SETUP", 0},  {"TEST HUB", 5}};
+        std::array<bool, 256> pressed{};
+        for (int key = 8; key < 255; ++key) {
+            const bool down = (GetAsyncKeyState(key) & 0x8000) != 0;
+            pressed[key] = down && !previous_keys[key];
+            previous_keys[key] = down;
+        }
+        if (!smoke && GetForegroundWindow() == window && !ImGui::GetIO().WantTextInput) {
+            if (capture_model_key) {
+                for (int key = 8; key < 255; ++key)
+                    if (pressed[key] && key != VK_SHIFT && key != VK_CONTROL && key != VK_MENU &&
+                        (key < VK_LSHIFT || key > VK_RMENU) && key != VK_ESCAPE && key != VK_DELETE &&
+                        key != 'Q' && key != 'E') {
+                        settings.ui.model_switch_key = key;
+                        capture_model_key = false;
+                        changed = true;
+                        break;
+                    }
+                if (pressed[VK_ESCAPE])
+                    capture_model_key = false;
+            } else if (pressed['Q'] || pressed['E']) {
+                for (int i = 0; i < 8; ++i)
+                    if (page == pages[i].second) {
+                        page = pages[(i + (pressed['E'] ? 1 : 7)) % 8].second;
+                        break;
+                    }
+            } else if (settings.ui.model_switch && pressed[settings.ui.model_switch_key] && !busy() &&
+                       !stats.model_loading && !stats.benchmarking) {
+                std::vector<std::string> models;
+                for (const auto& entry : library)
+                    if (entry.model)
+                        models.push_back(entry.path.string());
+                if (!models.empty()) {
+                    const auto current = std::find(models.begin(), models.end(), settings.model);
+                    const size_t next =
+                        current == models.end() ? 0 : (size_t(current - models.begin()) + 1) % models.size();
+                    app.arm(false);
+                    open_model(models[next]);
+                } else
+                    notice = "Add a model in Models before using the switch key.";
+            }
+        }
+        const float navigation_width = (ImGui::GetContentRegionAvail().x - 7 * style.ItemSpacing.x) / 8;
         ImGui::PushFont(label_font);
-        for (int i = 0; i < 7; ++i) {
+        for (int i = 0; i < 8; ++i) {
             if (i)
                 ImGui::SameLine();
             const bool selected = page == pages[i].second;
-            ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImVec4(.08f, .16f, .25f, 1)
-                                                           : ImVec4(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                  selected ? ImVec4(.08f, .16f, .25f, 1) : ImVec4(0, 0, 0, 0));
             ImGui::PushStyleColor(ImGuiCol_Text, selected ? style.Colors[ImGuiCol_Text] : muted);
             if (ImGui::Button(pages[i].first, ImVec2(navigation_width, 38)))
                 page = pages[i].second;
             if (selected) {
                 const auto a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
                 ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x, b.y), b,
-                                                   ImGui::ColorConvertFloat4ToU32(accent), 2);
+                                                    ImGui::ColorConvertFloat4ToU32(accent), 2);
             }
             ImGui::PopStyleColor(2);
         }
@@ -671,11 +736,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         ImGui::Spacing();
         const bool show_hub = page == 5;
         const float body_height = std::max(100.f, ImGui::GetContentRegionAvail().y - 34);
-        const float controls_width = show_hub
-                                         ? ImGui::GetContentRegionAvail().x
-                                         : ImGui::GetContentRegionAvail().x -
-                                               std::clamp(ImGui::GetContentRegionAvail().x * .31f, 300.f, 440.f) -
-                                               style.ItemSpacing.x;
+        const float controls_width =
+            show_hub
+                ? ImGui::GetContentRegionAvail().x
+                : ImGui::GetContentRegionAvail().x -
+                      std::clamp(ImGui::GetContentRegionAvail().x * .31f, 300.f, 440.f) - style.ItemSpacing.x;
         const std::string controls_id = "Controls##" + std::to_string(page);
         ImGui::BeginChild(controls_id.c_str(), ImVec2(controls_width, body_height), ImGuiChildFlags_Borders);
         ImGui::PushItemWidth(-1);
@@ -894,8 +959,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 changed |= slider_float("Search radius", &settings.fov_radius, 0, 1024, "%.0f pixels");
                 hint("Only aim points inside the circle in the preview are eligible.");
                 int selection = settings.highest_confidence ? 1 : 0;
-                if (combo("Choose an object", &selection,
-                                 "Nearest to the center\0Most certain match\0")) {
+                if (combo("Choose an object", &selection, "Nearest to the center\0Most certain match\0")) {
                     settings.highest_confidence = selection == 1;
                     changed = true;
                 }
@@ -953,26 +1017,57 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             }
             if (page == 2) {
                 const bool columns = setting_columns("Mouse groups");
+                section("Aim assist", "Activation and automatic firing are independent of movement shaping.");
+                changed |= ImGui::Checkbox("Constant AI tracking", &settings.constant_tracking);
+                hint("Track continuously after enabling mouse control. Changing this option disarms "
+                     "movement.");
+                ImGui::BeginDisabled(settings.mouse_backend != 1);
+                changed |= ImGui::Checkbox("Pause when the cursor is visible", &settings.cursor_check);
+                ImGui::EndDisabled();
+                hint("Cursor check uses the local Windows cursor. It is available with the local mouse "
+                     "connection.");
+                section("Auto trigger",
+                        "Click after a selected box stays under the crosshair. Requires Pi UPT3.");
+                ImGui::BeginDisabled(settings.mouse_backend != 0);
+                changed |= ImGui::Checkbox("Enable auto trigger", &settings.trigger.enabled);
+                changed |= ImGui::Checkbox("Spray while target stays centered", &settings.trigger.spray);
+                changed |= slider_int("Trigger delay", &settings.trigger.delay_ms, 0, 1000, "%d ms");
+                if (settings.trigger.spray)
+                    changed |=
+                        slider_int("Repeat interval", &settings.trigger.interval_ms, 10, 1000, "%d ms");
+                if (ImGui::CollapsingHeader("Trigger button and press time")) {
+                    int trigger_button = settings.trigger.button - 1;
+                    if (combo("Click button", &trigger_button, mouse_buttons, 8)) {
+                        settings.trigger.button = trigger_button + 1;
+                        changed = true;
+                    }
+                    changed |= slider_int("Press duration", &settings.trigger.press_ms, 1, 1000, "%d ms");
+                }
+                ImGui::EndDisabled();
+                hint("Single mode fires once per target acquisition. Spray repeats with one pending click at "
+                     "a time.");
+                if (settings.trigger.enabled)
+                    ImGui::TextWrapped("Trigger: %s", stats.trigger_status.empty()
+                                                          ? "Waiting for activation"
+                                                          : stats.trigger_status.c_str());
+                if (columns)
+                    ImGui::TableNextColumn();
                 section("Mouse connection", "Choose where movement commands are sent.");
                 ImGui::BeginDisabled(stats.running || busy());
                 if (combo("Mouse connection", &settings.mouse_backend,
-                                 "Raspberry Pi / simulator\0Local Windows mouse\0")) {
+                          "Raspberry Pi / simulator\0Local Windows mouse\0")) {
                     settings.activation_button = 2;
                     settings.secondary_button = 0;
                     settings.tracking.fov_button = 1;
                     changed = true;
                 }
                 ImGui::EndDisabled();
-                hint("Stop the session to change connections. Local Windows mouse reads your mouse and moves "
-                     "your real cursor when enabled. Press the activation button after starting.");
-                if (columns)
-                    ImGui::TableNextColumn();
+                hint("Stop the session to change connections. Local mouse output moves your real cursor.");
                 section("Activation",
                         "Turn on mouse control at the top, then hold this button on the mouse connected "
                         "through your selected connection.");
                 int button = settings.activation_button - 1;
-                if (combo("Hold to activate", &button, mouse_buttons,
-                                 settings.mouse_backend == 1 ? 5 : 8)) {
+                if (combo("Hold to activate", &button, mouse_buttons, settings.mouse_backend == 1 ? 5 : 8)) {
                     settings.activation_button = button + 1;
                     changed = true;
                 }
@@ -981,7 +1076,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     "Side button 1", "Side button 2",     "Button 6",           "Button 7",
                     "Button 8"};
                 changed |= combo("Alternate activation", &settings.secondary_button, secondary,
-                                        settings.mouse_backend == 1 ? 6 : 9);
+                                 settings.mouse_backend == 1 ? 6 : 9);
                 if (simulate && settings.mouse_backend == 0)
                     hint("The practice device pretends the right button is held. Your real mouse buttons do "
                          "not control the simulator.");
@@ -991,12 +1086,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     changed |= slider_int("Largest movement per update", &settings.max_step, 1, 127);
                     hint("Measured in mouse movement units, not screen pixels. The device's own limit also "
                          "applies.");
-                    changed |=
-                        slider_int("Oldest allowed picture", &settings.max_age_ms, 1, 250, "%d ms");
+                    changed |= slider_int("Oldest allowed picture", &settings.max_age_ms, 1, 250, "%d ms");
                     hint("Pictures older than this cannot move the mouse. The default is 50 milliseconds.");
                 }
                 section("Stopping is always available",
-                        "Release the chosen button, press Delete, or use Turn movement off at the top. Lost "
+                        "In held mode, release the chosen button. Press Delete or use Turn movement off for "
+                        "either activation mode. Lost "
                         "connections and old pictures also stop new movement.");
                 if (columns)
                     ImGui::EndTable();
@@ -1011,8 +1106,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     ImGui::TextUnformatted("Assistance behavior");
                     ImGui::SetNextItemWidth(-1);
                     changed |= combo("##direction mode", &d.mode,
-                                            "More help when moving away from the target\0More help when "
-                                            "moving toward the target\0Different help for left and right\0");
+                                     "More help when moving away from the target\0More help when "
+                                     "moving toward the target\0Different help for left and right\0");
                     changed |= percent_slider("Strength of this effect", d.strength);
                     hint("0% keeps both directions equal. 100% allows the full difference. Angles in between "
                          "change gradually.");
@@ -1039,8 +1134,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                         d.slow_strength = slow / 100;
                         changed = true;
                     }
-                    changed |=
-                        slider_float("Slow movement threshold", &d.slow_speed, 1, 500, "%.0f units/s");
+                    changed |= slider_float("Slow movement threshold", &d.slow_speed, 1, 500, "%.0f units/s");
                     hint("Below this speed, assistance gradually uses the barely-moving value. Lower the "
                          "threshold if small, slow movements should count as intentional direction.");
                     if (d.enabled) {
@@ -1069,8 +1163,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 if (ImGui::CollapsingHeader("Sensitivity and smoothing", ImGuiTreeNodeFlags_DefaultOpen)) {
                     changed |= slider_float("Horizontal sensitivity", &settings.gain_x, 0, 2, "%.2f");
                     changed |= slider_float("Vertical sensitivity", &settings.gain_y, 0, 2, "%.2f");
-                    changed |=
-                        slider_float("Movement smoothing", &settings.smoothing_ms, 0, 100, "%.0f ms");
+                    changed |= slider_float("Movement smoothing", &settings.smoothing_ms, 0, 100, "%.0f ms");
                     hint(
                         "Higher sensitivity moves farther. Smoothing makes changes gradual; 0 turns it off.");
                     changed |= ImGui::Checkbox("Use EMA smoothing", &h.ema_enabled);
@@ -1078,8 +1171,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                         changed |= slider_float("EMA response", &h.ema_alpha, .01f, 1.f, "%.2f");
                     hint("EMA replaces time-based smoothing. Lower response feels softer; higher response "
                          "follows changes faster.");
-                    changed |= slider_float("Ignore tiny adjustments", &settings.deadzone, 0, 20,
-                                                  "%.1f pixels");
+                    changed |=
+                        slider_float("Ignore tiny adjustments", &settings.deadzone, 0, 20, "%.1f pixels");
                     changed |= ImGui::Checkbox("Keep the same target when possible", &settings.persistence);
                     hint("Reduces target switching. No movement is sent toward a target that has "
                          "disappeared.");
@@ -1089,20 +1182,19 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     changed |= ImGui::Checkbox("Lead moving targets", &t.prediction);
                     ImGui::SetNextItemWidth(-1);
                     changed |= combo("##prediction method", &t.prediction_method,
-                                            "Kalman - filter noisy motion\0Smoothed velocity - gradual "
-                                            "response\0Velocity history - average recent motion\0");
+                                     "Kalman - filter noisy motion\0Smoothed velocity - gradual "
+                                     "response\0Velocity history - average recent motion\0");
                     changed |= slider_float("Prediction lead time", &t.lead_ms, 0, 300, "%.0f ms");
                     changed |= slider_float("Lead multiplier", &t.lead_multiplier, 0, 5, "%.2fx");
-                    changed |=
-                        slider_float("Maximum lead distance", &t.max_lead, 0, 500, "%.0f pixels");
+                    changed |= slider_float("Maximum lead distance", &t.max_lead, 0, 500, "%.0f pixels");
                     if (t.prediction_method == 1)
-                        changed |= slider_float("Velocity averaging", &t.velocity_smoothing_ms, 1, 200,
-                                                      "%.0f ms");
+                        changed |=
+                            slider_float("Velocity averaging", &t.velocity_smoothing_ms, 1, 200, "%.0f ms");
                     hint("Prediction uses recent target motion. Higher lead can overshoot. "
                          "Missing targets never receive predicted movement.");
                     changed |= ImGui::Checkbox("Prefer the current target", &settings.persistence);
-                    changed |= slider_float("Sticky target distance", &t.sticky_distance, 0, 500,
-                                                  "%.0f pixels");
+                    changed |=
+                        slider_float("Sticky target distance", &t.sticky_distance, 0, 500, "%.0f pixels");
                     hint("Allows the same object to move this far between pictures without switching "
                          "identity. 0 uses box overlap only; large values may mix nearby objects of the same "
                          "type.");
@@ -1112,12 +1204,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     changed |= ImGui::Checkbox("Change search area while holding a button", &t.dynamic_fov);
                     int button = t.fov_button - 1;
                     if (combo("Search-area button", &button, mouse_buttons,
-                                     settings.mouse_backend == 1 ? 5 : 8)) {
+                              settings.mouse_backend == 1 ? 5 : 8)) {
                         t.fov_button = button + 1;
                         changed = true;
                     }
-                    changed |= slider_float("Search radius while held", &t.held_radius, 1, 1024,
-                                                  "%.0f pixels");
+                    changed |=
+                        slider_float("Search radius while held", &t.held_radius, 1, 1024, "%.0f pixels");
                     hint("Releasing the button restores the normal search circle. "
                          "This does not activate movement on its own.");
                 }
@@ -1139,17 +1231,16 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     if (h.path == 2)
                         changed |= slider_float("Ease-in intensity", &h.exponent, 1, 5);
                     if (h.path == 3)
-                        changed |= slider_float("Gentle approach distance", &h.adaptive_distance, 1,
-                                                      500, "%.0f pixels");
+                        changed |= slider_float("Gentle approach distance", &h.adaptive_distance, 1, 500,
+                                                "%.0f pixels");
                     if (h.path == 4) {
-                        changed |=
-                            slider_float("Smooth variation amount", &h.noise, 0, 20, "%.1f units");
+                        changed |= slider_float("Smooth variation amount", &h.noise, 0, 20, "%.1f units");
                         changed |=
                             slider_float("Variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
                     }
                     changed |= slider_float("Small random variations", &h.jitter, 0, 20, "%.1f units");
-                    changed |= slider_float("Random change interval", &h.jitter_interval_ms, 8, 250,
-                                                  "%.0f ms");
+                    changed |=
+                        slider_float("Random change interval", &h.jitter_interval_ms, 8, 250, "%.0f ms");
                     hint("Start at 0; extra variation can reduce accuracy. Variation fades near the aim "
                          "point and stops inside the dead zone.");
                 }
@@ -1271,6 +1362,28 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 section("Keep a setup you like",
                         "Save your connections, detection settings, and mouse preferences together. Mouse "
                         "control is never turned on by loading a file.");
+                ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
+                if (ImGui::Button("Import Aimmy config...", ImVec2(190, 36))) {
+                    if (auto path = choose_file(window, false, 3)) {
+                        try {
+                            auto imported = receiver::import_aimmy(*path, settings);
+                            app.arm(false);
+                            settings = imported.settings;
+                            import_notes = std::move(imported.notes);
+                            profile.clear();
+                            changed = true;
+                            notice = "Aimmy settings imported. Review the import details in Profiles.";
+                            error.clear();
+                        } catch (const std::exception& e) {
+                            error = e.what();
+                        }
+                    }
+                }
+                ImGui::EndDisabled();
+                if (!import_notes.empty() &&
+                    ImGui::CollapsingHeader("Import details", ImGuiTreeNodeFlags_DefaultOpen))
+                    for (const auto& note : import_notes)
+                        hint(note.c_str());
                 if (ImGui::Button("Save settings as...", ImVec2(190, 36))) {
                     if (auto path = choose_file(window, true)) {
                         try {
@@ -1312,6 +1425,53 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 }
             }
         }
+        if (page == 7) {
+            const bool columns = setting_columns("Appearance groups");
+            auto& v = settings.visual;
+            section("Preview overlays", "Customize the received-image preview.");
+            changed |= ImGui::Checkbox("Show detection boxes", &v.boxes);
+            changed |= ImGui::Checkbox("Show field of view", &v.fov);
+            changed |= ImGui::Checkbox("Show confidence labels", &v.confidence);
+            changed |= ImGui::Checkbox("Show tracers", &v.tracers);
+            if (v.tracers)
+                changed |= combo("Tracer origin", &v.tracer_origin, "Bottom\0Center\0Top\0");
+            changed |= slider_float("Overlay opacity", &v.opacity, .1f, 1, "%.2f");
+            changed |= slider_float("Border thickness", &v.thickness, 1, 6, "%.1f px");
+            changed |= slider_float("Box corner radius", &v.corner_radius, 0, 30, "%.0f px");
+            changed |= slider_float("Confidence font size", &v.font_size, 10, 32, "%.0f px");
+            changed |= ImGui::ColorEdit3("Detection color", v.box_color.data(), ImGuiColorEditFlags_NoInputs);
+            changed |= ImGui::ColorEdit3("FOV color", v.fov_color.data(), ImGuiColorEditFlags_NoInputs);
+            if (columns)
+                ImGui::TableNextColumn();
+            section("Application", "Window behavior and shortcuts on this computer.");
+            changed |= ImGui::Checkbox("Always on top", &settings.ui.always_on_top);
+            changed |= ImGui::Checkbox("Exclude this window from capture", &settings.ui.stream_guard);
+            changed |=
+                ImGui::ColorEdit3("Accent color", settings.ui.accent.data(), ImGuiColorEditFlags_NoInputs);
+            changed |= ImGui::Checkbox("Enable model switch shortcut", &settings.ui.model_switch);
+            char key_name[64]{};
+            const UINT scan = MapVirtualKeyA(settings.ui.model_switch_key, MAPVK_VK_TO_VSC);
+            if (!GetKeyNameTextA(LONG(scan << 16), key_name, sizeof(key_name)))
+                std::snprintf(key_name, sizeof(key_name), "Key %d", settings.ui.model_switch_key);
+            ImGui::Text("Model switch: %s", key_name);
+            if (ImGui::Button(capture_model_key ? "Press a key (Esc cancels)" : "Change shortcut"))
+                capture_model_key = !capture_model_key;
+            hint("Q / E changes tabs. The model shortcut cycles your library while this window is focused. "
+                 "Delete always disarms.");
+            section("Frame collection", "Save received frames locally for your dataset.");
+            changed |= ImGui::Checkbox("Collect received frames", &settings.collection.enabled);
+            changed |= ImGui::Checkbox("Auto label with current detections", &settings.collection.auto_label);
+            changed |=
+                slider_int("Collection interval", &settings.collection.interval_ms, 100, 10000, "%d ms");
+            changed |= input_string("Dataset directory", settings.collection.directory);
+            hint("Writes lossless PPM images and optional YOLO labels. Review generated labels before "
+                 "training. Disk writes can reduce inference speed.");
+            ImGui::Text("Frames saved: %llu", static_cast<unsigned long long>(stats.collected_frames));
+            if (!stats.collection_error.empty())
+                ImGui::TextWrapped("Collection: %s", stats.collection_error.c_str());
+            if (columns)
+                ImGui::EndTable();
+        }
         ImGui::PopItemWidth();
         ImGui::EndChild();
         if (!show_hub) {
@@ -1336,7 +1496,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     if (texture.view) {
                         float scale =
                             std::min(2.f, std::min(ImGui::GetContentRegionAvail().x / texture.w,
-                                                   std::min(std::clamp(body_height - 350.f, 100.f, 260.f),
+                                                   std::min(std::clamp(body_height * .42f, 160.f, 300.f),
                                                             ImGui::GetContentRegionAvail().y - 90.f) /
                                                        texture.h));
                         scale = std::max(.1f, scale);
@@ -1346,33 +1506,56 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                         ImGui::Image(ImTextureID(reinterpret_cast<uintptr_t>(texture.view)),
                                      ImVec2(texture.w * scale, texture.h * scale));
                         auto* draw = ImGui::GetWindowDrawList();
+                        const auto& visual = settings.visual;
+                        const auto color = [&](const std::array<float, 3>& rgb) {
+                            return ImGui::ColorConvertFloat4ToU32(
+                                ImVec4(rgb[0], rgb[1], rgb[2], visual.opacity));
+                        };
+                        draw->PushClipRect(
+                            origin, ImVec2(origin.x + texture.w * scale, origin.y + texture.h * scale), true);
                         for (auto& d : p.detections) {
-                            draw->AddRect(
-                                ImVec2(origin.x + d.x * scale, origin.y + d.y * scale),
-                                ImVec2(origin.x + (d.x + d.w) * scale, origin.y + (d.y + d.h) * scale),
-                                IM_COL32(80, 230, 160, 255), 0, 0, 2);
+                            if (visual.boxes)
+                                draw->AddRect(
+                                    ImVec2(origin.x + d.x * scale, origin.y + d.y * scale),
+                                    ImVec2(origin.x + (d.x + d.w) * scale, origin.y + (d.y + d.h) * scale),
+                                    color(visual.box_color), visual.corner_radius, 0, visual.thickness);
                             char label[64];
                             std::string object = simulate ? "Example"
                                                  : d.cls >= 0 && size_t(d.cls) < names.size()
                                                      ? names[d.cls]
                                                      : "Object " + std::to_string(d.cls);
                             std::snprintf(label, sizeof(label), "%s  %.0f%%", object.c_str(), d.score * 100);
-                            draw->AddText(ImVec2(origin.x + d.x * scale, origin.y + d.y * scale),
-                                          IM_COL32_WHITE, label);
+                            if (visual.confidence)
+                                draw->AddText(ImGui::GetFont(), visual.font_size,
+                                              ImVec2(origin.x + d.x * scale, origin.y + d.y * scale),
+                                              color(visual.box_color), label);
+                            if (visual.tracers) {
+                                const float from = visual.tracer_origin == 0   ? 1.f
+                                                   : visual.tracer_origin == 1 ? .5f
+                                                                               : 0.f;
+                                draw->AddLine(ImVec2(origin.x + texture.w * scale * .5f,
+                                                     origin.y + texture.h * scale * from),
+                                              ImVec2(origin.x + (d.x + d.w * .5f) * scale,
+                                                     origin.y + (d.y + d.h * .5f) * scale),
+                                              color(visual.box_color), visual.thickness);
+                            }
                         }
                         float rx = settings.reference_x < 0 ? texture.w * .5f : settings.reference_x,
                               ry = settings.reference_y < 0 ? texture.h * .5f : settings.reference_y;
-                        draw->AddCircle(ImVec2(origin.x + rx * scale, origin.y + ry * scale),
-                                        (settings.tracking.dynamic_fov &&
-                                                 (stats.physical & (1u << (settings.tracking.fov_button - 1)))
-                                             ? settings.tracking.held_radius
-                                             : settings.fov_radius) *
-                                            scale,
-                                        IM_COL32(180, 180, 255, 180));
+                        if (visual.fov)
+                            draw->AddCircle(
+                                ImVec2(origin.x + rx * scale, origin.y + ry * scale),
+                                (settings.tracking.dynamic_fov &&
+                                         (stats.physical & (1u << (settings.tracking.fov_button - 1)))
+                                     ? settings.tracking.held_radius
+                                     : settings.fov_radius) *
+                                    scale,
+                                color(visual.fov_color), 0, visual.thickness);
                         if (p.correction.target)
                             draw->AddCircleFilled(ImVec2(origin.x + p.correction.aim_x * scale,
                                                          origin.y + p.correction.aim_y * scale),
                                                   4, IM_COL32(255, 100, 80, 255));
+                        draw->PopClipRect();
                     }
                 } else
                     section("Your pictures will appear here",
@@ -1400,9 +1583,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             if (stats.inferred)
                 ImGui::TextDisabled("%d x %d  /  %llu frames", stats.width, stats.height,
                                     static_cast<unsigned long long>(stats.inferred));
-            const char* guide_titles[] = {"Getting connected", "Target selection", "Mouse activation",
-                                           "Your saved setups", "Tuning your movement", "Testing your setup",
-                                           "Choosing a model"};
+            const char* guide_titles[] = {"Getting connected", "Target selection",     "Mouse activation",
+                                          "Your saved setups", "Tuning your movement", "Testing your setup",
+                                          "Choosing a model",  "Make it yours"};
             const char* guides[] = {
                 "Start with practice mode to check the controls. Connect your devices when you are ready.",
                 "Raise certainty to filter weak matches. Use the search radius to limit selection, then "
@@ -1414,7 +1597,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 "more gradual. Expand a group for more options.",
                 "Run automatic checks to verify the receiver without moving your real cursor.",
                 "Browse for an ONNX, engine, or PyTorch model. Settings are remembered for each model. "
-                "Performance checks help choose an input size."};
+                "Performance checks help choose an input size.",
+                "Overlay options apply to this preview. Frame collection saves only received images. Model "
+                "switching always turns mouse control off."};
             section(guide_titles[page], guides[page]);
             if (simulate && ImGui::CollapsingHeader("About practice mode")) {
                 hint("The target stays fixed; this is not YOLO detection. The picture does not react to "
@@ -1539,7 +1724,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                                : simulate                  ? "SIMULATOR"
                                                            : "MOUSE DEVICE",
                                stats.pi_ready ? "Connected" : "Waiting"},
-                              {"MOUSE CONTROL", stats.active ? "Active" : stats.armed ? "Ready" : "Off"}}) {
+                              {"MOUSE CONTROL", stats.active  ? "Active"
+                                                : stats.armed ? "Ready"
+                                                              : "Off"}}) {
                 ImGui::TableNextColumn();
                 ImGui::TextDisabled("%s", item.first);
                 ImGui::SameLine();

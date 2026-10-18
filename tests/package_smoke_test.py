@@ -15,10 +15,12 @@ def main():
     root = args.package.resolve()
     suffix = '.exe' if os.name == 'nt' else ''
     for filename in ('receiver_headless' + suffix, 'receiver_verify' + suffix,
+                     'receiver_assist_tests' + suffix,
                      'receiver_scenario_runner' + suffix, 'tools/yolo_omni_worker.py',
                      'tools/omni_support.py', 'tools/mock_pi.py', 'tools/test_sender.py',
                      'README.md', 'docs/README.md', 'docs/GETTING_STARTED.md',
-                     'docs/technical/MODEL_WORKFLOWS.md', 'docs/technical/BUILD.md', 'docs/licenses/json.txt',
+                     'docs/technical/MODEL_WORKFLOWS.md', 'docs/technical/AIMMY_FEATURES.md',
+                     'docs/technical/BUILD.md', 'docs/licenses/json.txt',
                      'docs/licenses/ultralytics.txt', 'profiles/default.json',
                      'models/yolo11n.onnx', 'models/yolo11n.onnx.json',
                      'tests/fault_worker.py', 'src/preprocess_kernel.cuh',
@@ -41,6 +43,10 @@ def main():
                                 check=True, capture_output=True, text=True, timeout=20)
         assert 'armed=0' in result.stdout, result.stdout
         assert (working / 'metrics.csv').stat().st_size > 0
+        subprocess.run([str(root / ('receiver_assist_tests' + suffix))], cwd=working, check=True, timeout=20)
+        subprocess.run([sys.executable, str(root / 'tests/assist_integration_test.py'),
+                        str(root / ('receiver_scenario_runner' + suffix))],
+                       cwd=working, check=True, timeout=45)
         # All worker paths now originate in the extracted package, not the checkout.
         subprocess.run([sys.executable, str(root / 'tests/model_fault_integration_test.py'),
                         str(root / ('receiver_scenario_runner' + suffix))],

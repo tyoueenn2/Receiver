@@ -61,6 +61,26 @@ struct Detection {
     float x = 0, y = 0, w = 0, h = 0, score = 0;
     int cls = 0;
 };
+struct TriggerSettings {
+    bool enabled = false, spray = false;
+    int button = 1, delay_ms = 100, interval_ms = 100, press_ms = 10;
+};
+struct VisualSettings {
+    bool boxes = true, fov = true, confidence = true, tracers = false;
+    int tracer_origin = 0; // bottom, center, top
+    float thickness = 2, corner_radius = 0, opacity = 1, font_size = 14;
+    std::array<float, 3> box_color{.31f, .90f, .63f}, fov_color{.70f, .70f, 1.f};
+};
+struct InterfaceSettings {
+    bool always_on_top = false, model_switch = true, stream_guard = false;
+    int model_switch_key = 220; // Windows OEM pipe key; foreground app only.
+    std::array<float, 3> accent{.19f, .59f, 1.f};
+};
+struct CollectionSettings {
+    bool enabled = false, auto_label = false;
+    int interval_ms = 1000;
+    std::string directory = "datasets";
+};
 struct Settings {
     int version = 1;
     std::string bind_ip = "0.0.0.0", sender_ip = "127.0.0.1", pi_ip = "127.0.0.1", model = "", metadata = "";
@@ -82,6 +102,11 @@ struct Settings {
     TrackingSettings tracking;
     int mouse_backend = 0; // 0: Pi UDP, 1: local Windows test mouse
     int secondary_button = 0;
+    bool constant_tracking = false, cursor_check = false;
+    TriggerSettings trigger;
+    VisualSettings visual;
+    InterfaceSettings ui;
+    CollectionSettings collection;
 };
 void validate(const Settings& s);
 Settings load_settings(const std::string& path);
