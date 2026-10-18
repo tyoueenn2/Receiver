@@ -15,6 +15,8 @@
 #endif
 namespace receiver {
 using nlohmann::json;
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ClassPreferenceSettings, class_id, class_name, mode,
+                                                max_distance)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(TriggerSettings, enabled, spray, button, delay_ms,
                                                 interval_ms, press_ms)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(VisualSettings, boxes, fov, confidence, tracers,
@@ -39,13 +41,17 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend,
     secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
     selected_class_names, inference_fps, auto_size, constant_tracking, cursor_check, trigger, visual, ui,
-    collection, frame_source, capture_output)
+    collection, frame_source, capture_output, class_preference)
 void validate(const Settings& s) {
     if (s.frame_source != "udp" && s.frame_source != "local")
         throw std::runtime_error("Frame source must be udp or local");
     if (s.capture_output < 0 || s.capture_output > 1024)
         throw std::runtime_error("Capture display index must be 0..1024");
     auto range = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
+    const auto& preference = s.class_preference;
+    if (preference.class_id < -1 || preference.class_id > 9999 || preference.class_name.size() > 1024 ||
+        preference.mode < 0 || preference.mode > 1 || !range(preference.max_distance, 0, 1024))
+        throw std::runtime_error("Class preference needs a valid class, type, and 0..1024 pixel distance");
     const auto& v = s.visual;
     const auto& a = s.trigger;
     if (a.button < 1 || a.button > 8 || a.delay_ms < 0 || a.delay_ms > 5000 || a.interval_ms < 10 ||

@@ -109,6 +109,7 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
         s.metadata.clear();
         s.classes.clear();
         s.selected_class_names.clear();
+        s.class_preference = {};
         s.inference_backend = "auto";
         s.auto_size = true;
         s.input_size = 320;

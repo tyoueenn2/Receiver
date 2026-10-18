@@ -32,7 +32,8 @@ def main():
         cases += [('connections',query,target) for query,target in
                   [('prediction','targeting'),('smoothing','movement'),('spray','auto-click'),
                    ('dataset','data-capture'),('mouse sensitivity','movement'),
-                   ('maximum frame age','activation'),('does-not-exist',None)]]
+                   ('maximum frame age','activation'),('class preference','targeting'),
+                   ('proximity','targeting'),('does-not-exist',None)]]
     for page,query,expected in cases:
         pi=MockPi(port=free_port()).start()
         port=free_port()

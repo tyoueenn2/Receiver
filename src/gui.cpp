@@ -66,7 +66,7 @@ constexpr PageInfo settings_pages[] = {
      "maximum"},
     {Page::targeting, "targeting", "Targeting", "ASSISTANCE",
      "Choose what to follow, where to aim, and how to track moving targets.",
-     "detection confidence class fov search radius sticky persistence prediction kalman lead offset "
+     "detection confidence class preference preferred head player proximity distance type fov search radius sticky persistence prediction kalman lead offset "
      "crosshair"},
     {Page::movement, "movement", "Movement", "ASSISTANCE",
      "Adjust sensitivity, smoothing, and the path of each mouse correction.",
@@ -1180,6 +1180,51 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             if (combo("Target priority", &selection, "Closest to crosshair\0Highest confidence\0")) {
                 settings.highest_confidence = selection == 1;
                 changed = true;
+            }
+            section("Class preference", "Prefer a class while keeping the normal target class as fallback.");
+            auto& preference = settings.class_preference;
+            std::string preferred_label = preference.class_id < 0 ? "Off"
+                                          : size_t(preference.class_id) < names.size()
+                                              ? names[size_t(preference.class_id)]
+                                              : "Class " + std::to_string(preference.class_id);
+            if (begin_combo("Preferred class", preferred_label.c_str())) {
+                if (ImGui::Selectable("Off", preference.class_id < 0)) {
+                    preference.class_id = -1;
+                    preference.class_name.clear();
+                    changed = true;
+                }
+                for (size_t i = 0; i < names.size(); ++i) {
+                    ImGui::PushID(int(i));
+                    if (ImGui::Selectable(names[i].c_str(), preference.class_id == int(i))) {
+                        preference.class_id = int(i);
+                        preference.class_name = names[i];
+                        changed = true;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            if (names.empty()) {
+                if (number_input("Preferred class ID", &preference.class_id)) {
+                    preference.class_name.clear();
+                    changed = true;
+                }
+                hint("-1 turns preference off. Class names appear after the model loads.");
+            }
+            if (preference.class_id >= 0) {
+                changed |= combo("Preference type", &preference.mode,
+                                 "Whenever available\0Near the normal target\0");
+                if (preference.mode == 1) {
+                    changed |= slider_float("Maximum association distance", &preference.max_distance,
+                                            0, 512, "%.0f px");
+                    hint("Choose player as Target class and head as Preferred class. A head's center "
+                         "must be inside the selected player's box or within this distance of its edge. "
+                         "A head near another player does not change which player is selected.");
+                } else
+                    hint("An eligible preferred detection takes priority anywhere in the search area. "
+                         "Otherwise the normal target class and priority apply.");
+                hint("Preference can add a class outside the normal class filter. Confidence and search "
+                     "radius still apply. Near mode needs a normal target of a different class.");
             }
             changed |= ImGui::Checkbox("Keep the current target", &settings.persistence);
             if (ImGui::IsItemHovered())

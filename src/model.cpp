@@ -343,6 +343,16 @@ ModelInfo inspect_model(const Settings& s) {
 void reconcile_classes(Settings& s, const std::vector<std::string>& names) {
     if (names.empty())
         return;
+    auto& preference = s.class_preference;
+    if (!preference.class_name.empty()) {
+        auto it = std::find(names.begin(), names.end(), preference.class_name);
+        preference.class_id = it == names.end() ? -1 : int(it - names.begin());
+    }
+    if (preference.class_id < 0 || size_t(preference.class_id) >= names.size()) {
+        preference.class_id = -1;
+        preference.class_name.clear();
+    } else
+        preference.class_name = names[size_t(preference.class_id)];
     if (!s.selected_class_names.empty()) {
         s.classes.clear();
         for (const auto& name : s.selected_class_names) {

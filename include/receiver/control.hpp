@@ -19,6 +19,12 @@ struct TrackingSettings {
     float lead_ms = 100, lead_multiplier = 1, velocity_smoothing_ms = 40, max_lead = 100;
     float sticky_distance = 0, held_radius = 100;
 };
+struct ClassPreferenceSettings {
+    int class_id = -1; // -1: disabled; independent of the normal target-class filter.
+    std::string class_name; // Retain identity if a model's class IDs are reordered.
+    int mode = 0; // 0: whenever available, 1: near the normally selected target.
+    float max_distance = 32; // Preferred center to normal target box, in image pixels.
+};
 class TargetPredictor {
     struct Axis {
         double position = 0, velocity = 0, p00 = 10, p01 = 0, p11 = 10000;
@@ -102,6 +108,7 @@ struct Settings {
     HumanizationSettings humanization;
     DirectionSettings direction;
     TrackingSettings tracking;
+    ClassPreferenceSettings class_preference;
     int mouse_backend = 0; // 0: Pi UDP, 1: local Windows test mouse
     int secondary_button = 0;
     bool constant_tracking = false, cursor_check = false;
@@ -129,6 +136,7 @@ struct Correction {
 };
 class Controller {
     std::optional<Detection> previous_;
+    std::optional<Detection> previous_base_;
     double residual_x_ = 0, residual_y_ = 0, smooth_x_ = 0, smooth_y_ = 0;
     int64_t last_ = 0;
     int64_t acquired_ = 0, jitter_at_ = 0, noise_at_ = 0;
