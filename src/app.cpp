@@ -1,4 +1,5 @@
 #include "receiver/app.hpp"
+#include "receiver/assist.hpp"
 #include "receiver/local_mouse.hpp"
 #include "receiver/model.hpp"
 #include <algorithm>
@@ -158,6 +159,15 @@ void App::configure(const Settings& s, bool reload_model) {
             preview_ = {};
             injected_.release_all(ReleaseReason::configuration_restart, true);
         } else {
+            if (s.constant_tracking != settings_.constant_tracking ||
+                s.trigger.enabled != settings_.trigger.enabled ||
+                s.trigger.spray != settings_.trigger.spray || s.trigger.button != settings_.trigger.button ||
+                s.trigger.delay_ms != settings_.trigger.delay_ms ||
+                s.trigger.interval_ms != settings_.trigger.interval_ms ||
+                s.trigger.press_ms != settings_.trigger.press_ms) {
+                stats_.armed = stats_.active = false;
+                injected_.release_all(ReleaseReason::configuration_restart, true);
+            }
             settings_ = s;
             ++epoch_;
             result_.reset();
@@ -393,7 +403,8 @@ void App::inference_loop() {
         publish(initial);
         stats_.model_message = simulated_ ? "" : "Model ready.";
     }
-    int64_t last_preview = 0, next_inference = 0;
+    int64_t last_preview = 0, next_inference = 0, last_collection = 0;
+    const auto collection_session = std::to_string(random_id());
     while (!stop_) {
         std::optional<Settings> requested;
         std::optional<PerformanceGoal> goal;
@@ -514,6 +525,21 @@ void App::inference_loop() {
             detections = decode_yolo(result.output, result.candidates, result.classes, frame->header.width,
                                      frame->header.height, cfg.input_size, cfg);
         }
+        if (cfg.collection.enabled &&
+            now_ns() - last_collection >= int64_t(cfg.collection.interval_ms) * 1'000'000) {
+            last_collection = now_ns();
+            try {
+                collect_sample(*frame, detections, cfg.collection,
+                               collection_session + "-" + std::to_string(frame->header.session) + "-" +
+                                   std::to_string(frame->header.sequence));
+                std::lock_guard lock(mutex_);
+                ++stats_.collected_frames;
+                stats_.collection_error.clear();
+            } catch (const std::exception& e) {
+                std::lock_guard lock(mutex_);
+                stats_.collection_error = e.what();
+            }
+        }
         auto done = now_ns();
         {
             std::lock_guard lock(mutex_);
@@ -552,6 +578,18 @@ void App::pi_loop() {
         local_mouse = std::make_unique<LocalMouse>();
     auto input_fresh = [&](int64_t at) { return local_mouse ? local_mouse->fresh(at) : gate.fresh(at); };
     Controller controller;
+    AutoTrigger trigger;
+    uint64_t auto_command = 0;
+    auto cancel_auto_trigger = [&](bool forget_target = true) {
+        if (forget_target)
+            trigger.reset();
+        else
+            trigger.suspend();
+        if (auto_command) {
+            injected_.release_all(ReleaseReason::manual, true);
+            auto_command = 0;
+        }
+    };
     MotionTracker motion_tracker;
     bool was_active = false;
     ReleaseReason unsafe_reason = ReleaseReason::none;
@@ -846,11 +884,17 @@ void App::pi_loop() {
         stats_.motion_available = input_ok && physical_motion.available;
         stats_.mouse_speed = stats_.motion_available ? std::hypot(physical_motion.x, physical_motion.y) : 0;
         bool motion_ok = !settings_.direction.enabled || stats_.motion_available;
+        bool cursor_ok = true;
+#ifdef _WIN32
+        if (local_mouse && settings_.cursor_check) {
+            CURSORINFO cursor{};
+            cursor.cbSize = sizeof(cursor);
+            cursor_ok = GetCursorInfo(&cursor) && !(cursor.flags & CURSOR_SHOWING);
+        }
+#endif
         bool active = stats_.armed && !stats_.model_loading && !stats_.benchmarking && !proxy_error &&
-                      sender_ok && input_ok && motion_ok &&
-                      ((gate.state.physical & (1u << (settings_.activation_button - 1))) ||
-                       (settings_.secondary_button &&
-                        (gate.state.physical & (1u << (settings_.secondary_button - 1)))));
+                      sender_ok && input_ok && motion_ok && cursor_ok &&
+                      activation_held(gate.state.physical, settings_);
         stats_.pi_ready = input_ok;
         stats_.physical = gate.state.physical;
         if (active != was_active) {
@@ -858,6 +902,8 @@ void App::pi_loop() {
             result_.reset();
             controller.reset();
             was_active = active;
+            if (!active && settings_.trigger.enabled)
+                injected_.release_all(ReleaseReason::manual, true);
         }
         stats_.active = active;
         stats_.status = !stats_.error.empty() ? "Error - stop and restart"
@@ -865,16 +911,20 @@ void App::pi_loop() {
                         : !input_ok           ? "Waiting for fresh Pi telemetry"
                         : !stats_.armed       ? "Disarmed"
                         : !motion_ok ? "Waiting for cumulative physical motion telemetry (UPT3 required)"
+                        : !cursor_ok ? "Paused - local cursor is visible"
                         : !active    ? "Armed - hold activation button"
                                      : "Active - waiting for fresh detection";
         if (!active || epoch_ != last_epoch) {
             stats_.assist_strength = 0;
             controller.reset();
+            cancel_auto_trigger(!stats_.armed ||
+                                (input_ok && !activation_held(gate.state.physical, settings_)));
             last_epoch = epoch_;
         }
         if (active && result_ && (!result_->deadline || now > result_->deadline)) {
             stats_.assist_strength = 0;
             controller.reset();
+            cancel_auto_trigger(false);
             stats_.status = "Active - waiting for fresh capture";
         }
         if (!active || !result_ || result_->id == last_result)
@@ -884,6 +934,7 @@ void App::pi_loop() {
         if (r.epoch != epoch_ || !r.deadline || now > r.deadline ||
             now - r.frame->first_ns > int64_t(settings_.max_age_ms) * 1'000'000) {
             controller.reset();
+            cancel_auto_trigger(false);
             ++stats_.stale;
             continue;
         }
@@ -895,9 +946,44 @@ void App::pi_loop() {
         if (preview_.frame && preview_.frame->header.sequence == r.frame->header.sequence)
             preview_.correction = correction;
         if (!correction.target) {
+            cancel_auto_trigger();
             stats_.status = "Active - no target";
             continue;
         }
+        stats_.trigger_status = settings_.trigger.enabled ? "Waiting for crosshair dwell" : "Off";
+        if (settings_.trigger.enabled) {
+            const auto injection = injected_.metrics();
+            if (!injection.pending_clicks)
+                auto_command = 0;
+            const auto state = injected_.snapshot();
+            const bool supported =
+                !local_mouse && injection.has_upt3 && injection.endpoint_poll_us && !state.release_barrier;
+            const bool occupied = injection.pending_clicks || ((gate.state.physical | state.mask) &
+                                                               (1u << (settings_.trigger.button - 1)));
+            if (!supported) {
+                trigger.suspend();
+                stats_.trigger_status = "Needs Pi UPT3 click support";
+            } else if (trigger.update(correction, r.frame->header.width, r.frame->header.height, settings_,
+                                      now, !occupied)) {
+                const auto send_at = now_ns();
+                if (send_at <= r.deadline && input_fresh(send_at)) {
+                    try {
+                        auto_command = injected_.click(
+                            settings_.trigger.button, 1,
+                            std::chrono::microseconds(std::max<uint32_t>(settings_.trigger.press_ms * 1000u,
+                                                                         injection.endpoint_poll_us)),
+                            std::chrono::microseconds(0));
+                        ++stats_.auto_triggered;
+                        stats_.trigger_status = "Click submitted";
+                    } catch (const std::exception& e) {
+                        stats_.trigger_status = e.what();
+                        trigger.reset();
+                    }
+                }
+            } else if (occupied)
+                stats_.trigger_status = "Waiting for button or pending click";
+        } else
+            cancel_auto_trigger();
         if (correction.dx || correction.dy) {
             // Serialize final gating, current complete synthetic snapshot and send against disarm/config
             // changes.

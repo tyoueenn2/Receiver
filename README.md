@@ -27,6 +27,12 @@ protocols, tests and troubleshooting. Downloadable builds support practice mode
 and native `.pt` models with the Python runtime installed; ONNX and `.engine`
 models require a TensorRT build.
 
+The interface includes continuous tracking, timed auto trigger and spray, configurable
+preview overlays, Aimmy config import, model-switch shortcuts, and local frame collection.
+See the [feature guide](docs/technical/AIMMY_FEATURES.md) for setup and compatibility.
+
+![Receiver Aim controls and live preview](docs/images/interface.png)
+
 ## Repository layout
 
 ```text

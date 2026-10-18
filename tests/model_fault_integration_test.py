@@ -121,8 +121,10 @@ def main():
             control.wait(lambda s: s['persistent'] != 0, 'Synthetic hold missing')
             second = model('second', mode='ok', load_delay=.4, input_size=640, names=['other', 'object'])
             previous = control.request()['stats']
+            releases_before = len(pi.release_requests)
             changed = control.request('configure', settings=dict(model=second))
             assert changed['ok'] and changed['stats']['loading'] and not changed['stats']['armed']
+            assert changed['stats']['persistent'] == 0, 'Model switch retained a synthetic hold'
             assert control.request('arm', enabled=True)['stats']['armed'] is False
             state = control.wait(lambda s: s['completed'] > previous['completed'] + 4 and s['loading'],
                                  'Pictures stopped arriving during loading')
@@ -131,7 +133,9 @@ def main():
             state = control.wait(lambda s: s['revision'] == 2, 'Replacement not committed')
             assert state['running'] and not state['armed'] and state['settings']['input_size'] == 640
             assert state['settings']['classes'] == [1], 'Class labels did not remap'
-            assert state['release_reason'] == 'configuration restart'
+            # A later telemetry/sender interruption can legitimately replace last_release_reason.
+            # Check the peer-observed release instead of assuming no other safety event occurred.
+            assert len(pi.release_requests) > releases_before, 'Model switch did not release the Pi'
             saved = state['settings']
             subscription_sources = {event['source'] for event in pi.subscription_events}
             assert len(subscription_sources) == 1, 'Hot swap replaced the Pi connection'

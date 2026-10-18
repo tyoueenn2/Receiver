@@ -34,6 +34,8 @@ struct Stats {
     std::string status = "Stopped", backend = "Not loaded", error;
     std::vector<std::string> model_classes;
     bool model_loading = false, benchmarking = false;
+    uint64_t collected_frames = 0, auto_triggered = 0;
+    std::string collection_error, trigger_status;
     uint64_t model_revision = 0;
     std::string model_message, model_error;
     BenchmarkReport benchmark;

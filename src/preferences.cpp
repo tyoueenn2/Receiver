@@ -98,6 +98,11 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
         s.activation_button = base.activation_button;
         s.secondary_button = base.secondary_button;
         s.preview = base.preview;
+        s.ui = base.ui;
+        s.visual = base.visual;
+        s.collection = base.collection;
+        s.cursor_check = base.cursor_check;
+        s.constant_tracking = base.constant_tracking;
     } else {
         s.metadata.clear();
         s.classes.clear();
