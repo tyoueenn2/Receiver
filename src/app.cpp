@@ -1,4 +1,5 @@
 #include "receiver/app.hpp"
+#include "receiver/capture.hpp"
 #include "receiver/assist.hpp"
 #include "receiver/local_mouse.hpp"
 #include "receiver/model.hpp"
@@ -36,11 +37,18 @@ void App::fail(const std::string& error, ReleaseReason reason) {
 void App::start(const Settings& settings, bool simulated) {
     stop();
     validate(settings);
-    address(settings.bind_ip, settings.frame_port);
-    auto sender = address(settings.sender_ip, 0);
+    const bool local_capture = settings.frame_source == "local";
+    if (local_capture && !local_capture_supported())
+        throw std::runtime_error("Local desktop capture requires Windows 10/11. Select the UDP frame source.");
+    Address sender{};
+    if (!local_capture) {
+        address(settings.bind_ip, settings.frame_port);
+        sender = address(settings.sender_ip, 0);
+    }
     auto pi = address(settings.mouse_backend == 1 ? "127.0.0.1" : settings.pi_ip, settings.pi_port);
     auto local = address("127.0.0.1", 0);
-    if (simulated && (sender.ip != local.ip || (settings.mouse_backend == 0 && pi.ip != local.ip)))
+    if (simulated && ((!local_capture && sender.ip != local.ip) ||
+                      (settings.mouse_backend == 0 && pi.ip != local.ip)))
         throw std::runtime_error("Simulation requires both sender and Pi to be 127.0.0.1");
     {
         std::lock_guard lock(mutex_);
@@ -65,13 +73,14 @@ void App::start(const Settings& settings, bool simulated) {
 #ifdef _WIN32
     timeBeginPeriod(1);
 #endif
-    receive_thread_ = std::thread([this] {
-        try {
-            receive_loop();
-        } catch (const std::exception& e) {
-            fail(e.what(), ReleaseReason::sender_loss);
-        }
-    });
+    if (!local_capture)
+        receive_thread_ = std::thread([this] {
+            try {
+                receive_loop();
+            } catch (const std::exception& e) {
+                fail(e.what(), ReleaseReason::sender_loss);
+            }
+        });
     inference_thread_ = std::thread([this] {
         try {
             inference_loop();
@@ -89,7 +98,7 @@ void App::start(const Settings& settings, bool simulated) {
     });
 }
 void App::stop() {
-    bool had_threads = receive_thread_.joinable();
+    bool had_threads = inference_thread_.joinable();
     {
         std::lock_guard lock(mutex_);
         if (had_threads && stats_.error.empty())
@@ -178,7 +187,7 @@ void App::configure(const Settings& s, bool reload_model) {
     control_wake_.notify();
     cv_.notify_all();
     if (restart)
-        throw std::runtime_error("Stop and restart to change network connections or mouse connection");
+        throw std::runtime_error("Stop and restart to change frame source, capture display, or connections");
 }
 Settings App::settings() const {
     std::lock_guard lock(mutex_);
@@ -404,6 +413,9 @@ void App::inference_loop() {
         stats_.model_message = simulated_ ? "" : "Model ready.";
     }
     int64_t last_preview = 0, next_inference = 0, last_collection = 0;
+    std::unique_ptr<LocalCapture> capture;
+    if (initial.frame_source == "local")
+        capture = std::make_unique<LocalCapture>(initial.capture_output);
     const auto collection_session = std::to_string(random_id());
     while (!stop_) {
         std::optional<Settings> requested;
@@ -478,6 +490,30 @@ void App::inference_loop() {
             control_wake_.notify();
             continue;
         }
+        if (capture) {
+            int size;
+            {
+                std::unique_lock lock(mutex_);
+                const auto at = now_ns();
+                if (at < next_inference)
+                    cv_.wait_for(lock, std::chrono::nanoseconds(next_inference - at),
+                                 [&] { return stop_ || pending_model_ || pending_benchmark_; });
+                if (stop_ || pending_model_ || pending_benchmark_)
+                    continue;
+                size = settings_.input_size;
+            }
+            // Capture only when inference is ready. DXGI retains the newest desktop;
+            // no transport, compression, conversion, or extra capture thread is needed.
+            auto picture = capture->next(size);
+            sender_seen_ = now_ns(); // A successful bounded poll also proves capture is healthy.
+            std::lock_guard lock(mutex_);
+            stats_.synchronized = true; // Local timestamps already share our steady clock.
+            if (!picture)
+                continue;
+            stats_.width = picture->header.width;
+            stats_.height = picture->header.height;
+            latest_ = std::move(picture);
+        }
         std::shared_ptr<const Frame> frame;
         Settings cfg;
         uint64_t epoch;
@@ -500,7 +536,8 @@ void App::inference_loop() {
             cfg = settings_;
             epoch = epoch_;
             next_inference = cfg.inference_fps ? at + 1'000'000'000ll / cfg.inference_fps : 0;
-            auto age = clock_.age_upper(frame->header.capture_ns, at);
+            auto age = capture ? std::optional<int64_t>(std::max<int64_t>(0, at - frame->header.capture_ns))
+                               : clock_.age_upper(frame->header.capture_ns, at);
             if (age) {
                 stats_.frame_age_ms = double(*age) / 1e6;
                 const int64_t horizon = int64_t(cfg.max_age_ms) * 1'000'000;
@@ -907,7 +944,8 @@ void App::pi_loop() {
         }
         stats_.active = active;
         stats_.status = !stats_.error.empty() ? "Error - stop and restart"
-                        : !sender_ok          ? "Waiting for capture sender"
+                        : !sender_ok          ? (settings_.frame_source == "local" ? "Waiting for local capture"
+                                                                                 : "Waiting for capture sender")
                         : !input_ok           ? "Waiting for fresh Pi telemetry"
                         : !stats_.armed       ? "Disarmed"
                         : !motion_ok ? "Waiting for cumulative physical motion telemetry (UPT3 required)"

@@ -89,6 +89,8 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
     if (models_.contains(identity)) {
         s = settings_from_json(models_[identity]);
         // Connections and activation are application preferences, not properties of a model.
+        s.frame_source = base.frame_source;
+        s.capture_output = base.capture_output;
         s.bind_ip = base.bind_ip;
         s.sender_ip = base.sender_ip;
         s.pi_ip = base.pi_ip;

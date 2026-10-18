@@ -1,4 +1,5 @@
 #include "receiver/app.hpp"
+#include "receiver/capture.hpp"
 #include <atomic>
 #include <csignal>
 #include <iomanip>
@@ -133,7 +134,18 @@ int main(int argc, char** argv) {
                 cfg = receiver::load_settings(profile);
             } else if (a == "--simulate")
                 simulate = true;
-            else if (a == "--model")
+            else if (a == "--frame-source")
+                cfg.frame_source = value();
+            else if (a == "--capture-output")
+                cfg.capture_output = std::stoi(value());
+            else if (a == "--list-capture-outputs") {
+                if (!receiver::local_capture_supported())
+                    throw std::runtime_error("Local desktop capture requires Windows 10/11");
+                for (const auto& output : receiver::capture_outputs())
+                    std::cout << output.index << ": " << output.name << " " << output.width << 'x'
+                              << output.height << '\n';
+                return 0;
+            } else if (a == "--model")
                 cfg.model = value();
             else if (a == "--backend")
                 cfg.inference_backend = value();
@@ -172,6 +184,7 @@ int main(int argc, char** argv) {
                 std::cout
                     << "receiver_headless [--profile FILE] [--simulate] [--arm] [--seconds N]\n"
                        "  [--model FILE] [--backend auto|tensorrt|yolo_omni]\n"
+                       "  [--frame-source udp|local] [--capture-output N] [--list-capture-outputs]\n"
                        "  [--omni-python EXE] [--omni-source DIR] [--omni-device cuda:0|cpu]\n"
                        "  [--metrics FILE] [--log-level quiet|error|info|debug|trace]\n"
                        "  [--log-interval-ms N] [--quiet|--verbose|--trace]\n"
@@ -211,7 +224,9 @@ int main(int argc, char** argv) {
         }
         {
             std::ostringstream line;
-            line << "configuration bind=" << cfg.bind_ip << ':' << cfg.frame_port
+            line << "configuration frame_source=" << cfg.frame_source
+                 << " capture_output=" << cfg.capture_output
+                 << " bind=" << cfg.bind_ip << ':' << cfg.frame_port
                  << " sender=" << cfg.sender_ip << " pi=" << cfg.pi_ip << ':' << cfg.pi_port
                  << " model=" << std::quoted(cfg.model) << " input=" << cfg.input_size
                  << " max_age_ms=" << cfg.max_age_ms << " mouse_backend=" << cfg.mouse_backend;

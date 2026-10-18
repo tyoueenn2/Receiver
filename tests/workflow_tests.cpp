@@ -235,6 +235,10 @@ void app_workflows() {
     until([&] { return !app.stats().benchmarking; });
     CHECK(app.stats().running && app.settings().model == "first.pt" && app.stats().benchmark.samples.empty());
     selected = app.settings();
+    selected.frame_source = "local";
+    rejects([&] { app.configure(selected); });
+    CHECK(app.settings().frame_source == "udp" && !app.stats().armed);
+    selected = app.settings();
     selected.sender_ip = "127.0.0.2";
     rejects([&] { app.configure(selected); });
     CHECK(app.settings().sender_ip == "127.0.0.1");
@@ -299,16 +303,20 @@ int main() {
         CHECK(another.auto_size && another.classes.empty() && another.inference_fps == 0);
         another.confidence = .2f;
         another.sender_ip = "127.0.0.5";
+        another.frame_source = "local";
+        another.capture_output = 2;
         prefs.save(another, "");
         auto restored = prefs.select_model(another, fixed_path.string());
         CHECK(restored.confidence == .75f && restored.input_size == 640 && restored.inference_fps == 80);
         CHECK(restored.sender_ip == "127.0.0.5" &&
               restored.selected_class_names == std::vector<std::string>{"second"});
+        CHECK(restored.frame_source == "local" && restored.capture_output == 2);
         reconcile_classes(restored, {"second", "first"});
         CHECK(restored.classes == std::vector<int>{0});
         Preferences reloaded(root / "preferences");
         reloaded.load();
         CHECK(settings_json(reloaded.current) == settings_json(prefs.current));
+        CHECK(reloaded.current.frame_source == "local" && reloaded.current.capture_output == 2);
         CHECK(reloaded.select_model(another, fixed_path.string()).confidence == .75f);
         auto library = reloaded.library();
         CHECK(
@@ -324,6 +332,12 @@ int main() {
         rejects([&] { save_settings(invalid, profile.string()); });
         CHECK(load_settings(profile.string()).inference_fps == 80);
         CHECK(settings_from_json(nlohmann::json{{"version", 1}}).auto_size);
+        CHECK(settings_from_json(nlohmann::json{{"version", 1}}).frame_source == "udp");
+        CHECK(settings_from_json(nlohmann::json{{"frame_source", "local"}, {"capture_output", 3}})
+                  .capture_output == 3);
+        rejects([&] { settings_from_json(nlohmann::json{{"frame_source", "invalid"}}); });
+        rejects([&] { settings_from_json(nlohmann::json{{"capture_output", -1}}); });
+        rejects([&] { settings_from_json(nlohmann::json{{"capture_output", 1025}}); });
         CHECK(!settings_from_json(nlohmann::json{{"version", 1}, {"input_size", 256}}).auto_size);
         BenchmarkReport report;
         report.samples = {{160, 10, 400, 2, 3, ""}, {320, 10, 350, 3, 4, ""}, {512, 10, 200, 5, 6, ""}};

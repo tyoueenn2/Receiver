@@ -369,7 +369,8 @@ Settings prepare_model_settings(Settings s) {
     return s;
 }
 bool connection_settings_changed(const Settings& a, const Settings& b) {
-    return a.bind_ip != b.bind_ip || a.sender_ip != b.sender_ip || a.pi_ip != b.pi_ip ||
+    return a.frame_source != b.frame_source || a.capture_output != b.capture_output ||
+           a.bind_ip != b.bind_ip || a.sender_ip != b.sender_ip || a.pi_ip != b.pi_ip ||
            a.frame_port != b.frame_port || a.pi_port != b.pi_port || a.mouse_backend != b.mouse_backend;
 }
 bool model_settings_changed(const Settings& a, const Settings& b) {
