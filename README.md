@@ -1,8 +1,8 @@
 # Receiver
 
-Receiver processes image frames with YOLO models and sends mouse commands to a
-Raspberry Pi USB proxy. Windows includes a desktop interface; Linux runs from the
-command line.
+Receiver processes image frames with YOLO models and sends mouse commands through
+a Raspberry Pi USB proxy, MAKCU, or local Windows mouse output. Windows includes a
+desktop interface; Linux runs from the command line.
 
 ## Features
 

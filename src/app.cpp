@@ -3,6 +3,7 @@
 #include "receiver/capture.hpp"
 #include "receiver/assist.hpp"
 #include "receiver/local_mouse.hpp"
+#include "receiver/makcu.hpp"
 #include "receiver/model.hpp"
 #include <algorithm>
 #include <cmath>
@@ -46,7 +47,7 @@ void App::start(const Settings& settings, bool simulated) {
         address(settings.bind_ip, settings.frame_port);
         sender = address(settings.sender_ip, 0);
     }
-    auto pi = address(settings.mouse_backend == 1 ? "127.0.0.1" : settings.pi_ip, settings.pi_port);
+    auto pi = address(settings.mouse_backend == 0 ? settings.pi_ip : "127.0.0.1", settings.pi_port);
     auto local = address("127.0.0.1", 0);
     if (simulated && ((!local_capture && sender.ip != local.ip) ||
                       (settings.mouse_backend == 0 && pi.ip != local.ip)))
@@ -619,7 +620,8 @@ void App::pi_loop() {
         initial = settings_;
     }
     UdpSocket socket("0.0.0.0", 0);
-    auto pi = address(initial.mouse_backend == 1 ? "127.0.0.1" : initial.pi_ip, initial.pi_port);
+    const bool pi_udp = initial.mouse_backend == 0;
+    auto pi = address(pi_udp ? initial.pi_ip : "127.0.0.1", initial.pi_port);
     const uint64_t client = random_id();
     TelemetryGate gate;
     gate.reset(client);
@@ -628,9 +630,14 @@ void App::pi_loop() {
     int64_t renewal = 0, last_snapshot = 0;
     bool have_sent_revision = false;
     std::unique_ptr<LocalMouse> local_mouse;
+    std::unique_ptr<MakcuMouse> makcu_mouse;
     if (initial.mouse_backend == 1)
         local_mouse = std::make_unique<LocalMouse>();
-    auto input_fresh = [&](int64_t at) { return local_mouse ? local_mouse->fresh(at) : gate.fresh(at); };
+    else if (initial.mouse_backend == 2)
+        makcu_mouse = std::make_unique<MakcuMouse>(initial.makcu_port);
+    auto input_fresh = [&](int64_t at) {
+        return local_mouse ? local_mouse->fresh(at) : makcu_mouse ? makcu_mouse->fresh(at) : gate.fresh(at);
+    };
     Controller controller;
     AutoTrigger trigger;
     uint64_t auto_command = 0;
@@ -661,18 +668,21 @@ void App::pi_loop() {
     bool last_direction = initial.direction.enabled, was_input_fresh = false;
     std::array<uint8_t, 2048> bytes{};
     while (true) {
+        // Only Pi UDP needs the shutdown interval for synthetic-button release acknowledgments.
+        if (stop_ && !pi_udp)
+            break;
         auto loop_start = now_ns();
         if (stop_ && !shutdown_deadline)
             shutdown_deadline = loop_start + 100'000'000;
         if (shutdown_deadline && loop_start >= shutdown_deadline)
             break;
-        control_wake_.wait(local_mouse ? nullptr : &socket, bool(local_mouse));
+        control_wake_.wait(pi_udp ? &socket : nullptr, bool(local_mouse));
         auto now = now_ns();
 #ifdef _WIN32
         if (GetAsyncKeyState(VK_DELETE) & 0x8000)
             arm(false);
 #endif
-        if (!local_mouse) {
+        if (pi_udp) {
             bool need_motion;
             {
                 std::lock_guard lock(mutex_);
@@ -725,8 +735,8 @@ void App::pi_loop() {
         }
         Address from;
         int n = 0;
-        if (local_mouse) {
-            gate.state = local_mouse->poll();
+        if (!pi_udp) {
+            gate.state = local_mouse ? local_mouse->poll() : makcu_mouse->poll();
             float window;
             {
                 std::lock_guard lock(mutex_);
@@ -837,8 +847,8 @@ void App::pi_loop() {
             }
         }
         const bool input_ok = input_fresh(now);
-        const bool peer_lost = !local_mouse && had_input && was_input_fresh && !input_ok;
-        const bool peer_recovered = !local_mouse && !was_input_fresh && input_ok;
+        const bool peer_lost = pi_udp && had_input && was_input_fresh && !input_ok;
+        const bool peer_recovered = pi_udp && !was_input_fresh && input_ok;
         const auto seen = sender_seen_.load();
         const bool sender_ok = local_mouse || (seen && now >= seen && now - seen <= 100'000'000);
         bool have_error = false;
@@ -853,7 +863,7 @@ void App::pi_loop() {
             next_unsafe = ReleaseReason::pi_error;
         else if (seen && !sender_ok)
             next_unsafe = ReleaseReason::sender_loss;
-        else if (!local_mouse && had_input && !input_ok)
+        else if (pi_udp && had_input && !input_ok)
             next_unsafe = ReleaseReason::stale_telemetry;
         if (!shutdown_deadline && next_unsafe != ReleaseReason::none && next_unsafe != unsafe_reason)
             injected_.release_all(next_unsafe, true);
@@ -881,7 +891,7 @@ void App::pi_loop() {
 
         // Requests and snapshots use the same persistent socket. No state-manager mutex is
         // held across a socket operation, and ReleaseAll requests are always selected first.
-        if (!local_mouse) {
+        if (pi_udp) {
             auto state = injected_.snapshot();
             bool allow_schedules = false;
             {
@@ -961,14 +971,15 @@ void App::pi_loop() {
         }
         stats_.active = active;
         stats_.status = !stats_.error.empty() ? "Error - stop and restart"
-                        : !sender_ok          ? (settings_.frame_source == "local" ? "Waiting for local capture"
-                                                                                 : "Waiting for capture sender")
-                        : !input_ok           ? "Waiting for fresh Pi telemetry"
-                        : !stats_.armed       ? "Disarmed"
-                        : !motion_ok ? "Waiting for cumulative physical motion telemetry (UPT3 required)"
-                        : !cursor_ok ? "Paused - local cursor is visible"
-                        : !active    ? "Armed - hold activation button"
-                                     : "Active - waiting for fresh detection";
+                        : !sender_ok    ? (settings_.frame_source == "local" ? "Waiting for local capture"
+                                                                             : "Waiting for capture sender")
+                        : !input_ok     ? (makcu_mouse ? "Waiting for MAKCU serial response"
+                                                       : "Waiting for fresh mouse input")
+                        : !stats_.armed ? "Disarmed"
+                        : !motion_ok    ? "Waiting for cumulative physical motion telemetry (UPT3 required)"
+                        : !cursor_ok    ? "Paused - local cursor is visible"
+                        : !active       ? "Armed - hold activation button"
+                                        : "Active - waiting for fresh detection";
         if (!active || epoch_ != last_epoch) {
             stats_.assist_strength = 0;
             controller.reset();
@@ -1012,7 +1023,7 @@ void App::pi_loop() {
                 auto_command = 0;
             const auto state = injected_.snapshot();
             const bool supported =
-                !local_mouse && injection.has_upt3 && injection.endpoint_poll_us && !state.release_barrier;
+                pi_udp && injection.has_upt3 && injection.endpoint_poll_us && !state.release_barrier;
             const bool occupied = injection.pending_clicks || ((gate.state.physical | state.mask) &
                                                                (1u << (settings_.trigger.button - 1)));
             if (!supported) {
@@ -1050,11 +1061,15 @@ void App::pi_loop() {
             }
             auto state = injected_.snapshot();
             auto packet = movement(sequence++, correction.dx, correction.dy, 0, 0, state.wire_mask());
-            if (!(local_mouse ? local_mouse->send(correction.dx, correction.dy) : socket.send(packet, pi))) {
+            const bool submitted = local_mouse   ? local_mouse->send(correction.dx, correction.dy)
+                                   : makcu_mouse ? makcu_mouse->send(correction.dx, correction.dy)
+                                                 : socket.send(packet, pi);
+            if (!submitted) {
                 stats_.armed = false;
-                stats_.error = local_mouse ? "Windows blocked local mouse output. Use a normal desktop "
-                                             "window at the same privilege level."
-                                           : "Pi command send failed";
+                stats_.error = local_mouse   ? "Windows blocked local mouse output. Use a normal desktop "
+                                               "window at the same privilege level."
+                               : makcu_mouse ? "MAKCU serial movement failed. Stop and reconnect the device."
+                                             : "Pi command send failed";
                 ++epoch_;
                 controller.reset();
                 injected_.release_all(local_mouse ? ReleaseReason::gpu_error : ReleaseReason::pi_error, true);

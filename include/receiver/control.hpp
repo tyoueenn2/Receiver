@@ -118,7 +118,8 @@ struct Settings {
     TrackingSettings tracking;
     ClassPreferenceSettings class_preference;
     ColorSettings color;
-    int mouse_backend = 0; // 0: Pi UDP, 1: local Windows test mouse
+    int mouse_backend = 0; // 0: Pi UDP, 1: local Windows test mouse, 2: MAKCU serial
+    std::string makcu_port;
     int secondary_button = 0;
     bool constant_tracking = false, cursor_check = false;
     TriggerSettings trigger;

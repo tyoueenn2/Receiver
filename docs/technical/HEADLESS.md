@@ -37,6 +37,10 @@ The session starts disarmed unless `--arm` is supplied. See [local capture](LOCA
 
 The headless executable logs lifecycle changes and a status summary every second by default. It writes normal logs to standard output and errors to standard error, making it suitable for a terminal, systemd, or another service supervisor.
 
+Select mouse output with `--mouse-backend pi|local|makcu`. MAKCU also needs
+`--makcu-port COM3` (Windows) or `--makcu-port /dev/ttyACM0` (Linux). These settings
+can also be saved in a profile. See [MAKCU](MAKCU.md) for setup and limitations.
+
 - `--log-level quiet|error|info|debug|trace` controls detail. `info` is the default; `debug` adds network, output, retry, and drop counters; `trace` also adds latency percentiles, clock uncertainty, control strength, and GPU memory.
 - `--log-interval-ms N` changes the periodic summary interval from its 1000 ms default. Use `0` to disable periodic summaries while retaining lifecycle and action messages.
 - `--quiet`, `--verbose`, and `--trace` are shortcuts for quiet, debug, and trace logging.

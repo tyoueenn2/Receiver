@@ -97,6 +97,7 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
         s.frame_port = base.frame_port;
         s.pi_port = base.pi_port;
         s.mouse_backend = base.mouse_backend;
+        s.makcu_port = base.makcu_port;
         s.activation_button = base.activation_button;
         s.secondary_button = base.secondary_button;
         s.preview = base.preview;
@@ -106,6 +107,11 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
         s.cursor_check = base.cursor_check;
         s.constant_tracking = base.constant_tracking;
         s.color = base.color; // Color ranges and target source are application preferences.
+        if (s.mouse_backend == 2) {
+            s.direction.enabled = false;
+            if (s.tracking.fov_button > 5)
+                s.tracking.fov_button = base.tracking.fov_button;
+        }
     } else {
         s.metadata.clear();
         s.classes.clear();

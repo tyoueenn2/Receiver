@@ -5,6 +5,7 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 
 | Check | What it verifies |
 | --- | --- |
+| MAKCU on Linux and Windows | Dedicated jobs build the serial backend and run protocol/profile tests without hardware. Linux also runs the real receiver against pseudo-terminal firmware, checking baud negotiation, button activation/release, stale frames, response timeouts and unplugging. Full native and sanitizer suites include these checks too. |
 | Linux GCC Release and Clang Debug | Native compilation, core tests, independent UDP peers, worker processes and model workflows on real Linux runners |
 | Windows MSVC Release and Debug | The same checks plus rendering all eleven DirectX GUI pages at normal and minimum widths, enabled preference controls, search routing and the read-only mouse reader |
 | Separate preview window | A real second HWND renders known video pixels; native resize, close, reopen and a minimized main window are checked while disarmed. Both Windows configurations repeat the lifecycle test three times, and the extracted Windows package reruns it outside the checkout. |
@@ -44,7 +45,7 @@ full worker fault/cleanup test three times in addition to the ordinary suite.
 
 Each native job uploads JUnit results, CTest failure logs, model fault reports and
 Windows GUI screenshots, including when a test fails. Sanitizer results are retained
-separately. The CUDA job uploads compiled PTX. Full command output is also available
+separately. MAKCU jobs upload their own JUnit report and diagnostics. The CUDA job uploads compiled PTX. Full command output is also available
 in the Actions job log.
 
 Release configurations produce `Receiver-ubuntu-24.04` and `Receiver-windows-2022`
