@@ -10,6 +10,7 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 | Linux Clang ASan + UBSan | Memory errors, leaks and undefined behavior in the full native/process/network suite |
 | Repeated workflows | 20 runs per native build and 10 sanitized runs of reload, rollback, settings and the class-preference pipeline |
 | Class preference pipeline | Real worker tensors, UDP frames and Pi output verify global preference, target-bound association, live edits, model changes, fallback and stale-video gating |
+| HSV targeting | RGB/BGRA matching, wrapped hue, clipping, offsets and profiles; real App/UDP tests verify model-free startup, hybrid box selection, fallback, mode transitions and stale-video gating. The pipeline also runs in repeated stress and extracted-package checks; Windows renders both color modes at minimum width. |
 | CPU model inference | A checkpoint generated from the pinned YOLO-Omni fork runs through the real worker; its output matches direct PyTorch inference |
 | Preprocessing reference | RGB/BGRA, rectangular/odd images and 1-pixel dimensions match independent NumPy bilinear letterboxing |
 | ONNX schema oracle | 19 models generated with the official ONNX schema verify fixed/dynamic image sizes, names and rejected formats |

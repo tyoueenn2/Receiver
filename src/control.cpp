@@ -1,4 +1,5 @@
 #include "receiver/control.hpp"
+#include "receiver/color.hpp"
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -149,8 +150,8 @@ void Controller::reset() {
     jitter_x_ = jitter_y_ = noise_from_ = noise_to_ = 0;
 }
 Correction Controller::update(const std::vector<Detection>& ds, int width, int height, const Settings& s,
-                              const Telemetry& limits, int64_t now, MotionEstimate motion,
-                              int64_t capture_ns) {
+                              const Telemetry& limits, int64_t now, MotionEstimate motion, int64_t capture_ns,
+                              const ColorMask* colors) {
     const float rx = s.reference_x < 0 ? width * .5f : s.reference_x,
                 ry = s.reference_y < 0 ? height * .5f : s.reference_y;
     auto point = [&](const Detection& d) {
@@ -210,10 +211,20 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     };
     const auto& preference = s.class_preference;
     const bool prefer = preference.class_id >= 0;
-    const bool nearby = prefer && preference.mode == 1;
+    const bool nearby = s.color.mode != 1 && prefer && preference.mode == 1;
     const Detection* best = nullptr;
     const Detection* base = nullptr;
-    if (nearby) {
+    Detection color_target;
+    std::optional<ColorAim> color_aim;
+    const bool have_colors = colors && colors->width == width && colors->height == height;
+    if (s.color.mode == 1) {
+        if (have_colors)
+            color_aim = colors->highest({0, 0, float(width), float(height), 1, 0}, rx, ry, radius, s.color);
+        if (color_aim) {
+            color_target = {color_aim->x - .5f, color_aim->y - .5f, 1, 1, 1, 0};
+            best = &color_target;
+        }
+    } else if (nearby) {
         base = select([&](const Detection& d) { return d.cls != preference.class_id && normal(d); },
                       previous_base_, priority);
         if (base) {
@@ -245,6 +256,8 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
         reset();
         return {};
     }
+    if (s.color.mode == 2 && have_colors)
+        color_aim = colors->highest(*best, rx, ry, radius, s.color);
     bool same = previous_ && matches(*previous_, *best) &&
                 (!nearby || (previous_base_ && base && matches(*previous_base_, *base)));
     if (!same) {
@@ -254,6 +267,10 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     if (!acquired_)
         acquired_ = now;
     auto [x, y] = point(*best);
+    if (color_aim) {
+        x = color_aim->x;
+        y = color_aim->y;
+    }
     if (s.tracking.prediction) {
         auto predicted = predictor_.update(x, y, capture_ns ? capture_ns : now, s.tracking);
         x = std::clamp(predicted.first, 0.f, float(width));

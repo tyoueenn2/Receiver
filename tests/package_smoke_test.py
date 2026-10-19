@@ -17,6 +17,7 @@ def main():
     for filename in ('receiver_headless' + suffix, 'receiver_verify' + suffix,
                      'receiver_assist_tests' + suffix,
                      'receiver_class_preference_tests' + suffix,
+                     'receiver_color_tests' + suffix, 'docs/technical/COLOR_TARGETING.md',
                      'receiver_scenario_runner' + suffix, 'tools/yolo_omni_worker.py',
                      'tools/omni_support.py', 'tools/mock_pi.py', 'tools/test_sender.py',
                      'README.md', 'docs/README.md', 'docs/GETTING_STARTED.md',
@@ -48,6 +49,11 @@ def main():
         subprocess.run([str(root / ('receiver_assist_tests' + suffix))], cwd=working, check=True, timeout=20)
         subprocess.run([str(root / ('receiver_class_preference_tests' + suffix))],
                        cwd=working, check=True, timeout=20)
+        subprocess.run([str(root / ('receiver_color_tests' + suffix))],
+                       cwd=working, check=True, timeout=20)
+        subprocess.run([sys.executable, str(root / 'tests/color_integration_test.py'),
+                        str(root / ('receiver_scenario_runner' + suffix))],
+                       cwd=working, check=True, timeout=45)
         subprocess.run([sys.executable, str(root / 'tests/class_preference_integration_test.py'),
                         str(root / ('receiver_scenario_runner' + suffix))],
                        cwd=working, check=True, timeout=45)

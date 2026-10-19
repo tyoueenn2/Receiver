@@ -1,5 +1,6 @@
 #include "receiver/test_hub.hpp"
 #include "receiver/app.hpp"
+#include "receiver/color.hpp"
 #include "receiver/capture.hpp"
 #include "receiver/preferences.hpp"
 #include "receiver/assist.hpp"
@@ -56,7 +57,8 @@ struct PageInfo {
 constexpr PageInfo settings_pages[] = {
     {Page::connections, "connections", "Connections", "GET STARTED",
      "Choose the video source and where mouse commands are sent.",
-     "setup practice demo network ip address ports raspberry pi mouse backend local windows capture udp display desktop"},
+     "setup practice demo network ip address ports raspberry pi mouse backend local windows capture udp "
+     "display desktop"},
     {Page::models, "models", "Model", "GET STARTED",
      "Load a detection model and choose its speed and input size.",
      "onnx pt engine python runtime gpu fps performance benchmark image resolution inference"},
@@ -66,7 +68,8 @@ constexpr PageInfo settings_pages[] = {
      "maximum"},
     {Page::targeting, "targeting", "Targeting", "ASSISTANCE",
      "Choose what to follow, where to aim, and how to track moving targets.",
-     "detection confidence class preference preferred head player proximity distance type fov search radius sticky persistence prediction kalman lead offset "
+     "hsv color hybrid detection confidence class preference preferred head player proximity distance type "
+     "fov search radius sticky persistence prediction kalman lead offset "
      "crosshair"},
     {Page::movement, "movement", "Movement", "ASSISTANCE",
      "Adjust sensitivity, smoothing, and the path of each mouse correction.",
@@ -530,7 +533,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             if (!settings.model.empty())
                 preferences.save(app.stats().running ? app.settings() : settings, profile, names);
             auto selected = preferences.select_model(settings, path);
-            receiver::select_backend(selected);
+            if (selected.color.mode != 1)
+                receiver::select_backend(selected);
             if (app.stats().running)
                 app.configure(selected, true);
             settings = selected;
@@ -594,6 +598,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             settings.class_preference = {0, "Example object", 0, 32};
         if (smoke && options.find("--test-preference=near") != std::string::npos)
             settings.class_preference = {0, "Example object", 1, 32};
+        if (smoke && options.find("--test-color=only") != std::string::npos)
+            settings.color.mode = 1;
+        if (smoke && options.find("--test-color=hybrid") != std::string::npos)
+            settings.color.mode = 2;
         app.start(settings, true);
     }
     auto busy = [&]() {
@@ -675,7 +683,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 230);
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(simulate ? muted : accent, "%s",
-                           simulate                 ? "PRACTICE MODE"
+                           settings.color.mode == 1 ? "HSV COLOR"
+                           : simulate               ? "PRACTICE MODE"
                            : settings.model.empty() ? "NO MODEL SELECTED"
                                                     : "MODEL SELECTED");
         hint("DEVICE SETUP  /  TARGETING  /  ASSISTANCE");
@@ -737,9 +746,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             : stats.model_loading || stats.benchmarking || busy()
                 ? "Getting ready. Loading a new model can take a few minutes."
             : !stats.running
-                ? "Choose Connections and Model, then start the session. Assistance starts disarmed."
+                ? (settings.color.mode == 1
+                       ? "Choose Connections and the HSV range in Targeting, then start disarmed."
+                       : "Choose Connections and Model, then start the session. Assistance starts disarmed.")
             : !receiving && settings.frame_source == "local"
-                ? "Waiting for a fresh desktop image. Keep the capture region visible on the selected display."
+                ? "Waiting for a fresh desktop image. Keep the capture region visible on the selected "
+                  "display."
             : !receiving          ? "Waiting for pictures. Start the picture sender on the sending computer."
             : !stats.synchronized ? "Pictures are arriving. Waiting for the sender's timing check."
             : !stats.pi_ready && settings.mouse_backend == 1 ? "Waiting for the local Windows mouse reader."
@@ -1045,8 +1057,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     "Measures this model on a received picture at supported sizes. Mouse control stays "
                     "off. This measures speed, not detection accuracy or network delay.");
             combo("Optimization goal", &performance_goal, "Fastest\0Balanced\0Lower GPU load\0");
-            ImGui::BeginDisabled(!stats.running || simulate || stats.model_loading || stats.benchmarking ||
-                                 busy());
+            ImGui::BeginDisabled(settings.color.mode == 1 || !stats.running || simulate ||
+                                 stats.model_loading || stats.benchmarking || busy());
             if (ImGui::Button("Measure model performance")) {
                 try {
                     app.benchmark(receiver::PerformanceGoal(performance_goal));
@@ -1151,6 +1163,44 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
 
             const bool columns = setting_columns("Targeting groups");
             auto& t = settings.tracking;
+            section("Targeting mode", "Use a model, a color range, or colors inside the selected model box.");
+            auto& c = settings.color;
+            changed |= combo("Target source", &c.mode, "Model\0HSV color only\0Model + HSV color\0");
+            if (c.mode) {
+                hint(c.mode == 1
+                         ? "Targets the highest matching pixel in the search area. No model is needed."
+                         : "Selects the model target normally, then aims at its highest matching color. "
+                           "If none matches, uses the normal box aim point.");
+                section("HSV range", "Hue uses degrees. Saturation and value use percentages. Default: red.");
+                changed |= slider_float("Minimum hue", &c.min_h, 0, 360, "%.0f deg");
+                changed |= slider_float("Maximum hue", &c.max_h, 0, 360, "%.0f deg");
+                hint("Minimum hue above maximum hue wraps through red (for example 330 to 30).");
+                if (slider_float("Minimum saturation", &c.min_s, 0, 100, "%.0f%%")) {
+                    c.max_s = std::max(c.max_s, c.min_s);
+                    changed = true;
+                }
+                changed |= slider_float("Maximum saturation", &c.max_s, c.min_s, 100, "%.0f%%");
+                if (slider_float("Minimum value", &c.min_v, 0, 100, "%.0f%%")) {
+                    c.max_v = std::max(c.max_v, c.min_v);
+                    changed = true;
+                }
+                changed |= slider_float("Maximum value", &c.max_v, c.min_v, 100, "%.0f%%");
+                changed |= slider_float("Color horizontal offset", &c.offset_x, -1024, 1024, "%.1f px");
+                changed |= slider_float("Color vertical offset", &c.offset_y, -1024, 1024, "%.1f px");
+                hint("Positive offsets move right/down. Color offsets stay inside the image or selected box. "
+                     "On the highest row, ties favor the pixel nearest the crosshair horizontally.");
+                changed |= ImGui::Checkbox("Show color aim in preview", &c.preview);
+                if (c.mode == 1) {
+                    int units = settings.input_size / 32;
+                    if (slider_int("Local capture size", &units, 1, 32, "%d x 32 px")) {
+                        settings.input_size = units * 32;
+                        changed = true;
+                    }
+                    hint("UDP frames keep the sender's resolution. Model class and confidence filters are "
+                         "unused.");
+                }
+            }
+            ImGui::BeginDisabled(c.mode == 1);
             section("Detection filters", "Choose which model detections can become targets.");
             changed |= percent_slider("Minimum confidence", settings.confidence);
             hint("Higher values reject uncertain detections.");
@@ -1242,6 +1292,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     changed |=
                         slider_float("Required box overlap", &settings.persistence_iou, .01f, 1, "%.2f IoU");
             }
+            ImGui::EndDisabled();
             section("Search area", "Only target aim points inside this radius can be selected.");
             changed |= slider_float("Search radius", &settings.fov_radius, 0, 1024, "%.0f px");
             if (ImGui::CollapsingHeader("Change radius while holding a button")) {
@@ -1564,7 +1615,30 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                             draw->AddCircleFilled(ImVec2(origin.x + p.correction.aim_x * scale,
                                                          origin.y + p.correction.aim_y * scale),
                                                   4, IM_COL32(255, 100, 80, 255));
+                        if (settings.color.mode && settings.color.preview && p.colors) {
+                            // Reuse target selection so preview agrees with class preferences and fallback.
+                            auto view_settings = settings;
+                            view_settings.tracking.prediction = false;
+                            receiver::Controller view_controller(0);
+                            receiver::Telemetry limits;
+                            limits.physical = stats.physical;
+                            limits.xmin = limits.ymin = -127;
+                            limits.xmax = limits.ymax = 127;
+                            const auto aim =
+                                view_controller.update(p.detections, texture.w, texture.h, view_settings,
+                                                       limits, receiver::now_ns(), {}, 0, p.colors.get());
+                            if (aim.target) {
+                                ImVec2 at(origin.x + aim.aim_x * scale, origin.y + aim.aim_y * scale);
+                                draw->AddLine(ImVec2(at.x - 6, at.y), ImVec2(at.x + 6, at.y),
+                                              IM_COL32(255, 220, 80, 255), 2);
+                                draw->AddLine(ImVec2(at.x, at.y - 6), ImVec2(at.x, at.y + 6),
+                                              IM_COL32(255, 220, 80, 255), 2);
+                            }
+                        }
                         draw->PopClipRect();
+                        if (settings.color.mode && p.colors)
+                            ImGui::Text("HSV matches: %llu | yellow cross: selected aim / fallback",
+                                        static_cast<unsigned long long>(p.colors->count));
                     }
                 } else
                     section("Your pictures will appear here",
@@ -2046,6 +2120,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                                                     {"armed", result.armed},
                                                     {"preferred_class", settings.class_preference.class_id},
                                                     {"preference_type", settings.class_preference.mode},
+                                                    {"color_mode", settings.color.mode},
                                                     {"width", ImGui::GetIO().DisplaySize.x},
                                                     {"navigation_overflow", navigation_overflow}}
                                          .dump(2);

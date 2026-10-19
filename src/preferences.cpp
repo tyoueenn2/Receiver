@@ -105,6 +105,7 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
         s.collection = base.collection;
         s.cursor_check = base.cursor_check;
         s.constant_tracking = base.constant_tracking;
+        s.color = base.color; // Color ranges and target source are application preferences.
     } else {
         s.metadata.clear();
         s.classes.clear();
