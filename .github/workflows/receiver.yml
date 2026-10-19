@@ -66,7 +66,7 @@ jobs:
       - name: Unit, process, network and GUI checks
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --output-junit junit.xml
       - name: Repeat reload, settings and preference pipeline stress checks
-        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:20 -R "receiver_workflows|receiver_reliability|receiver_class_preference_pipeline|receiver_color_pipeline" --output-junit stress.xml
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:20 -R "receiver_sender_sync|receiver_workflows|receiver_reliability|receiver_class_preference_pipeline|receiver_color_pipeline" --output-junit stress.xml
       - name: Repeat Windows worker cleanup regression
         if: runner.os == 'Windows'
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:3 -R "^receiver_model_faults$" --output-junit worker-cleanup.xml
@@ -114,7 +114,7 @@ jobs:
       - run: cmake -S . -B build/sanitized -DCMAKE_BUILD_TYPE=Debug -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF -DRECEIVER_SANITIZERS=ON -DRECEIVER_INTEGRATION_TESTS=ON
       - run: cmake --build build/sanitized --parallel 2
       - run: ctest --test-dir build/sanitized --output-on-failure --no-tests=error --output-junit junit.xml
-      - run: ctest --test-dir build/sanitized --output-on-failure --no-tests=error --repeat until-fail:10 -R "receiver_workflows|receiver_reliability|receiver_class_preference_pipeline|receiver_color_pipeline" --output-junit stress.xml
+      - run: ctest --test-dir build/sanitized --output-on-failure --no-tests=error --repeat until-fail:10 -R "receiver_sender_sync|receiver_workflows|receiver_reliability|receiver_class_preference_pipeline|receiver_color_pipeline" --output-junit stress.xml
       - uses: actions/upload-artifact@v4
         if: always()
         with:

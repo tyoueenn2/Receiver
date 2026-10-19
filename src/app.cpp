@@ -283,7 +283,8 @@ void App::receive_loop() {
     auto allowed = address(cfg.sender_ip, 0);
     Address peer{};
     uint64_t session = 0;
-    int64_t last_hello = 0, last_ping = 0, pending_ping = 0;
+    int64_t last_hello = 0, last_ping = 0, pending_ping = 0, last_resolution = 0;
+    int requested_size = 0;
     std::array<uint64_t, 16> retired{};
     size_t retire_at = 0;
     Reassembler reassembly;
@@ -308,6 +309,8 @@ void App::receive_loop() {
                         peer = from;
                         reassembly.reset(session);
                         pending_ping = last_ping = 0;
+                        last_resolution = 0;
+                        requested_size = 0;
                         std::lock_guard lock(mutex_);
                         clock_.reset();
                         latest_.reset();
@@ -364,6 +367,24 @@ void App::receive_loop() {
             put64(ping.data() + 16, uint64_t(now));
             if (socket.send(ping, peer)) {
                 pending_ping = last_ping = now;
+            }
+        }
+        if (session && !sender_lost) {
+            int size;
+            bool ready;
+            {
+                std::lock_guard lock(mutex_);
+                // Publish only the active model's validated size. A pending or failed
+                // replacement must not change the sender's capture dimensions.
+                ready = stats_.model_revision != 0;
+                size = settings_.input_size;
+            }
+            if (ready && (size != requested_size || now - last_resolution >= 250'000'000)) {
+                auto request = encode_resolution_request(session, uint16_t(size), uint16_t(size));
+                if (socket.send(request, peer)) {
+                    requested_size = size;
+                    last_resolution = now;
+                }
             }
         }
         {

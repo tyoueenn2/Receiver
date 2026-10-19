@@ -1233,12 +1233,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 changed |= ImGui::Checkbox("Show color aim in preview", &c.preview);
                 if (c.mode == 1) {
                     int units = settings.input_size / 32;
-                    if (slider_int("Local capture size", &units, 1, 32, "%d x 32 px")) {
+                    if (slider_int("Capture size", &units, 1, 32, "%d x 32 px")) {
                         settings.input_size = units * 32;
                         changed = true;
                     }
-                    hint("UDP frames keep the sender's resolution. Model class and confidence filters are "
-                         "unused.");
+                    hint("FrameSender follows this size automatically. Manual senders keep their own "
+                         "resolution. Model class and confidence filters are unused.");
                 }
             }
             ImGui::BeginDisabled(c.mode == 1);

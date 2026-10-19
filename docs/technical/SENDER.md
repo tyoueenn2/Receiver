@@ -1,6 +1,31 @@
-# Future capture sender contract
+# Capture sender contract
 
-The production sender is intentionally not implemented in this repository. A future sender must satisfy every rule below; `tools/test_sender.py` is a synthetic/raw-file reference, not a desktop-capture implementation or performance benchmark.
+The Windows FrameSender lives in the separate Sender repository. A capture sender
+must satisfy every rule below; `tools/test_sender.py` is a synthetic/raw-file
+reference, not a desktop-capture implementation or performance benchmark.
+
+## Automatic capture size
+
+Configure Receiver's **Video sender IP address** to the sending PC, select the UDP
+picture source, and start the session. On the sending PC run:
+
+```powershell
+frame_sender.exe --host RECEIVER_IPV4 --output 0
+```
+
+Receiver requests the active model's validated input size using the session-bound
+UVN1 packet documented in [PROTOCOL.md](PROTOCOL.md). FrameSender follows it by
+default and sends no pixels until the first request. Successful model or input-size
+changes update the exact center crop automatically; failed loads retain the previous
+size. Color-only targeting follows **Capture size**. Requests repeat every 250 ms
+to recover from packet loss. Crop dimensions change without resizing or filtering
+pixels. A crop larger than the selected output produces an error in FrameSender.
+
+For a fixed crop or an older Receiver without UVN1 support, use
+`--no-sync-resolution --size 320` (or `--width N --height N`). Older/manual senders
+can ignore UVN1 and continue sending valid frames at their own dimensions. Send rate
+remains controlled by FrameSender's `--fps`; Receiver's inference FPS limit does not
+change it.
 
 ## Endpoint ownership and timing
 
@@ -27,7 +52,9 @@ Supported tightly packed row layouts are:
 - Format 1, RGB24: exactly `width * height * 3` bytes, row order top-to-bottom, pixels `R,G,B`, no row padding.
 - Format 2, BGRA32: exactly `width * height * 4` bytes, row order top-to-bottom, pixels `B,G,R,A`, no row padding. Alpha is carried but not used by inference.
 
-Do not send a full-resolution desktop frame if it violates these bounds. Start deployment testing with a centered 320×320 RGB24 crop; crop size and position must match the Receiver profile's reference/FOV assumptions.
+Do not send a full-resolution desktop frame if it violates these bounds. Automatic
+FrameSender capture follows Receiver's requested center crop. Manual crop size and
+position must match the Receiver profile's reference/FOV assumptions.
 
 ## UVF1 fragmentation
 

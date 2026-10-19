@@ -1,7 +1,20 @@
 #include "receiver/protocol.hpp"
 #include <algorithm>
 #include <limits>
+#include <stdexcept>
 namespace receiver {
+std::array<uint8_t, 24> encode_resolution_request(uint64_t session, uint16_t width, uint16_t height) {
+    if (!session || !width || !height || width > 1024 || height > 1024)
+        throw std::invalid_argument("UVN1 requires a session and dimensions in 1..1024");
+    std::array<uint8_t, 24> packet{};
+    std::memcpy(packet.data(), "UVN1", 4);
+    packet[4] = 1;
+    packet[5] = 2; // BGRA32, copied directly from desktop capture.
+    put64(packet.data() + 8, session);
+    put16(packet.data() + 16, width);
+    put16(packet.data() + 18, height);
+    return packet;
+}
 std::optional<FrameHeader> parse_frame(Bytes p) {
     if (p.size() < 48 || p.size() > 1400 || std::memcmp(p.data(), "UVF1", 4) || p[4] != 1 ||
         be16(p.data() + 6) != 48 || be16(p.data() + 46) != 0)

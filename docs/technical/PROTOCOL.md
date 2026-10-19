@@ -35,6 +35,37 @@ The existing auxiliary datagrams are unchanged:
 
 The receiver bounds sender clock offset using `[t2-t3, t1-t0]`, rejects malformed or over-50-ms exchanges, and expires synchronization after two seconds. Fresh-frame, sender ownership, activation, and stale-frame rules are unchanged.
 
+## UVN1 sender resolution synchronization
+
+After a valid UVH1 establishes the active sender endpoint and the model has loaded,
+Receiver sends this exact 24-byte request from the frame socket to that endpoint:
+
+| Offset | Bytes | Field |
+|---:|---:|---|
+| 0 | 4 | ASCII `UVN1` |
+| 4 | 1 | Version 1 |
+| 5 | 1 | Requested format 2, BGRA32 |
+| 6 | 2 | Reserved, zero |
+| 8 | 8 | Current nonzero sender session |
+| 16 | 2 | Requested width, 1–1024 |
+| 18 | 2 | Requested height, 1–1024 |
+| 20 | 4 | Reserved, zero |
+
+Both dimensions match the active, validated model input size. Color-only mode uses
+the configured capture size. Receiver sends immediately when the active size or
+sender session changes, then repeats every 250 ms while heartbeats remain fresh.
+A pending or failed model replacement retains the previous size; unvalidated
+startup settings are not advertised. Receiver restart establishes a new request
+from the next sender heartbeat.
+
+FrameSender follows these requests by default, waiting for the first request
+before sending an exact, unscaled BGRA center crop. It validates the connected
+Receiver endpoint, session, version, format, length, reserved fields, and size.
+UVF1 headers report the actual applied shape and format. Senders that do not
+support negotiation or use a manual override may ignore UVN1: Receiver still
+accepts their valid RGB24/BGRA32 frames at their chosen dimensions. This request
+does not change the inference FPS limit or the sender's manual FPS cap.
+
 ## UPX1 movement and persistent synthetic buttons
 
 UPX1 is exactly 16 bytes:
