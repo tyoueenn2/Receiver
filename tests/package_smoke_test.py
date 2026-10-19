@@ -64,6 +64,9 @@ def main():
         subprocess.run([sys.executable, str(root / 'tests/model_fault_integration_test.py'),
                         str(root / ('receiver_scenario_runner' + suffix))],
                        cwd=working, check=True, timeout=120)
+        if os.name == 'nt':
+            subprocess.run([sys.executable, str(root / 'tests/gui_preview_test.py'),
+                            str(root / 'receiver.exe')], cwd=working, check=True, timeout=75)
     print('Extracted package starts disarmed and passes preference, worker reload and fault checks.')
 
 

@@ -40,6 +40,9 @@ jobs:
       - name: Repeat Windows worker cleanup regression
         if: runner.os == 'Windows'
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:3 -R "^receiver_model_faults$" --output-junit worker-cleanup.xml
+      - name: Repeat separate preview window lifecycle
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:3 -R "^receiver_gui_preview$" --output-junit preview-lifecycle.xml
       - name: Build and test extracted release package
         if: matrix.configuration == 'Release'
         run: python tools/package_ci.py --build build/ci --name Receiver-${{ matrix.os }}-${{ matrix.compiler }}-${{ github.sha }}

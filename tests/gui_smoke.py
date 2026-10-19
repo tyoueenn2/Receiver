@@ -35,7 +35,8 @@ def main():
                   [('prediction','targeting'),('smoothing','movement'),('spray','auto-click'),
                    ('dataset','data-capture'),('mouse sensitivity','movement'),
                    ('maximum frame age','activation'),('class preference','targeting'),
-                   ('proximity','targeting'),('hsv','targeting'),('does-not-exist',None)]]
+                   ('proximity','targeting'),('hsv','targeting'),('separate window','preview'),
+                   ('does-not-exist',None)]]
     if args.preference_checks:
         cases += [('targeting',None,None,mode) for mode in ('global','near')]
     if args.color_checks:

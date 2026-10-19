@@ -4,6 +4,7 @@
 #include "receiver/capture.hpp"
 #include "receiver/preferences.hpp"
 #include "receiver/assist.hpp"
+#include "preview_window.hpp"
 #include <windows.h>
 #include <commdlg.h>
 #include <algorithm>
@@ -81,7 +82,7 @@ constexpr PageInfo settings_pages[] = {
     {Page::preview, "preview", "Preview", "WORKSPACE",
      "Inspect the received image and customize its detection overlays.",
      "display visual boxes fov circle confidence labels tracers color opacity border font lines detected "
-     "targets search area label text size"},
+     "targets search area label text size separate window popout detached"},
     {Page::capture, "data-capture", "Data capture", "WORKSPACE",
      "Save received images and optional training labels to a local folder.",
      "dataset collection frames save images yolo auto label interval directory recording output"},
@@ -312,10 +313,10 @@ struct Texture {
         sequence = f.header.sequence;
     }
 };
-void save_backbuffer(const char* path) {
+void save_backbuffer(const char* path, IDXGISwapChain* source = swapchain) {
     ID3D11Texture2D* back = nullptr;
     ID3D11Texture2D* staging = nullptr;
-    if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&back))))
+    if (FAILED(source->GetBuffer(0, IID_PPV_ARGS(&back))))
         throw std::runtime_error("Cannot read GUI framebuffer");
     D3D11_TEXTURE2D_DESC desc{};
     back->GetDesc(&desc);
@@ -397,7 +398,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     ShowWindow(window, smoke ? SW_HIDE : SW_SHOWDEFAULT);
     UpdateWindow(window);
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    auto* main_gui = ImGui::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     auto* fonts = ImGui::GetIO().Fonts;
     fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16);
@@ -586,10 +587,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     };
     std::future<void> operation;
     Texture texture;
+    receiver::gui::PreviewWindow separate_preview;
+    bool pending_preview_close = false;
     std::array<float, 180> latency{};
     size_t graph = 0;
     auto smoke_started = receiver::now_ns();
     int smoke_exit = 0;
+    ImVec2 last_display_size(compact ? 1060.f : 1280.f, compact ? 740.f : 900.f);
     if (smoke || demo) {
         simulate = true;
         names = {"Example object"};
@@ -662,6 +666,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         }
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        auto& io = ImGui::GetIO();
+        if (io.DisplaySize.x > 0 && io.DisplaySize.y > 0)
+            last_display_size = io.DisplaySize;
+        else
+            io.DisplaySize = last_display_size; // A minimized main window must not disturb the preview.
         ImGui::NewFrame();
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
@@ -669,6 +678,20 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoSavedSettings);
         bool changed = false;
+        if (separate_preview.close_requested()) {
+            separate_preview.close();
+            pending_preview_close = true;
+        }
+        if (pending_preview_close) {
+            settings.preview = false;
+            changed = !stats.model_loading && !stats.benchmarking;
+        }
+        if (smoke && options.find("--test-preview-reopen") != std::string::npos &&
+            separate_preview.openings() == 1 && !separate_preview.handle() &&
+            receiver::now_ns() - smoke_started > 1'800'000'000) {
+            settings.preview = true;
+            changed = true;
+        }
         if (stats.inferred != previous_frames) {
             last_frame = receiver::now_ns();
             previous_frames = stats.inferred;
@@ -1540,124 +1563,21 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
 
             const bool columns = ImGui::BeginTable("Preview layout", 2, ImGuiTableFlags_SizingStretchProp);
             if (columns) {
-                ImGui::TableSetupColumn("Live feed", ImGuiTableColumnFlags_WidthStretch, 1.3f);
+                ImGui::TableSetupColumn("Window controls", ImGuiTableColumnFlags_WidthStretch, 1.3f);
                 ImGui::TableSetupColumn("Overlay controls", ImGuiTableColumnFlags_WidthStretch, 1.f);
                 ImGui::TableNextColumn();
             }
-            section("Live video", "The image received from your sender, with the current overlays.");
-            changed |= ImGui::Checkbox("Show live video", &settings.preview);
-            if (!receiving)
-                hint(stats.running ? "Waiting for fresh video. Any image below is the last received frame."
-                                   : "Start the session to receive video.");
-            if (settings.preview) {
-                auto p = app.preview();
-                if (p.frame) {
-                    texture.update(*p.frame);
-                    if (texture.view) {
-                        float scale =
-                            std::min(2.f, std::min(ImGui::GetContentRegionAvail().x / texture.w,
-                                                   std::min(std::clamp(body_height * .65f, 200.f, 520.f),
-                                                            ImGui::GetContentRegionAvail().y - 20.f) /
-                                                       texture.h));
-                        scale = std::max(.1f, scale);
-                        const float margin = (ImGui::GetContentRegionAvail().x - texture.w * scale) * .5f;
-                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, margin));
-                        auto origin = ImGui::GetCursorScreenPos();
-                        ImGui::Image(ImTextureID(reinterpret_cast<uintptr_t>(texture.view)),
-                                     ImVec2(texture.w * scale, texture.h * scale));
-                        auto* draw = ImGui::GetWindowDrawList();
-                        const auto& visual = settings.visual;
-                        const auto color = [&](const std::array<float, 3>& rgb) {
-                            return ImGui::ColorConvertFloat4ToU32(
-                                ImVec4(rgb[0], rgb[1], rgb[2], visual.opacity));
-                        };
-                        draw->PushClipRect(
-                            origin, ImVec2(origin.x + texture.w * scale, origin.y + texture.h * scale), true);
-                        for (auto& d : p.detections) {
-                            if (visual.boxes)
-                                draw->AddRect(
-                                    ImVec2(origin.x + d.x * scale, origin.y + d.y * scale),
-                                    ImVec2(origin.x + (d.x + d.w) * scale, origin.y + (d.y + d.h) * scale),
-                                    color(visual.box_color), visual.corner_radius, 0, visual.thickness);
-                            char label[64];
-                            std::string object = simulate ? "Example"
-                                                 : d.cls >= 0 && size_t(d.cls) < names.size()
-                                                     ? names[d.cls]
-                                                     : "Object " + std::to_string(d.cls);
-                            std::snprintf(label, sizeof(label), "%s  %.0f%%", object.c_str(), d.score * 100);
-                            if (visual.confidence)
-                                draw->AddText(ImGui::GetFont(), visual.font_size,
-                                              ImVec2(origin.x + d.x * scale, origin.y + d.y * scale),
-                                              color(visual.box_color), label);
-                            if (visual.tracers) {
-                                const float from = visual.tracer_origin == 0   ? 1.f
-                                                   : visual.tracer_origin == 1 ? .5f
-                                                                               : 0.f;
-                                draw->AddLine(ImVec2(origin.x + texture.w * scale * .5f,
-                                                     origin.y + texture.h * scale * from),
-                                              ImVec2(origin.x + (d.x + d.w * .5f) * scale,
-                                                     origin.y + (d.y + d.h * .5f) * scale),
-                                              color(visual.box_color), visual.thickness);
-                            }
-                        }
-                        float rx = settings.reference_x < 0 ? texture.w * .5f : settings.reference_x,
-                              ry = settings.reference_y < 0 ? texture.h * .5f : settings.reference_y;
-                        if (visual.fov)
-                            draw->AddCircle(
-                                ImVec2(origin.x + rx * scale, origin.y + ry * scale),
-                                (settings.tracking.dynamic_fov &&
-                                         (stats.physical & (1u << (settings.tracking.fov_button - 1)))
-                                     ? settings.tracking.held_radius
-                                     : settings.fov_radius) *
-                                    scale,
-                                color(visual.fov_color), 0, visual.thickness);
-                        if (p.correction.target)
-                            draw->AddCircleFilled(ImVec2(origin.x + p.correction.aim_x * scale,
-                                                         origin.y + p.correction.aim_y * scale),
-                                                  4, IM_COL32(255, 100, 80, 255));
-                        if (settings.color.mode && settings.color.preview && p.colors) {
-                            // Reuse target selection so preview agrees with class preferences and fallback.
-                            auto view_settings = settings;
-                            view_settings.tracking.prediction = false;
-                            receiver::Controller view_controller(0);
-                            receiver::Telemetry limits;
-                            limits.physical = stats.physical;
-                            limits.xmin = limits.ymin = -127;
-                            limits.xmax = limits.ymax = 127;
-                            const auto aim =
-                                view_controller.update(p.detections, texture.w, texture.h, view_settings,
-                                                       limits, receiver::now_ns(), {}, 0, p.colors.get());
-                            if (aim.target) {
-                                ImVec2 at(origin.x + aim.aim_x * scale, origin.y + aim.aim_y * scale);
-                                draw->AddLine(ImVec2(at.x - 6, at.y), ImVec2(at.x + 6, at.y),
-                                              IM_COL32(255, 220, 80, 255), 2);
-                                draw->AddLine(ImVec2(at.x, at.y - 6), ImVec2(at.x, at.y + 6),
-                                              IM_COL32(255, 220, 80, 255), 2);
-                            }
-                        }
-                        draw->PopClipRect();
-                        if (settings.color.mode && p.colors)
-                            ImGui::Text("HSV matches: %llu | yellow cross: selected aim / fallback",
-                                        static_cast<unsigned long long>(p.colors->count));
-                    }
-                } else
-                    section("Your pictures will appear here",
-                            "Start the session and its picture sender. In practice mode, the demo launcher "
-                            "supplies the pictures.");
-            } else {
-                texture.clear();
-                ImGui::BeginChild("Preview off", ImVec2(0, 250), ImGuiChildFlags_Borders);
-                ImGui::Spacing();
-                section("See what the app sees", "Turn on Show live video to check the picture, detections, "
-                                                 "and search area. You can turn it "
-                                                 "off later to reduce the display's workload.");
-                if (ImGui::Button("Show live video", ImVec2(150, 36))) {
-                    settings.preview = true;
-                    changed = true;
-                }
-                ImGui::EndChild();
+            section("Preview window", "View the video and overlays in a separate, resizable window.");
+            changed |= ImGui::Checkbox("Enable preview window", &settings.preview);
+            hint("The preview stays open while you browse settings. Move it to another monitor or "
+                 "resize it as needed. Closing it turns this option off.");
+            if (settings.preview && separate_preview.handle() && ImGui::Button("Bring preview to front")) {
+                ShowWindow(separate_preview.handle(), SW_RESTORE);
+                SetForegroundWindow(separate_preview.handle());
             }
-
+            if (!receiving)
+                hint(stats.running ? "Waiting for fresh video. The preview may show the last received frame."
+                                   : "Start the session to receive video.");
             if (simulate)
                 hint("Practice shows a fixed example detection; it does not run the model.");
             if (stats.inferred)
@@ -2076,12 +1996,29 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 receiver::validate(settings);
                 if (stats.running)
                     app.configure(settings);
+                pending_preview_close = false;
                 mark_preferences();
                 error.clear();
             } catch (const std::exception& e) {
                 error = e.what();
                 settings = stats.running ? app.settings() : previous_settings;
             }
+        }
+        if (settings.preview) {
+            try {
+                separate_preview.open(device, context, swapchain, smoke);
+                if (!separate_preview.update_options(settings.ui))
+                    notice = "Windows could not apply capture exclusion to the separate preview.";
+            } catch (const std::exception& e) {
+                separate_preview.close();
+                settings.preview = false;
+                pending_preview_close = true;
+                error = e.what();
+            }
+        } else {
+            if (separate_preview.handle())
+                separate_preview.close();
+            texture.clear();
         }
         if (!smoke && !demo && preferences_dirty && !stats.model_loading && !stats.benchmarking &&
             !app.stats().model_loading && !app.stats().benchmarking && stats.error.empty() &&
@@ -2101,9 +2038,24 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             context->OMSetRenderTargets(1, &target, nullptr);
             context->ClearRenderTargetView(target, clear);
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+            if (separate_preview.handle()) {
+                try {
+                    const auto picture = app.preview();
+                    if (picture.frame)
+                        texture.update(*picture.frame);
+                    separate_preview.render({texture.view, texture.w, texture.h}, picture, settings, stats,
+                                            names, simulate);
+                } catch (const std::exception& e) {
+                    separate_preview.close();
+                    pending_preview_close = true;
+                    error = e.what();
+                }
+            }
             if (smoke && receiver::now_ns() - smoke_started > 3'000'000'000) {
                 try {
                     save_backbuffer("gui-smoke.bmp");
+                    if (separate_preview.handle())
+                        save_backbuffer("gui-smoke-preview.bmp", separate_preview.swap_chain());
                     auto result = app.stats();
                     if (!result.inferred || !result.pi_ready || !result.synchronized)
                         smoke_exit = 2;
@@ -2121,6 +2073,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                                                     {"preferred_class", settings.class_preference.class_id},
                                                     {"preference_type", settings.class_preference.mode},
                                                     {"color_mode", settings.color.mode},
+                                                    {"preview_enabled", settings.preview},
+                                                    {"preview_window_open", bool(separate_preview.handle())},
+                                                    {"preview_frames", separate_preview.rendered_frames()},
+                                                    {"preview_openings", separate_preview.openings()},
+                                                    {"preview_width", separate_preview.width()},
+                                                    {"preview_height", separate_preview.height()},
+                                                    {"main_context_restored",
+                                                     ImGui::GetCurrentContext() == main_gui},
+                                                    {"gui_error", error},
                                                     {"width", ImGui::GetIO().DisplaySize.x},
                                                     {"navigation_overflow", navigation_overflow}}
                                          .dump(2);
@@ -2132,6 +2093,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 done = true;
             }
             swapchain->Present(0, 0);
+            try {
+                separate_preview.present();
+            } catch (const std::exception& e) {
+                separate_preview.close();
+                pending_preview_close = true;
+                error = e.what();
+            }
         }
         auto remaining = 16'666'667 - (receiver::now_ns() - ui_start);
         if (remaining > 0)
@@ -2151,6 +2119,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         }
     }
     app.stop();
+    separate_preview.close();
     texture.clear();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

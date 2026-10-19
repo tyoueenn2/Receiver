@@ -23,7 +23,7 @@ HSV bounds and offsets can be adjusted live.
 - Offsets are clamped to the frame in color-only mode, or to the selected box in hybrid mode. The resulting aim must be inside the current search radius, including a button-controlled radius when enabled.
 - An absent color produces no target in color-only mode. Hybrid mode never uses pixels outside the selected box and never changes to another box just because it contains color.
 
-Use **Preview → Show live video** and **Show color aim in preview** to tune the
+Use **Preview → Enable preview window** and **Show color aim in preview** to tune the
 range while disarmed. The preview displays the matching-pixel count and a yellow
 cross for the selected aim, including the hybrid fallback. Actual control can
 also apply prediction and movement settings. Model confidence and class controls
