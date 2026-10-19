@@ -27,8 +27,8 @@ Use **Preview → Enable preview window** and **Show color aim in preview** to t
 range while disarmed. The preview displays the matching-pixel count and a yellow
 cross for the selected aim, including the hybrid fallback. Actual control can
 also apply prediction and movement settings. Model confidence and class controls
-are unused in color-only mode. Local capture size is editable there; UDP image
-dimensions come from the sender.
+are unused in color-only mode. **Capture size** controls the local crop and the
+size requested from FrameSender. Manual UDP senders keep their chosen dimensions.
 
 Color settings are saved in profiles and application preferences. Selecting a
 different model keeps the current color mode and range. Existing profiles default

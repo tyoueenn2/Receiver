@@ -53,6 +53,8 @@ struct FrameHeader {
 };
 std::optional<FrameHeader> parse_frame(Bytes packet);
 std::array<uint8_t, 48> encode_frame(const FrameHeader& h);
+// UVN1 requests an exact, unscaled BGRA32 crop from the current sender session.
+std::array<uint8_t, 24> encode_resolution_request(uint64_t session, uint16_t width, uint16_t height);
 struct Frame {
     FrameHeader header;
     int64_t first_ns = 0, complete_ns = 0;

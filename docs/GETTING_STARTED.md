@@ -49,6 +49,12 @@ From a terminal, the same demo is `py tools/ui_demo.py`; use `--exe path/to/rece
 
 ## Local mouse and automated checks
 
+For video from another PC, select the UDP picture source in **Connections**, enter
+that PC's sender IP address, and start the session. Run
+`frame_sender.exe --host RECEIVER_IPV4 --output 0` on the sending PC. FrameSender
+automatically follows the loaded model's input size, including live model changes.
+See [sender setup and compatibility](technical/SENDER.md).
+
 For desktop capture on this PC, end the session and choose **Connections > Video
 source > Picture source > Local desktop capture**, then select a display. Receiver
 captures a centered square matching the current model input size. Keep the Receiver
