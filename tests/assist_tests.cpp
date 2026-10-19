@@ -58,12 +58,14 @@ int main() {
         CHECK(!t.update(c, 320, 320, s, at + 2'000'000'000)); // interrupted single mode stays latched
         s.trigger.spray = true;
         s.visual.tracers = true;
+        s.preview = true;
         s.ui.always_on_top = true;
         auto loaded = settings_from_json(settings_json(s));
         CHECK(loaded.constant_tracking && loaded.trigger.spray && loaded.visual.tracers &&
-              loaded.ui.always_on_top);
+              loaded.ui.always_on_top && loaded.preview);
         auto legacy = settings_from_json(nlohmann::json::object());
-        CHECK(!legacy.constant_tracking && !legacy.trigger.enabled && !legacy.collection.enabled);
+        CHECK(!legacy.constant_tracking && !legacy.trigger.enabled && !legacy.collection.enabled &&
+              !legacy.preview);
         const auto config = root / "example.cfg";
         write_json_atomic({{"FOV Size", 200},
                            {"AI Minimum Confidence", 65},

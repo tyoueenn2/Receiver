@@ -176,6 +176,33 @@ void app_workflows() {
         return app.stats().network.completed > 0;
     });
     until([&] { return bool(app.preview().frame); });
+    {
+        auto view = app.settings();
+        CHECK(app.preview().frame);
+        const auto before = app.preview().frame->header.sequence;
+        until([&] {
+            send_picture(sender, to, sequence++);
+            const auto picture = app.preview();
+            return picture.frame && picture.frame->header.sequence > before;
+        });
+        CHECK(app.settings().preview);
+        CHECK(app.stats().model_revision == 1 && !app.stats().armed);
+        view.preview = false;
+        app.configure(view);
+        CHECK(!app.preview().frame);
+        const auto inferred_before = app.stats().inferred;
+        until([&] {
+            send_picture(sender, to, sequence++);
+            return app.stats().inferred > inferred_before + 3;
+        });
+        CHECK(!app.preview().frame); // Closing preview stops snapshots without stopping inference.
+        view.preview = true;
+        app.configure(view);
+        until([&] {
+            send_picture(sender, to, sequence++);
+            return bool(app.preview().frame);
+        });
+    }
     auto completed = app.stats().network.completed;
     app.arm(true);
     CHECK(app.stats().armed);
@@ -313,6 +340,7 @@ int main() {
         another.capture_output = 2;
         another.color.mode = 2;
         another.color.min_h = 100;
+        another.preview = true;
         prefs.save(another, "");
         auto restored = prefs.select_model(another, fixed_path.string());
         CHECK(restored.confidence == .75f && restored.input_size == 640 && restored.inference_fps == 80);
@@ -320,6 +348,7 @@ int main() {
               restored.selected_class_names == std::vector<std::string>{"second"});
         CHECK(restored.frame_source == "local" && restored.capture_output == 2);
         CHECK(restored.color.mode == 2 && restored.color.min_h == 100);
+        CHECK(restored.preview);
         CHECK(restored.class_preference.class_id == 1 && restored.class_preference.mode == 1 &&
               restored.class_preference.max_distance == 24);
         reconcile_classes(restored, {"second", "first"});

@@ -7,6 +7,7 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 | --- | --- |
 | Linux GCC Release and Clang Debug | Native compilation, core tests, independent UDP peers, worker processes and model workflows on real Linux runners |
 | Windows MSVC Release and Debug | The same checks plus rendering all eleven DirectX GUI pages at normal and minimum widths, enabled preference controls, search routing and the read-only mouse reader |
+| Separate preview window | A real second HWND renders known video pixels; native resize, close, reopen and a minimized main window are checked while disarmed. Both Windows configurations repeat the lifecycle test three times, and the extracted Windows package reruns it outside the checkout. |
 | Linux Clang ASan + UBSan | Memory errors, leaks and undefined behavior in the full native/process/network suite |
 | Repeated workflows | 20 runs per native build and 10 sanitized runs of reload, rollback, settings and the class-preference pipeline |
 | Class preference pipeline | Real worker tensors, UDP frames and Pi output verify global preference, target-bound association, live edits, model changes, fallback and stale-video gating |

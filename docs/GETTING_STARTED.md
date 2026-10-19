@@ -16,14 +16,14 @@ the matching category. Q/E moves between categories when you are not typing.
 | Targeting | Confidence, classes, class preference/type, target priority/lock, search radius, aim point and prediction |
 | Movement | Sensitivity, smoothing, correction limits, movement path, jitter and directional strength |
 | Auto click | Enable automatic clicks, once/repeat behavior, click button and timing |
-| Preview | Live video, detection boxes, search-area circle, labels, target lines and overlay appearance |
+| Preview | Enable the separate video window and adjust detection boxes, search-area circle, labels, target lines and overlay appearance |
 | Data capture | Save images, output folder, save interval and optional YOLO labels |
 | Profiles | Save/load Receiver profiles and import Aimmy configs |
 | App preferences | Window behavior, theme color and keyboard shortcuts |
 | Diagnostics | Setup checks and live connection/performance details |
 
 Choose **Connections**, select a **Model** for live detection, and start the
-session. Use **Preview** to inspect the video before arming assistance. The
+session. Turn on **Preview → Enable preview window** to inspect the video before arming assistance. The
 global **Arm assistance** control permits output; **Activation** determines when
 that output runs. **Disarm** or **Delete** stops it. Accepted settings restore
 automatically next launch, with assistance disarmed.
