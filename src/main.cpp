@@ -154,6 +154,18 @@ int main(int argc, char** argv) {
                 cfg.model = value();
             else if (a == "--backend")
                 cfg.inference_backend = value();
+            else if (a == "--mouse-backend") {
+                auto method = value();
+                if (method == "pi")
+                    cfg.mouse_backend = 0;
+                else if (method == "local")
+                    cfg.mouse_backend = 1;
+                else if (method == "makcu")
+                    cfg.mouse_backend = 2;
+                else
+                    throw std::runtime_error("Mouse backend must be pi, local, or makcu");
+            } else if (a == "--makcu-port")
+                cfg.makcu_port = value();
             else if (a == "--omni-python")
                 cfg.omni_python = value();
             else if (a == "--omni-source")
@@ -190,6 +202,7 @@ int main(int argc, char** argv) {
                              "  [--model FILE] [--backend auto|tensorrt|yolo_omni]\n"
                              "  [--target-mode model|color|model-color]\n"
                              "  [--frame-source udp|local] [--capture-output N] [--list-capture-outputs]\n"
+                             "  [--mouse-backend pi|local|makcu] [--makcu-port COM3|/dev/ttyACM0]\n"
                              "  [--omni-python EXE] [--omni-source DIR] [--omni-device cuda:0|cpu]\n"
                              "  [--metrics FILE] [--log-level quiet|error|info|debug|trace]\n"
                              "  [--log-interval-ms N] [--quiet|--verbose|--trace]\n"
@@ -198,7 +211,7 @@ int main(int argc, char** argv) {
                              "Use --seconds 0 to run until SIGINT or SIGTERM. A zero log interval disables\n"
                              "periodic summaries; lifecycle and action logs still follow --log-level.\n"
                              "Simulation is loopback-only. Synthetic input requires --arm and fresh\n"
-                             "sender/Pi telemetry.\n";
+                             "sender/Pi telemetry. MAKCU uses real hardware even with simulated pictures.\n";
                 return 0;
             } else
                 throw std::runtime_error("Unknown option: " + a);

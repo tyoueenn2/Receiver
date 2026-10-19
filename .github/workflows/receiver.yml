@@ -10,6 +10,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  makcu:
+    name: MAKCU / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure MAKCU tests without device or GPU dependencies
+        run: cmake -S . -B build/makcu -DCMAKE_BUILD_TYPE=Release -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF -DRECEIVER_INTEGRATION_TESTS=ON
+      - name: Build serial backend and headless receiver
+        run: cmake --build build/makcu --config Release --target receiver_makcu_tests receiver_headless --parallel 2
+      - name: MAKCU protocol, profiles and serial integration
+        run: ctest --test-dir build/makcu -C Release --output-on-failure --no-tests=error -R '^receiver_makcu(_pipeline)?$' --output-junit makcu.xml
+      - name: Keep MAKCU results even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: makcu-${{ matrix.os }}
+          path: |
+            build/makcu/makcu.xml
+            build/makcu/Testing/Temporary/
+            build/makcu/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: warn
+
   native:
     name: ${{ matrix.os }} / ${{ matrix.compiler }} / ${{ matrix.configuration }}
     runs-on: ${{ matrix.os }}
@@ -170,7 +200,7 @@ jobs:
   release:
     name: Publish tested hardware-free packages on version tags
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    needs: [native, sanitizers, cpu-model, cuda-compile]
+    needs: [makcu, native, sanitizers, cpu-model, cuda-compile]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

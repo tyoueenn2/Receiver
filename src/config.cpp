@@ -40,7 +40,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     Settings, version, bind_ip, sender_ip, pi_ip, model, metadata, frame_port, pi_port, input_size,
     confidence, nms_iou, fov_radius, reference_x, reference_y, classes, highest_confidence, persistence,
     preview, persistence_iou, aim_x, aim_y, offset_x, offset_y, gain_x, gain_y, smoothing_ms, deadzone,
-    max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend,
+    max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend, makcu_port,
     secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
     selected_class_names, inference_fps, auto_size, constant_tracking, cursor_check, trigger, visual, ui,
     collection, frame_source, capture_output, class_preference, color)
@@ -106,12 +106,24 @@ void validate(const Settings& s) {
     const auto& h = s.humanization;
     const auto& d = s.direction;
     const auto& t = s.tracking;
-    if (s.mouse_backend < 0 || s.mouse_backend > 1 || s.secondary_button < 0 || s.secondary_button > 8 ||
+    if (s.mouse_backend < 0 || s.mouse_backend > 2 || s.secondary_button < 0 || s.secondary_button > 8 ||
         t.prediction_method < 0 || t.prediction_method > 2 || t.fov_button < 1 || t.fov_button > 8 ||
         !range(t.lead_ms, 0, 300) || !range(t.lead_multiplier, 0, 5) ||
         !range(t.velocity_smoothing_ms, 1, 200) || !range(t.max_lead, 0, 500) ||
         !range(t.sticky_distance, 0, 500) || !range(t.held_radius, 1, 2048) || !range(h.ema_alpha, .01f, 1))
         throw std::runtime_error("Tracking or mouse-backend settings are outside their allowed range");
+    if (s.makcu_port.size() > 256 ||
+        s.makcu_port.find_first_of(std::string("\0\r\n", 3)) != std::string::npos)
+        throw std::runtime_error("Invalid MAKCU serial port name");
+    if (s.mouse_backend == 2) {
+        if (s.makcu_port.empty())
+            throw std::runtime_error("Choose the MAKCU serial port (for example COM3 or /dev/ttyACM0)");
+        if (s.activation_button > 5 || s.secondary_button > 5 || s.tracking.fov_button > 5)
+            throw std::runtime_error("MAKCU supports physical mouse buttons 1..5");
+        if (s.direction.enabled)
+            throw std::runtime_error(
+                "MAKCU does not report physical motion totals; turn direction assistance off");
+    }
     if (h.path < 0 || h.path > 4 || !range(h.curve, 0, 1) || !range(h.duration_ms, 10, 1000) ||
         !range(h.exponent, 1, 5) || !range(h.adaptive_distance, 1, 1024) || !range(h.jitter, 0, 20) ||
         !range(h.jitter_interval_ms, 8, 250) || !range(h.noise, 0, 20) || !range(h.noise_period_ms, 10, 1000))

@@ -61,6 +61,8 @@ output > This computer's Windows mouse**. Set buttons or continuous mode in
 **Activation**, then start and arm the session. This output moves your real mouse.
 See [movement and tracking details](technical/HUMANIZATION.md).
 
+For a MAKCU device, end the session and choose **Connections > Mouse output > MAKCU (USB serial)**. Enter its control port, start the session, arm assistance, and hold an activation button on the mouse connected through MAKCU. See [MAKCU setup and tests](technical/MAKCU.md).
+
 Open **Diagnostics > Setup checks** to run individual or selected checks, inspect
 results, and save logs automatically. The demo launcher fills in Python
 automatically. **Live status and timing** contains telemetry and performance

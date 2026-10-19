@@ -381,7 +381,8 @@ Settings prepare_model_settings(Settings s) {
 bool connection_settings_changed(const Settings& a, const Settings& b) {
     return a.frame_source != b.frame_source || a.capture_output != b.capture_output ||
            a.bind_ip != b.bind_ip || a.sender_ip != b.sender_ip || a.pi_ip != b.pi_ip ||
-           a.frame_port != b.frame_port || a.pi_port != b.pi_port || a.mouse_backend != b.mouse_backend;
+           a.frame_port != b.frame_port || a.pi_port != b.pi_port || a.mouse_backend != b.mouse_backend ||
+           a.makcu_port != b.makcu_port;
 }
 bool model_settings_changed(const Settings& a, const Settings& b) {
     return (a.color.mode == 1) != (b.color.mode == 1) || a.model != b.model || a.metadata != b.metadata ||

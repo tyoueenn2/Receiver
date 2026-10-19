@@ -59,7 +59,7 @@ constexpr PageInfo settings_pages[] = {
     {Page::connections, "connections", "Connections", "GET STARTED",
      "Choose the video source and where mouse commands are sent.",
      "setup practice demo network ip address ports raspberry pi mouse backend local windows capture udp "
-     "display desktop"},
+     "display desktop makcu serial com usb"},
     {Page::models, "models", "Model", "GET STARTED",
      "Load a detection model and choose its speed and input size.",
      "onnx pt engine python runtime gpu fps performance benchmark image resolution inference"},
@@ -778,6 +778,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             : !receiving          ? "Waiting for pictures. Start the picture sender on the sending computer."
             : !stats.synchronized ? "Pictures are arriving. Waiting for the sender's timing check."
             : !stats.pi_ready && settings.mouse_backend == 1 ? "Waiting for the local Windows mouse reader."
+            : !stats.pi_ready && settings.mouse_backend == 2
+                ? "Waiting for MAKCU. Check its USB connection and serial port."
             : !stats.pi_ready ? "Waiting for the mouse device. Check the Pi address and install its receiver "
                                 "support update."
             : settings.direction.enabled && !stats.motion_available && settings.mouse_backend == 1
@@ -789,6 +791,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 ? "Session ready. Arm assistance to allow movement; use Preview to inspect the video first."
             : !stats.active               ? "Assistance is armed. Activation settings determine when it runs."
             : settings.mouse_backend == 1 ? "Local assistance is active. Press Delete to disarm."
+            : settings.mouse_backend == 2 ? "MAKCU assistance is active. Press Delete to disarm."
             : simulate
                 ? "Practice is active. Commands go to the simulator; your real mouse is unaffected."
                 : "Mouse control is enabled. Movement requires a fresh picture and a matching detection.";
@@ -818,9 +821,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         if (stats.running) {
             ImGui::SameLine(0, 20);
             bool armed = stats.armed;
-            if (ImGui::Checkbox(settings.mouse_backend == 1 ? "Arm local assistance"
-                                : simulate                  ? "Arm practice assistance"
-                                                            : "Arm assistance",
+            if (ImGui::Checkbox(settings.mouse_backend == 1   ? "Arm local assistance"
+                                : settings.mouse_backend == 2 ? "Arm MAKCU assistance"
+                                : simulate                    ? "Arm practice assistance"
+                                                              : "Arm assistance",
                                 &armed))
                 app.arm(armed);
         }
@@ -923,13 +927,24 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             }
             section("Mouse output", "Choose which device receives the corrections.");
             if (combo("Output device", &settings.mouse_backend,
-                      "Raspberry Pi / simulated Pi\0This computer's Windows mouse\0")) {
+                      "Raspberry Pi / simulated Pi\0This computer's Windows mouse\0MAKCU (USB serial)\0")) {
                 settings.activation_button = 2;
                 settings.secondary_button = 0;
                 settings.tracking.fov_button = 1;
+                if (settings.mouse_backend == 2) {
+                    settings.direction.enabled = false;
+                    if (settings.makcu_port.empty())
+                        settings.makcu_port = "COM3";
+                }
                 changed = true;
             }
-            hint("Windows output moves this computer's real cursor when assistance is armed.");
+            if (settings.mouse_backend == 2) {
+                input_string("MAKCU serial port", settings.makcu_port);
+                changed |= ImGui::IsItemDeactivatedAfterEdit();
+                hint("Use the MAKCU control port shown in Device Manager, such as COM3. Close other MAKCU "
+                     "apps. Arming sends real mouse movement, including with practice pictures.");
+            } else
+                hint("Windows output moves this computer's real cursor when assistance is armed.");
             if (columns)
                 ImGui::TableNextColumn();
             section("Video source", "Capture this computer's desktop or receive pictures over UDP.");
@@ -967,9 +982,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             }
             if (simulate) {
                 settings.sender_ip = settings.pi_ip = "127.0.0.1";
-                hint(settings.frame_source == "local"
+                hint(settings.mouse_backend == 2
+                         ? "Practice uses example detections. MAKCU still controls the real connected mouse."
+                     : settings.frame_source == "local"
                          ? "Practice uses desktop images with example detections and a simulated Pi."
-                         : "Run Start Demo.cmd to launch the example video sender and simulated Pi. No model or "
+                         : "Run Start Demo.cmd to launch the example video sender and simulated Pi. No model "
+                           "or "
                            "hardware is required.");
             } else {
                 if (settings.frame_source == "udp")
@@ -1147,7 +1165,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             section("Activation buttons", "Use either button on the mouse selected in Connections.");
             ImGui::BeginDisabled(settings.constant_tracking);
             int button = settings.activation_button - 1;
-            if (combo("Primary button", &button, mouse_buttons, settings.mouse_backend == 1 ? 5 : 8)) {
+            if (combo("Primary button", &button, mouse_buttons, settings.mouse_backend != 0 ? 5 : 8)) {
                 settings.activation_button = button + 1;
                 changed = true;
             }
@@ -1156,7 +1174,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 "Side button 1", "Side button 2",     "Button 6",           "Button 7",
                 "Button 8"};
             changed |= combo("Alternate button", &settings.secondary_button, secondary,
-                             settings.mouse_backend == 1 ? 6 : 9);
+                             settings.mouse_backend != 0 ? 6 : 9);
             ImGui::EndDisabled();
             if (settings.constant_tracking)
                 hint("Activation buttons are unused in continuous mode.");
@@ -1323,7 +1341,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 ImGui::BeginDisabled(!t.dynamic_fov);
                 int button = t.fov_button - 1;
                 if (combo("Radius-change button", &button, mouse_buttons,
-                          settings.mouse_backend == 1 ? 5 : 8)) {
+                          settings.mouse_backend != 0 ? 5 : 8)) {
                     t.fov_button = button + 1;
                     changed = true;
                 }
@@ -1477,7 +1495,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             ImGui::EndDisabled();
             section("Directional assistance",
                     "Change correction strength based on your physical mouse movement.");
+            ImGui::BeginDisabled(settings.mouse_backend == 2);
             changed |= ImGui::Checkbox("Adapt to my mouse direction", &d.enabled);
+            ImGui::EndDisabled();
+            if (settings.mouse_backend == 2)
+                hint("MAKCU reports buttons but no physical motion totals. Directional assistance is "
+                     "unavailable; sensitivity, smoothing, prediction and dynamic search area still work.");
             if (d.enabled) {
                 changed |= combo("Assistance behavior", &d.mode,
                                  "Stronger when moving away\0Stronger when moving toward\0Different strength "
@@ -1976,9 +1999,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         ImGui::Separator();
         if (ImGui::BeginTable("Connection overview", 3, ImGuiTableFlags_SizingStretchSame)) {
             for (auto item : {std::pair{"VIDEO", receiving ? "Receiving" : "Waiting"},
-                              {settings.mouse_backend == 1 ? "WINDOWS MOUSE"
-                               : simulate                  ? "SIMULATOR"
-                                                           : "MOUSE DEVICE",
+                              {settings.mouse_backend == 1   ? "WINDOWS MOUSE"
+                               : settings.mouse_backend == 2 ? "MAKCU"
+                               : simulate                    ? "SIMULATOR"
+                                                             : "MOUSE DEVICE",
                                stats.pi_ready ? "Connected" : "Waiting"},
                               {"ASSISTANCE", stats.active  ? "Active"
                                              : stats.armed ? "Armed"
