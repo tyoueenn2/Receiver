@@ -134,7 +134,12 @@ int main(int argc, char** argv) {
                 cfg = receiver::load_settings(profile);
             } else if (a == "--simulate")
                 simulate = true;
-            else if (a == "--frame-source")
+            else if (a == "--target-mode") {
+                const auto mode = value();
+                if (mode != "model" && mode != "color" && mode != "model-color")
+                    throw std::runtime_error("Target mode must be model, color, or model-color");
+                cfg.color.mode = mode == "model" ? 0 : mode == "color" ? 1 : 2;
+            } else if (a == "--frame-source")
                 cfg.frame_source = value();
             else if (a == "--capture-output")
                 cfg.capture_output = std::stoi(value());
@@ -181,19 +186,19 @@ int main(int argc, char** argv) {
                 click.press_ms = std::stoi(value());
                 click.interval_ms = std::stoi(value());
             } else if (a == "--help") {
-                std::cout
-                    << "receiver_headless [--profile FILE] [--simulate] [--arm] [--seconds N]\n"
-                       "  [--model FILE] [--backend auto|tensorrt|yolo_omni]\n"
-                       "  [--frame-source udp|local] [--capture-output N] [--list-capture-outputs]\n"
-                       "  [--omni-python EXE] [--omni-source DIR] [--omni-device cuda:0|cpu]\n"
-                       "  [--metrics FILE] [--log-level quiet|error|info|debug|trace]\n"
-                       "  [--log-interval-ms N] [--quiet|--verbose|--trace]\n"
-                       "  [--hold-button 1..8] [--release-after-ms N]\n"
-                       "  [--click BUTTON COUNT PRESS_MS INTERVAL_MS]\n\n"
-                       "Use --seconds 0 to run until SIGINT or SIGTERM. A zero log interval disables\n"
-                       "periodic summaries; lifecycle and action logs still follow --log-level.\n"
-                       "Simulation is loopback-only. Synthetic input requires --arm and fresh\n"
-                       "sender/Pi telemetry.\n";
+                std::cout << "receiver_headless [--profile FILE] [--simulate] [--arm] [--seconds N]\n"
+                             "  [--model FILE] [--backend auto|tensorrt|yolo_omni]\n"
+                             "  [--target-mode model|color|model-color]\n"
+                             "  [--frame-source udp|local] [--capture-output N] [--list-capture-outputs]\n"
+                             "  [--omni-python EXE] [--omni-source DIR] [--omni-device cuda:0|cpu]\n"
+                             "  [--metrics FILE] [--log-level quiet|error|info|debug|trace]\n"
+                             "  [--log-interval-ms N] [--quiet|--verbose|--trace]\n"
+                             "  [--hold-button 1..8] [--release-after-ms N]\n"
+                             "  [--click BUTTON COUNT PRESS_MS INTERVAL_MS]\n\n"
+                             "Use --seconds 0 to run until SIGINT or SIGTERM. A zero log interval disables\n"
+                             "periodic summaries; lifecycle and action logs still follow --log-level.\n"
+                             "Simulation is loopback-only. Synthetic input requires --arm and fresh\n"
+                             "sender/Pi telemetry.\n";
                 return 0;
             } else
                 throw std::runtime_error("Unknown option: " + a);
@@ -213,7 +218,10 @@ int main(int argc, char** argv) {
 
         {
             std::ostringstream line;
-            line << "starting mode=" << (simulate ? "simulation" : "tensorrt")
+            line << "starting mode="
+                 << (cfg.color.mode == 1 ? "hsv-color"
+                     : simulate          ? "simulation"
+                                         : "model")
                  << " profile=" << std::quoted(profile) << " armed=" << arm << " duration_s=";
             if (seconds)
                 line << seconds;

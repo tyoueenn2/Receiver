@@ -11,6 +11,7 @@ command line.
 - Remember settings for each model and restore saved profiles.
 - Adjust detection, tracking and movement while viewing a live preview.
 - Prefer a detection class globally or only near the normally selected target.
+- Target an HSV color directly, or use color inside a model box to refine aiming.
 - Try the interface and run automated checks without a physical device.
 
 ## Try it on Windows

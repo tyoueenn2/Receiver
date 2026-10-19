@@ -311,12 +311,15 @@ int main() {
         another.sender_ip = "127.0.0.5";
         another.frame_source = "local";
         another.capture_output = 2;
+        another.color.mode = 2;
+        another.color.min_h = 100;
         prefs.save(another, "");
         auto restored = prefs.select_model(another, fixed_path.string());
         CHECK(restored.confidence == .75f && restored.input_size == 640 && restored.inference_fps == 80);
         CHECK(restored.sender_ip == "127.0.0.5" &&
               restored.selected_class_names == std::vector<std::string>{"second"});
         CHECK(restored.frame_source == "local" && restored.capture_output == 2);
+        CHECK(restored.color.mode == 2 && restored.color.min_h == 100);
         CHECK(restored.class_preference.class_id == 1 && restored.class_preference.mode == 1 &&
               restored.class_preference.max_distance == 24);
         reconcile_classes(restored, {"second", "first"});

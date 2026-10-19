@@ -5,6 +5,14 @@
 #include <vector>
 #include <random>
 namespace receiver {
+struct ColorMask;
+struct ColorSettings {
+    int mode = 0;                  // 0: model, 1: HSV only, 2: model with HSV aim refinement.
+    float min_h = 330, max_h = 30; // Degrees; min > max wraps through red.
+    float min_s = 60, max_s = 100, min_v = 50, max_v = 100; // Percent.
+    float offset_x = 0, offset_y = 0;                       // Image pixels, applied to the color aim only.
+    bool preview = true;
+};
 struct HumanizationSettings {
     bool enabled = false;
     int path = 0;
@@ -109,6 +117,7 @@ struct Settings {
     DirectionSettings direction;
     TrackingSettings tracking;
     ClassPreferenceSettings class_preference;
+    ColorSettings color;
     int mouse_backend = 0; // 0: Pi UDP, 1: local Windows test mouse
     int secondary_button = 0;
     bool constant_tracking = false, cursor_check = false;
@@ -149,6 +158,6 @@ class Controller {
     void reset();
     Correction update(const std::vector<Detection>& detections, int width, int height, const Settings& s,
                       const Telemetry& limits, int64_t now, MotionEstimate motion = {},
-                      int64_t capture_ns = 0);
+                      int64_t capture_ns = 0, const ColorMask* colors = nullptr);
 };
 } // namespace receiver

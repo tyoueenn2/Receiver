@@ -1,4 +1,5 @@
 #include "receiver/app.hpp"
+#include "receiver/color.hpp"
 #include "receiver/capture.hpp"
 #include "receiver/assist.hpp"
 #include "receiver/local_mouse.hpp"
@@ -65,7 +66,7 @@ void App::start(const Settings& settings, bool simulated) {
         pending_model_.reset();
         pending_benchmark_.reset();
         benchmark_cancel_ = false;
-        stats_.model_loading = !simulated;
+        stats_.model_loading = !simulated && settings.color.mode != 1;
         stop_ = false;
         sender_seen_ = 0;
     }
@@ -168,7 +169,7 @@ void App::configure(const Settings& s, bool reload_model) {
             preview_ = {};
             injected_.release_all(ReleaseReason::configuration_restart, true);
         } else {
-            if (s.constant_tracking != settings_.constant_tracking ||
+            if (s.color.mode != settings_.color.mode || s.constant_tracking != settings_.constant_tracking ||
                 s.trigger.enabled != settings_.trigger.enabled ||
                 s.trigger.spray != settings_.trigger.spray || s.trigger.button != settings_.trigger.button ||
                 s.trigger.delay_ms != settings_.trigger.delay_ms ||
@@ -177,6 +178,8 @@ void App::configure(const Settings& s, bool reload_model) {
                 stats_.armed = stats_.active = false;
                 injected_.release_all(ReleaseReason::configuration_restart, true);
             }
+            if (s.color.mode != settings_.color.mode)
+                preview_ = {};
             settings_ = s;
             ++epoch_;
             result_.reset();
@@ -195,7 +198,7 @@ Settings App::settings() const {
 }
 void App::benchmark(PerformanceGoal goal) {
     std::lock_guard lock(mutex_);
-    if (stop_ || simulated_ || stats_.model_loading || stats_.benchmarking)
+    if (stop_ || simulated_ || settings_.color.mode == 1 || stats_.model_loading || stats_.benchmarking)
         throw std::runtime_error("Start a real model and wait for loading to finish before benchmarking");
     if (!latest_ && !preview_.frame)
         throw std::runtime_error("Receive a picture with preview on before benchmarking");
@@ -382,6 +385,8 @@ void App::inference_loop() {
         stats_.model_message = message;
     };
     auto load = [&](Settings& config) {
+        if (config.color.mode == 1)
+            return std::unique_ptr<Backend>{};
         config = prepare_model_settings(config);
         auto loading = config;
         loading.classes.clear();
@@ -394,9 +399,13 @@ void App::inference_loop() {
     };
     auto publish = [&](const Settings& config) {
         settings_ = config;
-        stats_.backend =
-            simulated_ ? "SIMULATION (fixed test detection, loopback only)" : backend->description();
-        stats_.model_classes = backend ? backend->class_names() : std::vector<std::string>{"Example object"};
+        stats_.backend = config.color.mode == 1 ? "HSV color targeting (CPU, no model)"
+                         : simulated_           ? "SIMULATION (fixed test detection, loopback only)"
+                                                : backend->description();
+        stats_.model_classes = backend                  ? backend->class_names()
+                               : config.color.mode == 1 ? std::vector<std::string>{}
+                                                        : std::vector<std::string>{"Example object"};
+        stats_.gpu_free_mib = stats_.gpu_total_mib = 0;
         if (backend) {
             auto [free, total] = backend->device_memory();
             stats_.gpu_free_mib = double(free) / (1024 * 1024);
@@ -410,9 +419,12 @@ void App::inference_loop() {
     {
         std::lock_guard lock(mutex_);
         publish(initial);
-        stats_.model_message = simulated_ ? "" : "Model ready.";
+        stats_.model_message = initial.color.mode == 1 ? "HSV color targeting ready."
+                               : simulated_            ? ""
+                                                       : "Model ready.";
     }
     int64_t last_preview = 0, next_inference = 0, last_collection = 0;
+    ColorMatcher color_matcher;
     std::unique_ptr<LocalCapture> capture;
     if (initial.frame_source == "local")
         capture = std::make_unique<LocalCapture>(initial.capture_output);
@@ -443,7 +455,9 @@ void App::inference_loop() {
                     ++epoch_;
                     result_.reset();
                     latest_.reset();
-                    stats_.model_message = "Model ready. Mouse control is off.";
+                    stats_.model_message = config.color.mode == 1
+                                               ? "HSV color targeting ready. Mouse control is off."
+                                               : "Model ready. Mouse control is off.";
                 }
                 // Destroy the old session only after the replacement was fully validated.
             } catch (const std::exception& e) {
@@ -551,7 +565,9 @@ void App::inference_loop() {
         std::vector<Detection> detections;
         double upload = 0, infer = 0;
         auto post_start = now_ns();
-        if (simulated_) {
+        if (cfg.color.mode == 1) {
+            // Pure color mode intentionally never loads or runs a model.
+        } else if (simulated_) {
             detections.push_back({frame->header.width * .60f, frame->header.height * .4f,
                                   frame->header.width * .2f, frame->header.height * .2f, .95f, 0});
         } else {
@@ -562,6 +578,7 @@ void App::inference_loop() {
             detections = decode_yolo(result.output, result.candidates, result.classes, frame->header.width,
                                      frame->header.height, cfg.input_size, cfg);
         }
+        auto colors = cfg.color.mode ? color_matcher.build(*frame, cfg.color) : nullptr;
         if (cfg.collection.enabled &&
             now_ns() - last_collection >= int64_t(cfg.collection.interval_ms) * 1'000'000) {
             last_collection = now_ns();
@@ -585,10 +602,10 @@ void App::inference_loop() {
             stats_.inference.add(infer);
             stats_.postprocess.add(double(done - post_start) / 1e6);
             if (epoch == epoch_ && !stop_) {
-                result_ = Result{frame, std::move(detections), epoch, ++result_id_, deadline, done};
+                result_ = Result{frame, std::move(detections), epoch, ++result_id_, deadline, done, colors};
                 control_wake_.notify();
                 if (cfg.preview && done - last_preview >= 33'333'333) {
-                    preview_ = {frame, result_->detections, {}};
+                    preview_ = {frame, result_->detections, {}, colors};
                     last_preview = done;
                 }
             }
@@ -979,7 +996,7 @@ void App::pi_loop() {
         stats_.control_handoff.add(double(now_ns() - r.completed_ns) / 1e6);
         auto correction =
             controller.update(r.detections, r.frame->header.width, r.frame->header.height, settings_,
-                              gate.state, now, physical_motion, r.frame->header.capture_ns);
+                              gate.state, now, physical_motion, r.frame->header.capture_ns, r.colors.get());
         stats_.assist_strength = correction.strength;
         if (preview_.frame && preview_.frame->header.sequence == r.frame->header.sequence)
             preview_.correction = correction;

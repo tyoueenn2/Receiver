@@ -15,6 +15,8 @@
 #endif
 namespace receiver {
 using nlohmann::json;
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ColorSettings, mode, min_h, max_h, min_s, max_s, min_v, max_v,
+                                                offset_x, offset_y, preview)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ClassPreferenceSettings, class_id, class_name, mode,
                                                 max_distance)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(TriggerSettings, enabled, spray, button, delay_ms,
@@ -41,13 +43,19 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend,
     secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
     selected_class_names, inference_fps, auto_size, constant_tracking, cursor_check, trigger, visual, ui,
-    collection, frame_source, capture_output, class_preference)
+    collection, frame_source, capture_output, class_preference, color)
 void validate(const Settings& s) {
     if (s.frame_source != "udp" && s.frame_source != "local")
         throw std::runtime_error("Frame source must be udp or local");
     if (s.capture_output < 0 || s.capture_output > 1024)
         throw std::runtime_error("Capture display index must be 0..1024");
     auto range = [](float v, float lo, float hi) { return std::isfinite(v) && v >= lo && v <= hi; };
+    const auto& color = s.color;
+    if (color.mode < 0 || color.mode > 2 || !range(color.min_h, 0, 360) || !range(color.max_h, 0, 360) ||
+        !range(color.min_s, 0, 100) || !range(color.max_s, color.min_s, 100) || !range(color.min_v, 0, 100) ||
+        !range(color.max_v, color.min_v, 100) || !range(color.offset_x, -1024, 1024) ||
+        !range(color.offset_y, -1024, 1024))
+        throw std::runtime_error("HSV needs hue 0..360, ordered saturation/value 0..100, and valid offsets");
     const auto& preference = s.class_preference;
     if (preference.class_id < -1 || preference.class_id > 9999 || preference.class_name.size() > 1024 ||
         preference.mode < 0 || preference.mode > 1 || !range(preference.max_distance, 0, 1024))

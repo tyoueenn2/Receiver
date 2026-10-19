@@ -45,6 +45,7 @@ struct Preview {
     std::shared_ptr<const Frame> frame;
     std::vector<Detection> detections;
     Correction correction;
+    std::shared_ptr<const ColorMask> colors;
 };
 class App {
     struct Result {
@@ -52,6 +53,7 @@ class App {
         std::vector<Detection> detections;
         uint64_t epoch = 0, id = 0;
         int64_t deadline = 0, completed_ns = 0;
+        std::shared_ptr<const ColorMask> colors;
     };
     mutable std::mutex mutex_;
     std::condition_variable cv_;
