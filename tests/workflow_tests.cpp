@@ -161,6 +161,7 @@ void app_workflows() {
     s.max_age_ms = 250;
     s.classes = {1};
     s.selected_class_names = {"second"};
+    s.class_preference = {0, "first", 1, 24};
     App app(fake_factory);
     app.start(s);
     until([&] { return app.stats().model_revision == 1 || !app.stats().error.empty(); });
@@ -195,6 +196,8 @@ void app_workflows() {
     CHECK(app.stats().running && app.stats().error.empty() && !app.stats().armed);
     CHECK(app.settings().model == "second.pt" && app.settings().input_size == 640);
     CHECK(app.settings().classes == std::vector<int>{0}); // Class labels survive reordered IDs.
+    CHECK(app.settings().class_preference.class_id == 1 &&
+          app.settings().class_preference.class_name == "first");
     auto good = settings_json(app.settings());
     selected = app.settings();
     selected.model = "fail.pt";
@@ -298,10 +301,13 @@ int main() {
         s.confidence = .75f;
         s.inference_fps = 80;
         s.classes = {1};
+        s.class_preference = {1, "second", 1, 24};
         prefs.save(s, "", {"first", "second"});
         auto another = prefs.select_model(s, dynamic_path.string());
         CHECK(another.auto_size && another.classes.empty() && another.inference_fps == 0);
+        CHECK(another.class_preference.class_id == -1);
         another.confidence = .2f;
+        another.class_preference = {0, "first", 0, 70};
         another.sender_ip = "127.0.0.5";
         another.frame_source = "local";
         another.capture_output = 2;
@@ -311,8 +317,11 @@ int main() {
         CHECK(restored.sender_ip == "127.0.0.5" &&
               restored.selected_class_names == std::vector<std::string>{"second"});
         CHECK(restored.frame_source == "local" && restored.capture_output == 2);
+        CHECK(restored.class_preference.class_id == 1 && restored.class_preference.mode == 1 &&
+              restored.class_preference.max_distance == 24);
         reconcile_classes(restored, {"second", "first"});
         CHECK(restored.classes == std::vector<int>{0});
+        CHECK(restored.class_preference.class_id == 0 && restored.class_preference.class_name == "second");
         Preferences reloaded(root / "preferences");
         reloaded.load();
         CHECK(settings_json(reloaded.current) == settings_json(prefs.current));

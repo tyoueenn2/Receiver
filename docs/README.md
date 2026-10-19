@@ -18,6 +18,7 @@ in `licenses/`.
 | [YOLO-Omni](technical/YOLO_OMNI.md) | Python runtime, native checkpoints and worker behavior |
 | [TensorRT engines](technical/ENGINE_FILES.md) | Engine loading, metadata and precision |
 | [Movement and tracking](technical/HUMANIZATION.md) | Humanization, prediction and local mouse controls |
+| [Class preference](technical/CLASS_PREFERENCE.md) | Global preference or proximity to the selected target |
 | [Aimmy features and interface](technical/AIMMY_FEATURES.md) | Continuous tracking, auto trigger, preview styling, imports and collection |
 
 ## Build, test and performance

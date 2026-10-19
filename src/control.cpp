@@ -96,7 +96,8 @@ std::vector<Detection> decode_yolo(std::span<const float> out, int count, int nc
         float score = -1;
         int cls = -1;
         for (int c = 0; c < nc; ++c) {
-            if (!s.classes.empty() && std::find(s.classes.begin(), s.classes.end(), c) == s.classes.end())
+            if (!s.classes.empty() && std::find(s.classes.begin(), s.classes.end(), c) == s.classes.end() &&
+                c != s.class_preference.class_id)
                 continue;
             float v = out[size_t(4 + c) * count + i];
             if (std::isfinite(v) && v > score) {
@@ -140,6 +141,7 @@ std::vector<Detection> decode_yolo(std::span<const float> out, int count, int nc
 }
 void Controller::reset() {
     previous_.reset();
+    previous_base_.reset();
     residual_x_ = residual_y_ = smooth_x_ = smooth_y_ = 0;
     last_ = 0;
     predictor_.reset();
@@ -168,41 +170,87 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     auto eligible = [&](const Detection& d) {
         auto [x, y] = point(d);
         float dx = x - rx, dy = y - ry;
-        return std::isfinite(x) && std::isfinite(y) && d.score >= s.confidence &&
-               (s.classes.empty() ||
-                std::find(s.classes.begin(), s.classes.end(), d.cls) != s.classes.end()) &&
+        return std::isfinite(x) && std::isfinite(y) && std::isfinite(d.w) && std::isfinite(d.h) &&
+               d.w > 0 && d.h > 0 && d.score >= s.confidence && d.score <= 1 &&
                dx * dx + dy * dy <= radius * radius;
     };
+    auto normal = [&](const Detection& d) {
+        return eligible(d) && (s.classes.empty() ||
+                              std::find(s.classes.begin(), s.classes.end(), d.cls) != s.classes.end());
+    };
+    auto priority = [&](const Detection& d) {
+        auto [x, y] = point(d);
+        return s.highest_confidence ? d.score : -((x - rx) * (x - rx) + (y - ry) * (y - ry));
+    };
+    auto select = [&](auto accepts, const std::optional<Detection>& previous, auto value) {
+        const Detection* chosen = nullptr;
+        float rank = -1e30f;
+        if (s.persistence && previous)
+            for (const auto& d : ds)
+                if (accepts(d) && matches(d, *previous)) {
+                    float score = -std::hypot(d.x + d.w * .5f - previous->x - previous->w * .5f,
+                                              d.y + d.h * .5f - previous->y - previous->h * .5f);
+                    if (score >= rank) {
+                        chosen = &d;
+                        rank = score;
+                    }
+                }
+        if (chosen)
+            return chosen;
+        rank = -1e30f;
+        for (const auto& d : ds)
+            if (accepts(d)) {
+                const float score = value(d);
+                if (score > rank) {
+                    rank = score;
+                    chosen = &d;
+                }
+            }
+        return chosen;
+    };
+    const auto& preference = s.class_preference;
+    const bool prefer = preference.class_id >= 0;
+    const bool nearby = prefer && preference.mode == 1;
     const Detection* best = nullptr;
-    float rank = -1e30f, best_match = -1e30f;
-    if (s.persistence && previous_)
-        for (auto& d : ds)
-            if (eligible(d) && matches(d, *previous_)) {
-                float match = -std::hypot(d.x + d.w * .5f - previous_->x - previous_->w * .5f,
-                                          d.y + d.h * .5f - previous_->y - previous_->h * .5f);
-                if (match >= best_match) {
-                    best = &d;
-                    best_match = match;
-                }
-            }
-    if (!best)
-        for (auto& d : ds)
-            if (eligible(d)) {
-                auto [x, y] = point(d);
-                float value = s.highest_confidence ? d.score : -((x - rx) * (x - rx) + (y - ry) * (y - ry));
-                if (value > rank) {
-                    rank = value;
-                    best = &d;
-                }
-            }
+    const Detection* base = nullptr;
+    if (nearby) {
+        base = select([&](const Detection& d) { return d.cls != preference.class_id && normal(d); },
+                      previous_base_, priority);
+        if (base) {
+            auto associated = [&](const Detection& d) {
+                if (d.cls != preference.class_id || !eligible(d))
+                    return false;
+                const float x = d.x + d.w * .5f, y = d.y + d.h * .5f;
+                const float dx = x - std::clamp(x, base->x, base->x + base->w);
+                const float dy = y - std::clamp(y, base->y, base->y + base->h);
+                return dx * dx + dy * dy <= preference.max_distance * preference.max_distance;
+            };
+            // Rank nearby parts relative to this target, not the crosshair or another player.
+            auto distance = [&](const Detection& d) {
+                auto [x, y] = point(*base);
+                return -std::hypot(d.x + d.w * .5f - x, d.y + d.h * .5f - y);
+            };
+            best = select(associated, previous_, distance);
+            if (!best)
+                best = base;
+        }
+    } else {
+        if (prefer)
+            best = select([&](const Detection& d) { return d.cls == preference.class_id && eligible(d); },
+                          previous_, priority);
+        if (!best)
+            best = select(normal, previous_, priority);
+    }
     if (!best) {
         reset();
         return {};
     }
-    bool same = previous_ && matches(*previous_, *best);
+    bool same = previous_ && matches(*previous_, *best) &&
+                (!nearby || (previous_base_ && base && matches(*previous_base_, *base)));
     if (!same) {
         reset();
     }
+    previous_base_ = base ? std::optional<Detection>(*base) : std::nullopt;
     if (!acquired_)
         acquired_ = now;
     auto [x, y] = point(*best);

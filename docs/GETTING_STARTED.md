@@ -13,7 +13,7 @@ the matching category. Q/E moves between categories when you are not typing.
 | Connections | Practice/live mode, UDP/local video source, capture display, mouse output and network ports |
 | Model | Model library, input resolution, inference FPS limit, runtime and performance benchmark |
 | Activation | Held-button or continuous mode, activation buttons, cursor pause and maximum frame age |
-| Targeting | Confidence, classes, target priority/lock, search radius, aim point and movement prediction |
+| Targeting | Confidence, classes, class preference/type, target priority/lock, search radius, aim point and prediction |
 | Movement | Sensitivity, smoothing, correction limits, movement path, jitter and directional strength |
 | Auto click | Enable automatic clicks, once/repeat behavior, click button and timing |
 | Preview | Live video, detection boxes, search-area circle, labels, target lines and overlay appearance |
@@ -30,6 +30,14 @@ automatically next launch, with assistance disarmed.
 
 See [model switching, automatic sizes and preferences](technical/MODEL_WORKFLOWS.md)
 for supported metadata, rollback behavior, library refresh and performance tuning.
+
+In **Targeting > Class preference**, choose a preferred class and a preference
+type. **Whenever available** prioritizes that class anywhere inside the search
+area. **Near the normal target** first selects the normal target, then prefers a
+nearby detection of the preferred class. For example, set **Target class** to
+`player`, **Preferred class** to `head`, and adjust **Maximum association distance**.
+If no head qualifies near that player, the player remains the target.
+See [class preference details](technical/CLASS_PREFERENCE.md).
 
 In practice mode, **Arm practice assistance** sends commands only to the
 simulator; it never moves your actual mouse with the default simulated Pi output.

@@ -6,16 +6,17 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 | Check | What it verifies |
 | --- | --- |
 | Linux GCC Release and Clang Debug | Native compilation, core tests, independent UDP peers, worker processes and model workflows on real Linux runners |
-| Windows MSVC Release and Debug | The same checks plus rendering all seven DirectX GUI pages and starting the read-only mouse reader |
+| Windows MSVC Release and Debug | The same checks plus rendering all eleven DirectX GUI pages at normal and minimum widths, enabled preference controls, search routing and the read-only mouse reader |
 | Linux Clang ASan + UBSan | Memory errors, leaks and undefined behavior in the full native/process/network suite |
-| Repeated workflows | 20 runs per native build and 10 sanitized runs of reload, rollback and settings tests |
+| Repeated workflows | 20 runs per native build and 10 sanitized runs of reload, rollback, settings and the class-preference pipeline |
+| Class preference pipeline | Real worker tensors, UDP frames and Pi output verify global preference, target-bound association, live edits, model changes, fallback and stale-video gating |
 | CPU model inference | A checkpoint generated from the pinned YOLO-Omni fork runs through the real worker; its output matches direct PyTorch inference |
 | Preprocessing reference | RGB/BGRA, rectangular/odd images and 1-pixel dimensions match independent NumPy bilinear letterboxing |
 | ONNX schema oracle | 19 models generated with the official ONNX schema verify fixed/dynamic image sizes, names and rejected formats |
 | ONNX detection reference | The included YOLO11 sample runs in ONNX Runtime; native class filtering, NMS and coordinate mapping match torchvision |
 | CUDA compilation | Both production kernels compile to PTX for compute_75 and compute_86 through NVIDIA NVRTC |
 | TensorRT API check | Production host code compiles against pinned official TensorRT 10.13, ONNX parser and CUDA 12.9 headers |
-| Extracted packages | Installed Windows ZIP/Linux tar.gz contents are checked, started disarmed and rerun worker fault tests outside the checkout |
+| Extracted packages | Installed Windows ZIP/Linux tar.gz contents are checked, started disarmed and rerun class-preference unit/pipeline and worker fault tests outside the checkout |
 
 The new reliability suite runs 10,000 seeded metadata mutations, randomized protocol
 inputs, truncated/oversized metadata, blocked settings replacements, concurrent
@@ -31,6 +32,11 @@ timings, and shutdown during a stalled load. It verifies continued picture recep
 an unchanged Pi connection during reloads, cleared synthetic holds, disarmed output
 and termination of every launched worker. All network peers use loopback, and the
 scenario runner rejects local cursor injection and non-loopback settings.
+
+Worker cleanup compares both PID and OS process creation time, so a reused PID
+cannot be mistaken for a leaked worker. A separate lifecycle regression verifies
+live, terminated and reused process identities. Windows native jobs repeat the
+full worker fault/cleanup test three times in addition to the ordinary suite.
 
 ## Results and packages
 
@@ -84,5 +90,6 @@ do not prove physical USB delivery, real Pi scheduling/backpressure, desktop cap
 GPU driver compatibility, linked TensorRT/NVCC execution, model accuracy or deployment
 latency. The generated Omni checkpoint is untrained, so its test proves inference
 and transport consistency rather than detection quality. The read-only mouse test
-may report a CTest skip when Windows has no interactive desktop; all other checks
-must pass. See [deployment validation](VALIDATION.md) for the remaining device checks.
+and Desktop Duplication checks may report a CTest skip when Windows has no
+accessible desktop; all other checks must pass. See
+[deployment validation](VALIDATION.md) for the remaining device checks.

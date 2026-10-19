@@ -26,22 +26,38 @@ def main():
     parser.add_argument('--all-pages',action='store_true')
     parser.add_argument('--compact',action='store_true',help='Render at the minimum supported window size')
     parser.add_argument('--search-checks',action='store_true',help='Check settings search routes to the right category')
+    parser.add_argument('--preference-checks',action='store_true',help='Render enabled global and near-target preference controls')
     args=parser.parse_args()
-    cases=[(page,None,None) for page in (pages if args.all_pages else [args.page])]
+    cases=[(page,None,None,None) for page in (pages if args.all_pages else [args.page])]
     if args.search_checks:
-        cases += [('connections',query,target) for query,target in
+        cases += [('connections',query,target,None) for query,target in
                   [('prediction','targeting'),('smoothing','movement'),('spray','auto-click'),
                    ('dataset','data-capture'),('mouse sensitivity','movement'),
-                   ('maximum frame age','activation'),('does-not-exist',None)]]
-    for page,query,expected in cases:
+                   ('maximum frame age','activation'),('class preference','targeting'),
+                   ('proximity','targeting'),('does-not-exist',None)]]
+    if args.preference_checks:
+        cases += [('targeting',None,None,mode) for mode in ('global','near')]
+    for page,query,expected,preference in cases:
+        suffix = '-compact' if args.compact else ''
+        if query:
+            suffix += '-find-'+query
+        if preference:
+            suffix += '-preference-'+preference
+        for filename in ('gui-smoke.bmp','gui-smoke-state.json'):
+            Path(filename).unlink(missing_ok=True)
         pi=MockPi(port=free_port()).start()
         port=free_port()
         sender=Sender(port=port).start()
         try:
             result=subprocess.run([str(Path(args.executable).resolve()),'--smoke-test','--page='+page,
                 '--test-frame-port='+str(port),'--test-pi-port='+str(pi.sock.getsockname()[1])]
-                + (['--compact'] if args.compact else []) + (['--find='+query.replace(' ','+')] if query else []),timeout=20,
+                + (['--compact'] if args.compact else []) + (['--find='+query.replace(' ','+')] if query else [])
+                + (['--test-preference='+preference] if preference else []),timeout=20,
                 creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            # Retain this case's diagnostics before assertions can abort the run.
+            for source,extension in [('gui-smoke.bmp','.bmp'),('gui-smoke-state.json','.json')]:
+                if Path(source).exists():
+                    shutil.copyfile(source,'gui-smoke-'+page+suffix+extension)
             assert result.returncode==0, f'{page}: GUI returned {result.returncode}'
             assert pi.commands and all(not c['dx'] and not c['dy'] and not c['buttons'] for c in pi.commands), \
                 'Disarmed GUI may emit only fail-safe shutdown release snapshots'
@@ -49,16 +65,15 @@ def main():
             state=json.loads(Path('gui-smoke-state.json').read_text())
             assert not state['armed'], 'Browsing settings must keep assistance disarmed'
             assert state['navigation_overflow'] < 1, 'Every category must fit in the sidebar: '+str(state)
+            if preference:
+                assert state['preferred_class'] == 0, state
+                assert state['preference_type'] == (preference == 'near'), state
             if query:
                 assert state['visible'] == ([expected] if expected else []), state
                 if expected:
                     assert state['page'] == expected, state
             else:
                 assert state['page'] == aliases.get(page,page) and state['visible'] == pages, state
-            suffix = '-compact' if args.compact else ''
-            if query:
-                suffix += '-find-'+query
-            shutil.copyfile('gui-smoke.bmp','gui-smoke-'+page+suffix+'.bmp')
             print(page+suffix+': category, search, rendering, sync and disarmed startup passed.',flush=True)
         finally:
             sender.stop(); pi.stop()
