@@ -97,6 +97,9 @@ jobs:
       - run: cmake --build build/ci --config ${{ matrix.configuration }} --parallel 2
       - name: Unit, process, network and GUI checks
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --output-junit junit.xml
+      - name: Repeat Debug calibration with concurrent sender heartbeats
+        if: matrix.configuration == 'Debug'
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:3 -R '^receiver_calibration_pipeline$' --output-junit calibration-heartbeat-stress.xml
       - name: Repeat reload, settings and preference pipeline stress checks
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:20 -R "receiver_sender_sync|receiver_workflows|receiver_reliability|receiver_class_preference_pipeline|receiver_color_pipeline" --output-junit stress.xml
       - name: Repeat Windows worker cleanup regression
