@@ -9,3 +9,5 @@ Full Receiver functionality requires UPX1, UPS3/UPT3, and UPC1/UPA1 version 2. U
 Build, test, and run the proxy according to that project's current instructions, with injection enabled. Then configure Receiver to use the Pi's IPv4 address and command port. All Receiver traffic uses one persistent UDP source port so proxy controller ownership remains stable.
 
 Receiver's `tools/mock_pi.py` is a deterministic test fixture only. It has no Raw Gadget or USB access and cannot validate a real Pi, physical mouse, USB host, or destination application.
+
+Move/click/return additionally requires `UPQ1`/`UPI1` capability negotiation and `UPM1`/`UPR1` transactions from the updated proxy. These preserve the existing telemetry and click layouts. Calibration probes use the same transaction path. See [calibration and operation](MOVE_ACTION_RETURN.md).

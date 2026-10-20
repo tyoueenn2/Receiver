@@ -10,6 +10,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  calibration:
+    name: Calibration and move-return / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure calibration without device, capture or model dependencies
+        run: cmake -S . -B build/calibration -DCMAKE_BUILD_TYPE=Release -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF -DRECEIVER_INTEGRATION_TESTS=ON
+      - name: Build calibration controller, protocol and shared command-state tests
+        run: cmake --build build/calibration --config Release --target receiver_calibration_tests receiver_calibration_runner receiver_injection_tests --parallel 2
+      - name: Calibration math, protocol and seven simulated action scenarios
+        run: ctest --test-dir build/calibration -C Release --output-on-failure --no-tests=error -R '^receiver_(calibration|calibration_pipeline|injection)$' --output-junit calibration.xml
+      - name: Repeat calibration and verified-click lifecycle
+        run: ctest --test-dir build/calibration -C Release --output-on-failure --no-tests=error --repeat until-fail:3 -R '^receiver_calibration_pipeline$' --output-junit calibration-stress.xml
+      - name: Keep calibration diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-${{ matrix.os }}
+          path: |
+            build/calibration/*.xml
+            build/calibration/Testing/Temporary/
+            build/calibration/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: warn
+
   makcu:
     name: MAKCU / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -200,7 +232,7 @@ jobs:
   release:
     name: Publish tested hardware-free packages on version tags
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    needs: [makcu, native, sanitizers, cpu-model, cuda-compile]
+    needs: [calibration, makcu, native, sanitizers, cpu-model, cuda-compile]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

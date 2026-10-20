@@ -3,6 +3,7 @@
 #include "injection.hpp"
 #include "network.hpp"
 #include "performance.hpp"
+#include "cursor_protocol.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <fstream>
@@ -24,7 +25,8 @@ struct Stats {
     InjectionMetrics injection;
     uint64_t inferred = 0, sent = 0, synthetic_snapshots = 0, release_snapshots = 0, hold_heartbeats = 0,
              replaced = 0, stale = 0, telemetry_rejected = 0;
-    bool running = false, armed = false, active = false, synchronized = false, pi_ready = false;
+    bool running = false, armed = false, active = false, synchronized = false, pi_ready = false,
+         calibration_only = false;
     int width = 0, height = 0;
     uint8_t physical = 0;
     double clock_uncertainty_ms = 0, frame_age_ms = 0;
@@ -69,7 +71,28 @@ class App {
     Preview preview_;
     ClockSync clock_;
     uint64_t epoch_ = 0, result_id_ = 0;
-    bool simulated_ = false;
+    bool simulated_ = false, calibration_only_ = false;
+    std::thread calibration_thread_;
+    std::atomic<bool> calibration_cancel_{false};
+    CalibrationStatus calibration_state_;
+    move_protocol::Capabilities move_capabilities_;
+    int64_t capabilities_at_ = 0, move_next_send_ = 0, move_deadline_ = 0, move_stage_at_ = 0;
+    std::optional<move_protocol::Request> move_request_;
+    move_protocol::Ack move_result_;
+    cursor_protocol::Sample cursor_sample_;
+    int64_t cursor_received_ = 0, cursor_requested_ = 0;
+    std::shared_ptr<const Frame> calibration_frame_;
+    bool action_latched_ = false;
+    std::optional<std::pair<double, double>> move_target_, move_origin_;
+    int64_t move_completed_at_ = 0;
+    uint64_t submit_move_locked(int dx, int dy, int button, bool midpoint);
+    void calibration_loop(int context, bool verify);
+    move_protocol::Ack wait_move(uint64_t id, bool midpoint);
+    void continue_move(uint64_t id);
+    void cancel_move_locked();
+    std::pair<double, double> observe_cursor(int64_t after);
+    std::shared_ptr<const Frame> observe_frame(int64_t after);
+    bool calibration_compatible_locked() const;
     BackendFactory backend_factory_;
     std::optional<Settings> pending_model_;
     std::optional<PerformanceGoal> pending_benchmark_;
@@ -84,13 +107,18 @@ class App {
     ~App() {
         stop();
     }
-    void start(const Settings& settings, bool simulated = false);
+    void start(const Settings& settings, bool simulated = false, bool calibration_only = false);
     void stop();
     void arm(bool enabled);
     void configure(const Settings& settings, bool reload_model = false);
     Settings settings() const;
     void benchmark(PerformanceGoal goal);
     void cancel_benchmark();
+    void start_calibration(const Settings& settings, int context, bool verify = false);
+    void cancel_calibration();
+    CalibrationStatus calibration_status() const;
+    uint64_t move_click_return(double x, double y, bool desktop = false, bool click = true);
+    void clear_calibration();
     void button_down(int button);
     void button_up(int button);
     void set_button(int button, bool state);

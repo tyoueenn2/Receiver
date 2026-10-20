@@ -366,6 +366,7 @@ void save_backbuffer(const char* path, IDXGISwapChain* source = swapchain) {
 }
 } // namespace
 int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const std::string options(arguments);
     bool smoke = options.find("--smoke-test") != std::string::npos;
     bool demo = options.find("--demo") != std::string::npos;
@@ -631,6 +632,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             }
         }
         auto stats = app.stats();
+        const auto calibration_status = app.calibration_status();
+        static uint64_t calibration_revision = 0;
+        if (calibration_status.revision != calibration_revision) {
+            calibration_revision = calibration_status.revision;
+            settings.calibration = app.settings().calibration;
+            mark_preferences();
+        }
         if (stats.running && stats.model_revision != model_revision && !stats.model_loading) {
             model_revision = stats.model_revision;
             settings = app.settings();
@@ -821,12 +829,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         if (stats.running) {
             ImGui::SameLine(0, 20);
             bool armed = stats.armed;
+            ImGui::BeginDisabled(stats.calibration_only || calibration_status.running ||
+                                 calibration_status.operation_active);
             if (ImGui::Checkbox(settings.mouse_backend == 1   ? "Arm local assistance"
                                 : settings.mouse_backend == 2 ? "Arm MAKCU assistance"
                                 : simulate                    ? "Arm practice assistance"
                                                               : "Arm assistance",
                                 &armed))
                 app.arm(armed);
+            ImGui::EndDisabled();
         }
         ImGui::EndDisabled();
         ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 220);
@@ -1310,8 +1321,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 changed |= combo("Preference type", &preference.mode,
                                  "Whenever available\0Near the normal target\0");
                 if (preference.mode == 1) {
-                    changed |= slider_float("Maximum association distance", &preference.max_distance,
-                                            0, 512, "%.0f px");
+                    changed |= slider_float("Maximum association distance", &preference.max_distance, 0, 512,
+                                            "%.0f px");
                     hint("Choose player as Target class and head as Preferred class. A head's center "
                          "must be inside the selected player's box or within this distance of its edge. "
                          "A head near another player does not change which player is selected.");
@@ -1437,6 +1448,151 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             section("Sensitivity", "How strongly the mouse corrects the distance to the aim point.");
             changed |= slider_float("Horizontal sensitivity", &settings.gain_x, 0, 2, "%.2f");
             changed |= slider_float("Vertical sensitivity", &settings.gain_y, 0, 2, "%.2f");
+            section(
+                "Calibration",
+                "Measure how mouse counts move pixels. Calibration makes small movements without clicking.");
+            ImGui::TextUnformatted(calibration_status.message.c_str());
+            if (stats.calibration_only)
+                hint("This is a calibration session. End the session and start a normal session to arm "
+                     "tracking.");
+            if (settings.calibration.verified)
+                ImGui::Text("Landing error %.2f px; return error %.2f px; range +/- %d counts",
+                            settings.calibration.error_px, settings.calibration.return_error_px,
+                            settings.calibration.max_counts);
+            if (!calibration_status.error.empty())
+                hint(calibration_status.error.c_str());
+            static int calibration_context = 0, calibration_method = 0;
+            ImGui::BeginDisabled(settings.mouse_backend != 0 || stats.model_loading || stats.benchmarking ||
+                                 calibration_status.operation_active);
+            if (ImGui::Button("Calibrate...")) {
+                calibration_context = settings.calibration.context;
+                ImGui::OpenPopup("Calibrate mouse");
+            }
+            ImGui::EndDisabled();
+            if (calibration_status.running) {
+                ImGui::ProgressBar(calibration_status.total
+                                       ? float(calibration_status.completed) / calibration_status.total
+                                       : 0);
+                if (ImGui::Button("Cancel calibration"))
+                    app.cancel_calibration();
+            }
+            if (ImGui::BeginPopupModal("Calibrate mouse", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::TextWrapped("Leave the mouse still during measurement. For a rotating view, use a "
+                                   "stationary textured scene.");
+                ImGui::BeginDisabled(calibration_status.running);
+                combo("Calibration context", &calibration_context,
+                      "Desktop cursor\0Fixed crosshair / rotating view\0");
+                ImGui::RadioButton("Automatic", &calibration_method, 0);
+                ImGui::SameLine();
+                ImGui::RadioButton("Manual", &calibration_method, 1);
+                if (calibration_method == 0) {
+                    ImGui::TextWrapped(calibration_context == 0
+                                           ? "Automatic desktop calibration requires cursor feedback from an "
+                                             "updated FrameSender on the target computer."
+                                           : "Automatic view calibration measures background movement and "
+                                             "rejects inconsistent or low-texture scenes.");
+                    if (ImGui::Button("Start automatic calibration")) {
+                        try {
+                            app.start_calibration(settings, calibration_context);
+                            error.clear();
+                        } catch (const std::exception& e) {
+                            error = e.what();
+                        }
+                    }
+                } else {
+                    auto& record = settings.calibration;
+                    bool manual_changed =
+                        ImGui::InputDouble("Horizontal pixels per count", &record.xx, .01, .1, "%.4f");
+                    manual_changed |=
+                        ImGui::InputDouble("Vertical pixels per count", &record.yy, .01, .1, "%.4f");
+                    manual_changed |=
+                        ImGui::InputDouble("Horizontal response to Y", &record.xy, .01, .1, "%.4f");
+                    manual_changed |=
+                        ImGui::InputDouble("Vertical response to X", &record.yx, .01, .1, "%.4f");
+                    manual_changed |= ImGui::InputInt("Measured range in counts", &record.max_counts);
+                    manual_changed |=
+                        ImGui::InputDouble("Allowed error in pixels", &record.tolerance_px, .1, 1, "%.1f");
+                    if (manual_changed) {
+                        record.context = calibration_context;
+                        record.verified = false;
+                        record.method = "manual";
+                        changed = true;
+                    }
+                    ImGui::TextWrapped(
+                        "Enter signed measured response values, then verify them with movement-only probes.");
+                }
+                if (ImGui::Button("Verify calibration")) {
+                    try {
+                        app.start_calibration(settings, calibration_context, true);
+                        error.clear();
+                    } catch (const std::exception& e) {
+                        error = e.what();
+                    }
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Clear calibration")) {
+                    settings.calibration = {};
+                    changed = true;
+                    app.clear_calibration();
+                }
+                ImGui::EndDisabled();
+                ImGui::TextWrapped("%s", calibration_status.message.c_str());
+                if (!calibration_status.error.empty())
+                    ImGui::TextWrapped("%s", calibration_status.error.c_str());
+                if (calibration_status.running && ImGui::Button("Cancel"))
+                    app.cancel_calibration();
+                if (ImGui::Button("Close"))
+                    ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+            section("Move, click, and return",
+                    "Perform one calibrated action on the Pi, then return. Re-arm for another action.");
+            ImGui::BeginDisabled(settings.mouse_backend != 0 || calibration_status.running ||
+                                 calibration_status.operation_active);
+            changed |= ImGui::Checkbox("Use move, click, and return", &settings.return_action.enabled);
+            changed |= slider_int("Action button", &settings.return_action.button, 1, 8);
+            changed |= slider_int("Settle before click", &settings.return_action.settle_ms, 0, 1000, "%d ms");
+            changed |=
+                slider_int("Action press duration", &settings.return_action.press_ms, 1, 1000, "%d ms");
+            changed |=
+                slider_int("Delay before return", &settings.return_action.return_delay_ms, 0, 1000, "%d ms");
+            changed |= ImGui::Checkbox("Verify desktop position before clicking",
+                                       &settings.return_action.verified_target);
+            static double test_pixel_x = 0, test_pixel_y = 0;
+            static bool test_desktop_coordinates = true;
+            ImGui::Checkbox("Test uses desktop coordinates", &test_desktop_coordinates);
+            ImGui::InputDouble("Test target X", &test_pixel_x, 1, 10, "%.0f");
+            ImGui::InputDouble("Test target Y", &test_pixel_y, 1, 10, "%.0f");
+            if (ImGui::Button("Use image center")) {
+                test_desktop_coordinates = false;
+                test_pixel_x = stats.width / 2.0;
+                test_pixel_y = stats.height / 2.0;
+            }
+            ImGui::BeginDisabled(!stats.running || !settings.calibration.verified ||
+                                 !calibration_status.supported);
+            if (ImGui::Button("Test movement only")) {
+                try {
+                    app.move_click_return(test_pixel_x, test_pixel_y, test_desktop_coordinates, false);
+                    error.clear();
+                } catch (const std::exception& e) {
+                    error = e.what();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Test click and return")) {
+                try {
+                    app.move_click_return(test_pixel_x, test_pixel_y, test_desktop_coordinates, true);
+                    error.clear();
+                } catch (const std::exception& e) {
+                    error = e.what();
+                }
+            }
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+            if (!calibration_status.operation.empty())
+                ImGui::TextWrapped("Last operation: %s", calibration_status.operation.c_str());
+            hint("USB completion does not guarantee that an application processed the click at the "
+                 "intermediate position.");
             section("Smoothing", "Reduce sudden changes between corrections.");
             int smoothing = h.ema_enabled ? 2 : settings.smoothing_ms > 0 ? 1 : 0;
             if (combo("Smoothing method", &smoothing,
@@ -1650,7 +1806,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             changed |= ImGui::Checkbox("Save YOLO labels with each image", &settings.collection.auto_label);
             hint("Images go in images/ as lossless PPM files. Labels go in labels/ as normalized YOLO text "
                  "files. Predictions need review before training.");
-            section("Capture status", "Save images from the selected video source at the collection interval.");
+            section("Capture status",
+                    "Save images from the selected video source at the collection interval.");
             ImGui::Text("Capture: %s", !settings.collection.enabled ? "Off"
                                        : stats.running              ? "Saving received images"
                                                                     : "Waiting for a session");
@@ -1875,7 +2032,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     hint("Technical details for checking connections and measuring performance.");
                     ImGui::TextWrapped("%s | %s", stats.status.c_str(), stats.backend.c_str());
                     if (settings.frame_source == "local")
-                        ImGui::Text("Video: local display %d | Timing: receiver clock", settings.capture_output);
+                        ImGui::Text("Video: local display %d | Timing: receiver clock",
+                                    settings.capture_output);
                     else
                         ImGui::Text("Video: UDP | Sender timing: %s | Uncertainty: %.3f ms",
                                     stats.synchronized ? "ready" : "waiting", stats.clock_uncertainty_ms);

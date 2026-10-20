@@ -19,6 +19,7 @@ in `licenses/`.
 | [YOLO-Omni](technical/YOLO_OMNI.md) | Python runtime, native checkpoints and worker behavior |
 | [TensorRT engines](technical/ENGINE_FILES.md) | Engine loading, metadata and precision |
 | [Movement and tracking](technical/HUMANIZATION.md) | Humanization, prediction and local mouse controls |
+| [Move click and return](technical/MOVE_ACTION_RETURN.md) | Calibration, automatic measurement, ordered Pi actions, and test controls |
 | [Class preference](technical/CLASS_PREFERENCE.md) | Global preference or proximity to the selected target |
 | [HSV color targeting](technical/COLOR_TARGETING.md) | Color-only targeting, model box refinement, HSV ranges and offsets |
 | [Aimmy features and interface](technical/AIMMY_FEATURES.md) | Continuous tracking, auto trigger, preview styling, imports and collection |
@@ -42,4 +43,5 @@ in `licenses/`.
 | [Network protocols](technical/PROTOCOL.md) | Frame, telemetry and mouse-command wire formats |
 | [Sender contract](technical/SENDER.md) | Requirements for a capture/sender implementation |
 | [Pi compatibility](technical/PI_COMPATIBILITY.md) | Supported proxy protocols and integration boundaries |
+| [Move action return implementation plan](technical/MOVE_ACTION_RETURN_PLAN.md) | Design and hardware acceptance plan for calibration and ordered Pi actions |
 | [Third-party notices](technical/THIRD_PARTY.md) | Source attribution and dependency licenses |
