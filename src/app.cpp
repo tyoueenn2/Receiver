@@ -36,12 +36,13 @@ void App::fail(const std::string& error, ReleaseReason reason) {
     cv_.notify_all();
     control_wake_.notify();
 }
-void App::start(const Settings& settings, bool simulated) {
+void App::start(const Settings& settings, bool simulated, bool calibration_only) {
     stop();
     validate(settings);
     const bool local_capture = settings.frame_source == "local";
     if (local_capture && !local_capture_supported())
-        throw std::runtime_error("Local desktop capture requires Windows 10/11. Select the UDP frame source.");
+        throw std::runtime_error(
+            "Local desktop capture requires Windows 10/11. Select the UDP frame source.");
     Address sender{};
     if (!local_capture) {
         address(settings.bind_ip, settings.frame_port);
@@ -49,14 +50,15 @@ void App::start(const Settings& settings, bool simulated) {
     }
     auto pi = address(settings.mouse_backend == 0 ? settings.pi_ip : "127.0.0.1", settings.pi_port);
     auto local = address("127.0.0.1", 0);
-    if (simulated && ((!local_capture && sender.ip != local.ip) ||
-                      (settings.mouse_backend == 0 && pi.ip != local.ip)))
+    if (simulated &&
+        ((!local_capture && sender.ip != local.ip) || (settings.mouse_backend == 0 && pi.ip != local.ip)))
         throw std::runtime_error("Simulation requires both sender and Pi to be 127.0.0.1");
     {
         std::lock_guard lock(mutex_);
         settings_ = settings;
         stats_ = {};
         stats_.running = true;
+        stats_.calibration_only = calibration_only;
         stats_.status = "Starting";
         latest_.reset();
         result_.reset();
@@ -64,10 +66,24 @@ void App::start(const Settings& settings, bool simulated) {
         clock_.reset();
         ++epoch_;
         simulated_ = simulated;
+        calibration_only_ = calibration_only;
+        move_request_.reset();
+        move_target_.reset();
+        move_origin_.reset();
+        move_completed_at_ = 0;
+        move_result_ = {};
+        move_capabilities_ = {};
+        capabilities_at_ = 0;
+        cursor_sample_ = {};
+        cursor_received_ = cursor_requested_ = 0;
+        calibration_frame_.reset();
+        calibration_state_ = {};
+        calibration_cancel_ = false;
+        action_latched_ = false;
         pending_model_.reset();
         pending_benchmark_.reset();
         benchmark_cancel_ = false;
-        stats_.model_loading = !simulated && settings.color.mode != 1;
+        stats_.model_loading = !simulated && !calibration_only && settings.color.mode != 1;
         stop_ = false;
         sender_seen_ = 0;
     }
@@ -100,6 +116,7 @@ void App::start(const Settings& settings, bool simulated) {
     });
 }
 void App::stop() {
+    calibration_cancel_ = true;
     bool had_threads = inference_thread_.joinable();
     {
         std::lock_guard lock(mutex_);
@@ -112,6 +129,8 @@ void App::stop() {
     }
     cv_.notify_all();
     control_wake_.notify();
+    if (calibration_thread_.joinable())
+        calibration_thread_.join();
     for (auto* t : {&receive_thread_, &inference_thread_, &pi_thread_})
         if (t->joinable())
             t->join();
@@ -136,6 +155,14 @@ void App::stop() {
 void App::arm(bool enabled) {
     {
         std::lock_guard lock(mutex_);
+        if (enabled && (calibration_only_ || calibration_state_.running))
+            throw std::runtime_error("Finish calibration and start a normal session before arming");
+        if (!enabled) {
+            calibration_cancel_ = true;
+            cancel_move_locked();
+        }
+        if (enabled)
+            action_latched_ = false;
         stats_.armed = enabled && !stop_ && stats_.error.empty() && !stats_.benchmarking && !pending_model_;
         ++epoch_;
         result_.reset();
@@ -150,6 +177,10 @@ void App::configure(const Settings& s, bool reload_model) {
     bool restart;
     {
         std::lock_guard lock(mutex_);
+        if (calibration_state_.running)
+            throw std::runtime_error("Finish or cancel calibration before changing settings");
+        if (move_request_ && !move_protocol::terminal(move_result_.status))
+            throw std::runtime_error("Wait for the move and return operation to finish");
         if (stats_.model_loading || stats_.benchmarking)
             throw std::runtime_error("Wait for the model operation to finish");
         restart = connection_settings_changed(s, settings_);
@@ -234,6 +265,8 @@ void require_synthetic_ready(bool stopped, const Stats& stats, const Settings& s
 void App::button_down(int button) {
     std::lock_guard lock(mutex_);
     require_synthetic_ready(stop_, stats_, settings_, sender_seen_);
+    if (calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status)))
+        throw std::runtime_error("Calibration or move and return owns mouse output");
     injected_.button_down(button);
 }
 void App::button_up(int button) {
@@ -248,17 +281,23 @@ void App::set_button(int button, bool state) {
 }
 void App::release_all() {
     std::lock_guard lock(mutex_);
+    calibration_cancel_ = true;
+    cancel_move_locked();
     injected_.release_all(ReleaseReason::manual, true);
 }
 InjectedButtonManager::Hold App::hold(int button) {
     std::lock_guard lock(mutex_);
     require_synthetic_ready(stop_, stats_, settings_, sender_seen_);
+    if (calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status)))
+        throw std::runtime_error("Calibration or move and return owns mouse output");
     return injected_.hold(button);
 }
 uint64_t App::click(int button, uint32_t count, std::chrono::microseconds press_duration,
                     std::chrono::microseconds interval) {
     std::lock_guard lock(mutex_);
     require_synthetic_ready(stop_, stats_, settings_, sender_seen_);
+    if (calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status)))
+        throw std::runtime_error("Calibration or move and return owns mouse output");
     return injected_.click(button, count, press_duration, interval);
 }
 Stats App::stats() const {
@@ -285,6 +324,10 @@ void App::receive_loop() {
     uint64_t session = 0;
     int64_t last_hello = 0, last_ping = 0, pending_ping = 0, last_resolution = 0;
     int requested_size = 0;
+    int64_t last_cursor_request = 0;
+    uint64_t cursor_token = random_id();
+    std::array<std::pair<uint64_t, int64_t>, 8> cursor_queries{};
+    size_t cursor_query_index = 0;
     std::array<uint64_t, 16> retired{};
     size_t retire_at = 0;
     Reassembler reassembly;
@@ -313,6 +356,9 @@ void App::receive_loop() {
                         requested_size = 0;
                         std::lock_guard lock(mutex_);
                         clock_.reset();
+                        cursor_received_ = 0;
+                        cursor_sample_ = {};
+                        calibration_frame_.reset();
                         latest_.reset();
                         result_.reset();
                         preview_ = {};
@@ -334,12 +380,29 @@ void App::receive_loop() {
                         clock_.observe(pending_ping, int64_t(t1), int64_t(t2), now);
                     }
                     pending_ping = 0;
+                } else if (n == 112 && !std::memcmp(data.data(), "UVG1", 4)) {
+                    cursor_protocol::Sample sample;
+                    if (cursor_protocol::parse(data.data(), size_t(n), sample) && sample.session == session) {
+                        for (const auto& issued : cursor_queries)
+                            if (issued.first == sample.token && issued.second &&
+                                now - issued.second <= 200'000'000) {
+                                std::lock_guard lock(mutex_);
+                                if (!cursor_received_ || newer(sample.sequence, cursor_sample_.sequence)) {
+                                    cursor_sample_ = sample;
+                                    cursor_received_ = now;
+                                    cursor_requested_ = issued.second;
+                                    cv_.notify_all();
+                                }
+                                break;
+                            }
+                    }
                 } else if (n >= 48 && !std::memcmp(data.data(), "UVF1", 4)) {
                     auto frame = reassembly.accept(p, now);
                     if (frame) {
                         std::lock_guard lock(mutex_);
                         if (latest_)
                             ++stats_.replaced;
+                        calibration_frame_ = frame;
                         latest_ = std::move(frame);
                         stats_.width = latest_->header.width;
                         stats_.height = latest_->header.height;
@@ -360,6 +423,13 @@ void App::receive_loop() {
             injected_.release_all(ReleaseReason::sender_loss, true);
             sender_lost = true;
         }
+        if (session && !sender_lost && now - last_cursor_request >= 20'000'000) {
+            auto request = cursor_protocol::request(session, ++cursor_token);
+            if (socket.send(request, peer)) {
+                cursor_queries[cursor_query_index++ % cursor_queries.size()] = {cursor_token, now};
+                last_cursor_request = now;
+            }
+        }
         if (session && now - last_ping >= 250'000'000) {
             std::array<uint8_t, 24> ping{};
             std::memcpy(ping.data(), "UVC1", 4);
@@ -376,7 +446,7 @@ void App::receive_loop() {
                 std::lock_guard lock(mutex_);
                 // Publish only the active model's validated size. A pending or failed
                 // replacement must not change the sender's capture dimensions.
-                ready = stats_.model_revision != 0;
+                ready = calibration_only_ || stats_.model_revision != 0;
                 size = settings_.input_size;
             }
             if (ready && (size != requested_size || now - last_resolution >= 250'000'000)) {
@@ -436,11 +506,16 @@ void App::inference_loop() {
         stats_.model_loading = false;
         ++stats_.model_revision;
     };
-    if (!simulated_)
+    if (!simulated_ && !calibration_only_)
         backend = load(initial);
     {
         std::lock_guard lock(mutex_);
-        publish(initial);
+        if (calibration_only_) {
+            stats_.model_loading = false;
+            stats_.backend = "Calibration only";
+            ++stats_.model_revision;
+        } else
+            publish(initial);
         stats_.model_message = initial.color.mode == 1 ? "HSV color targeting ready."
                                : simulated_            ? ""
                                                        : "Model ready.";
@@ -541,14 +616,28 @@ void App::inference_loop() {
             // Capture only when inference is ready. DXGI retains the newest desktop;
             // no transport, compression, conversion, or extra capture thread is needed.
             auto picture = capture->next(size);
+            auto cursor = capture->cursor();
             sender_seen_ = now_ns(); // A successful bounded poll also proves capture is healthy.
             std::lock_guard lock(mutex_);
+            cursor_sample_ = cursor;
+            cursor_received_ = cursor_requested_ = now_ns();
             stats_.synchronized = true; // Local timestamps already share our steady clock.
             if (!picture)
                 continue;
             stats_.width = picture->header.width;
             stats_.height = picture->header.height;
+            calibration_frame_ = picture;
             latest_ = std::move(picture);
+        }
+        if (calibration_only_) {
+            std::unique_lock lock(mutex_);
+            if (latest_) {
+                preview_.frame = latest_;
+                latest_.reset();
+                ++stats_.inferred;
+            }
+            cv_.wait_for(lock, std::chrono::milliseconds(5));
+            continue;
         }
         std::shared_ptr<const Frame> frame;
         Settings cfg;
@@ -648,7 +737,8 @@ void App::pi_loop() {
     gate.reset(client);
     uint64_t token = random_id(), last_result = 0, last_epoch = 0, sent_revision = 0;
     uint32_t sequence = uint32_t(random_id());
-    int64_t renewal = 0, last_snapshot = 0;
+    int64_t renewal = 0, last_snapshot = 0, last_capability = 0;
+    uint64_t capability_token = 0;
     bool have_sent_revision = false;
     std::unique_ptr<LocalMouse> local_mouse;
     std::unique_ptr<MakcuMouse> makcu_mouse;
@@ -704,6 +794,18 @@ void App::pi_loop() {
             arm(false);
 #endif
         if (pi_udp) {
+            bool want_capabilities;
+            {
+                std::lock_guard lock(mutex_);
+                want_capabilities = calibration_state_.running || settings_.return_action.enabled ||
+                                    settings_.calibration.verified || calibration_only_;
+            }
+            if (want_capabilities && !shutdown_deadline && now - last_capability >= 100'000'000) {
+                capability_token = ++token;
+                auto query = move_protocol::query(client, capability_token);
+                socket.send(query, pi);
+                last_capability = now;
+            }
             bool need_motion;
             {
                 std::lock_guard lock(mutex_);
@@ -765,16 +867,19 @@ void App::pi_loop() {
             }
             motion_tracker.observe(gate.state, now_ns(), window);
 
-        } else
-#ifdef _WIN32
-            n = socket.receive(bytes, from, 0);
-#else
-            n = socket.receive(bytes, from, 1);
-#endif
-        now = now_ns();
+        }
         bool proxy_error = false;
         bool protocol_error = false;
-        if (n > 0 && from == pi) {
+        // Progress acknowledgments share this socket with telemetry. Drain a bounded
+        // burst before deciding freshness so queued acknowledgments cannot hide a
+        // current telemetry packet behind another control-loop wait.
+        for (unsigned received = 0; pi_udp && received < 64; ++received) {
+            n = socket.receive(bytes, from, 0);
+            now = now_ns();
+            if (n <= 0)
+                break;
+            if (from != pi)
+                continue;
             if (n >= 4 && (!std::memcmp(bytes.data(), "UPT1", 4) || !std::memcmp(bytes.data(), "UPT2", 4) ||
                            !std::memcmp(bytes.data(), "UPT3", 4))) {
                 const bool wire_v1 = !std::memcmp(bytes.data(), "UPT1", 4);
@@ -834,6 +939,52 @@ void App::pi_loop() {
                         upgrade_backoff = upgrade_backoff_min_ns;
                     }
                 }
+            } else if (n == int(move_protocol::capability_size) && !std::memcmp(bytes.data(), "UPI1", 4)) {
+                move_protocol::Capabilities caps;
+                if (move_protocol::parse_capabilities(bytes.data(), size_t(n), caps) &&
+                    caps.session == client && caps.token == capability_token) {
+                    std::lock_guard lock(mutex_);
+                    move_capabilities_ = caps;
+                    capabilities_at_ = now;
+                    cv_.notify_all();
+                }
+            } else if (n == int(move_protocol::ack_size) && !std::memcmp(bytes.data(), "UPR1", 4)) {
+                move_protocol::Ack a;
+                if (move_protocol::parse_ack(bytes.data(), size_t(n), a)) {
+                    std::lock_guard lock(mutex_);
+                    if (move_request_ && a.session == move_request_->session &&
+                        a.command == move_request_->command) {
+                        if (a.epoch != move_request_->epoch || a.generation != move_request_->generation) {
+                            a.status = move_protocol::Status::EndpointChanged;
+                            a.flags |= 1;
+                        }
+                        if (a.status != move_protocol::Status::Busy &&
+                            a.status != move_protocol::Status::QueueFull &&
+                            (!move_protocol::terminal(move_result_.status) ||
+                             move_result_.status == move_protocol::Status::Accepted) &&
+                            a.written_ns >= move_result_.written_ns) {
+                            if (int64_t(a.out_x) + a.return_x != a.residual_x ||
+                                int64_t(a.out_y) + a.return_y != a.residual_y ||
+                                std::abs(int64_t(a.out_x)) > std::abs(int64_t(move_request_->dx)) ||
+                                std::abs(int64_t(a.out_y)) > std::abs(int64_t(move_request_->dy)) ||
+                                (a.status == move_protocol::Status::Completed &&
+                                 (a.out_x != move_request_->dx || a.out_y != move_request_->dy ||
+                                  a.residual_x || a.residual_y || (a.flags & 1) ||
+                                  (move_request_->button && (a.flags & 6) != 6)))) {
+                                a.status = move_protocol::Status::Invalid;
+                                a.flags |= 1;
+                            }
+                            if (a.stage != move_result_.stage)
+                                move_stage_at_ = now;
+                            if (move_protocol::terminal(a.status))
+                                move_completed_at_ = now;
+                            move_result_ = a;
+                            calibration_state_.action = a;
+                            calibration_state_.operation = move_protocol::status_name(a.status);
+                            cv_.notify_all();
+                        }
+                    }
+                }
             } else if (n >= 4 && !std::memcmp(bytes.data(), "UPA1", 4)) {
                 const auto ack = injected_.process_click_ack(Bytes(bytes.data(), size_t(n)), now);
                 if (ack == AckResult::protocol_error) {
@@ -852,10 +1003,12 @@ void App::pi_loop() {
                 std::string reply(reinterpret_cast<char*>(bytes.data()), size_t(n));
                 const bool expected_probe_error =
                     (probe == Probe::initial_v3 || probe == Probe::selected_v1) &&
-                    (reply.find("unknown") != std::string::npos ||
+                    ((reply == "error command" && now - last_capability < 100'000'000) ||
+                     reply.find("unknown") != std::string::npos ||
                      reply.find("unsupported") != std::string::npos ||
                      reply.find("invalid command") != std::string::npos);
-                if (!expected_probe_error && (reply == "busy" || reply.rfind("error", 0) == 0)) {
+                if (!(reply == "error command" && last_capability && now - last_capability < 100'000'000) &&
+                    !expected_probe_error && (reply == "busy" || reply.rfind("error", 0) == 0)) {
                     {
                         std::lock_guard lock(mutex_);
                         stats_.error = "Pi: " + reply;
@@ -867,6 +1020,7 @@ void App::pi_loop() {
                 }
             }
         }
+        now = now_ns();
         const bool input_ok = input_fresh(now);
         const bool peer_lost = pi_udp && had_input && was_input_fresh && !input_ok;
         const bool peer_recovered = pi_udp && !was_input_fresh && input_ok;
@@ -961,6 +1115,60 @@ void App::pi_loop() {
             }
         }
 
+        if (pi_udp && !shutdown_deadline) {
+            std::optional<move_protocol::Request> outgoing;
+            {
+                std::lock_guard lock(mutex_);
+                if (move_request_ && !move_protocol::terminal(move_result_.status)) {
+                    if (move_target_ && move_result_.stage == move_protocol::Stage::Waiting &&
+                        cursor_sample_.valid() && cursor_requested_ >= move_stage_at_ &&
+                        now - cursor_received_ < 100'000'000) {
+                        const double error = std::hypot(cursor_sample_.x - move_target_->first,
+                                                        cursor_sample_.y - move_target_->second);
+                        move_request_->operation = error <= settings_.calibration.tolerance_px
+                                                       ? move_protocol::Operation::Continue
+                                                       : move_protocol::Operation::Cancel;
+                        if (error > settings_.calibration.tolerance_px)
+                            calibration_state_.error = "Target position did not verify; click skipped";
+                        move_next_send_ = 0;
+                        move_target_.reset();
+                    }
+                    if (!input_ok || !sender_ok || have_error) {
+                        cancel_move_locked();
+                        injected_.release_all(ReleaseReason::stale_telemetry, true);
+                    } else if (now >= move_deadline_) {
+                        cancel_move_locked();
+                        injected_.release_all(ReleaseReason::manual, true);
+                        calibration_state_.error = "Move command timed out; return is unverified";
+                    } else if (now >= move_next_send_) {
+                        outgoing = move_request_;
+                        move_next_send_ = now + 20'000'000;
+                    }
+                }
+            }
+            if (outgoing) {
+                auto packet = move_protocol::packet(*outgoing);
+                socket.send(packet, pi);
+            }
+            {
+                std::lock_guard lock(mutex_);
+                if (move_origin_ && move_completed_at_) {
+                    if (cursor_sample_.valid() && cursor_requested_ >= move_completed_at_ &&
+                        now - cursor_received_ < 100'000'000) {
+                        const double error = std::hypot(cursor_sample_.x - move_origin_->first,
+                                                        cursor_sample_.y - move_origin_->second);
+                        calibration_state_.operation =
+                            std::string(move_protocol::status_name(move_result_.status)) +
+                            (error <= settings_.calibration.tolerance_px ? "; return verified"
+                                                                         : "; return outside tolerance");
+                        move_origin_.reset();
+                    } else if (now - move_completed_at_ > 1'000'000'000) {
+                        calibration_state_.operation += "; return unverified (no feedback)";
+                        move_origin_.reset();
+                    }
+                }
+            }
+        }
         if (shutdown_deadline)
             continue;
 
@@ -977,11 +1185,20 @@ void App::pi_loop() {
             cursor_ok = GetCursorInfo(&cursor) && !(cursor.flags & CURSOR_SHOWING);
         }
 #endif
-        bool active = stats_.armed && !stats_.model_loading && !stats_.benchmarking && !proxy_error &&
-                      sender_ok && input_ok && motion_ok && cursor_ok &&
-                      activation_held(gate.state.physical, settings_);
+        const bool exclusive =
+            calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status));
+        bool active = !exclusive && !calibration_only_ && stats_.armed && !stats_.model_loading &&
+                      !stats_.benchmarking && !proxy_error && sender_ok && input_ok && motion_ok &&
+                      cursor_ok && activation_held(gate.state.physical, settings_);
         stats_.pi_ready = input_ok;
         stats_.physical = gate.state.physical;
+        if (exclusive) {
+            stats_.active = false;
+            stats_.status = calibration_state_.running ? calibration_state_.message
+                                                       : "Move and return: " + calibration_state_.operation;
+            controller.reset();
+            continue;
+        }
         if (active != was_active) {
             ++epoch_;
             result_.reset();
@@ -1035,6 +1252,45 @@ void App::pi_loop() {
         if (!correction.target) {
             cancel_auto_trigger();
             stats_.status = "Active - no target";
+            continue;
+        }
+        if (settings_.return_action.enabled) {
+            if (!action_latched_) {
+                try {
+                    if (!calibration_compatible_locked())
+                        throw std::runtime_error("Verify a compatible calibration first");
+                    const auto& record = settings_.calibration;
+                    double dx = correction.aim_x - (settings_.reference_x < 0 ? r.frame->header.width / 2.0
+                                                                              : settings_.reference_x);
+                    double dy = correction.aim_y - (settings_.reference_y < 0 ? r.frame->header.height / 2.0
+                                                                              : settings_.reference_y);
+                    if (record.context == 0) {
+                        if (!cursor_sample_.valid() || now - cursor_received_ > 100'000'000 ||
+                            !cursor_sample_.has_frame() ||
+                            cursor_sample_.frame_sequence != r.frame->header.sequence)
+                            throw std::runtime_error("Waiting for cursor feedback matching the target frame");
+                        dx = cursor_sample_.crop_left + correction.aim_x - cursor_sample_.x;
+                        dy = cursor_sample_.crop_top + correction.aim_y - cursor_sample_.y;
+                    }
+                    if (settings_.return_action.verified_target && record.context != 0)
+                        throw std::runtime_error(
+                            "Verification before clicking requires desktop cursor feedback");
+                    auto counts = calibrated_counts(record, dx, dy);
+                    submit_move_locked(counts.first, counts.second, settings_.return_action.button,
+                                       settings_.return_action.verified_target);
+                    if (record.context == 0) {
+                        move_origin_ = std::pair<double, double>{cursor_sample_.x, cursor_sample_.y};
+                        if (settings_.return_action.verified_target)
+                            move_target_ =
+                                std::pair<double, double>{cursor_sample_.x + dx, cursor_sample_.y + dy};
+                    }
+                    action_latched_ = true;
+                    stats_.armed = false;
+                    stats_.active = false;
+                } catch (const std::exception& e) {
+                    stats_.trigger_status = e.what();
+                }
+            }
             continue;
         }
         stats_.trigger_status = settings_.trigger.enabled ? "Waiting for crosshair dwell" : "Off";

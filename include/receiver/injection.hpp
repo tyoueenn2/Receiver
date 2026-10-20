@@ -158,5 +158,7 @@ class InjectedButtonManager {
     AckResult process_click_ack(Bytes bytes, int64_t now);
     InjectionMetrics metrics() const;
     uint64_t click_client_session() const;
+    // Transactions share the schedule/release command ID namespace.
+    uint64_t reserve_command();
 };
 } // namespace receiver

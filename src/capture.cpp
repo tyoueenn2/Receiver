@@ -83,12 +83,21 @@ struct LocalCapture::Impl {
     std::array<std::shared_ptr<Frame>, 4> pool{};
     uint32_t sequence = 0;
     int staging_size = 0;
+    RECT bounds{};
+    uint64_t display = 1469598103934665603ull;
+    int64_t last_stamp = 0;
 
     explicit Impl(int index) {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         auto outputs = enumerate_outputs();
         if (index < 0 || size_t(index) >= outputs.size())
             throw std::runtime_error("Local capture display is unavailable. Choose an attached display.");
         auto& output = outputs[size_t(index)];
+        bounds = output.desc.DesktopCoordinates;
+        for (auto c : std::wstring(output.desc.DeviceName)) {
+            display ^= uint16_t(c);
+            display *= 1099511628211ull;
+        }
         checked(D3D11CreateDevice(output.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED,
                                   nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context),
@@ -169,6 +178,7 @@ struct LocalCapture::Impl {
         frame->header.session = 1;
         frame->header.sequence = ++sequence;
         frame->header.capture_ns = present_time(info.LastPresentTime.QuadPart);
+        last_stamp = frame->header.capture_ns;
         frame->header.width = frame->header.height = uint16_t(size);
         frame->header.format = 2;
         frame->header.bytes = uint32_t(row * size);
@@ -181,6 +191,37 @@ LocalCapture::LocalCapture(int output) : impl_(std::make_unique<Impl>(output)) {
 LocalCapture::~LocalCapture() = default;
 std::shared_ptr<const Frame> LocalCapture::next(int size) {
     return impl_->next(size);
+}
+cursor_protocol::Sample LocalCapture::cursor() const {
+    cursor_protocol::Sample s;
+    POINT p{};
+    CURSORINFO info{};
+    info.cbSize = sizeof(info);
+    s.session = s.token = 1;
+    s.sample_ns = uint64_t(now_ns());
+    s.sequence = uint32_t(s.sample_ns);
+    s.generation = uint32_t(impl_->staging_size + 1);
+    if (GetCursorPos(&p)) {
+        s.flags |= 1;
+        s.x = p.x;
+        s.y = p.y;
+    }
+    if (GetCursorInfo(&info) && (info.flags & CURSOR_SHOWING))
+        s.flags |= 2;
+    s.left = impl_->bounds.left;
+    s.top = impl_->bounds.top;
+    s.width = impl_->bounds.right - s.left;
+    s.height = impl_->bounds.bottom - s.top;
+    s.display = impl_->display;
+    if (impl_->sequence) {
+        s.flags |= 4;
+        s.frame_sequence = impl_->sequence;
+        s.frame_ns = uint64_t(impl_->last_stamp);
+        s.crop_width = s.crop_height = impl_->staging_size;
+        s.crop_left = s.left + (s.width - s.crop_width) / 2;
+        s.crop_top = s.top + (s.height - s.crop_height) / 2;
+    }
+    return s;
 }
 } // namespace receiver
 #else
@@ -197,6 +238,9 @@ LocalCapture::LocalCapture(int) {
 }
 LocalCapture::~LocalCapture() = default;
 std::shared_ptr<const Frame> LocalCapture::next(int) {
+    return {};
+}
+cursor_protocol::Sample LocalCapture::cursor() const {
     return {};
 }
 } // namespace receiver

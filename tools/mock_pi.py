@@ -7,6 +7,7 @@ import struct
 import threading
 import time
 
+from transaction_sim import MoveSimulator
 from wire import CLICK_ACK, CLICK_REQUEST, MOVE, SUBSCRIBE, TELEMETRY, TELEMETRY3, newer
 
 
@@ -28,6 +29,7 @@ class MockPi:
         self.subscription_events = []
         self.telemetry_events = []
         self.click_requests, self.release_requests, self.clicks = [], [], {}
+        self.transactions=MoveSimulator(self.sock)
         self.click_response_override = None
         self.release_cancel_count = 0
         self.interfere_next_click = False
@@ -74,7 +76,10 @@ class MockPi:
                 move_seq = None
             try:
                 data, source = self.sock.recvfrom(2048)
-                if len(data) == SUBSCRIBE.size and data[:4] in (b'UPS1', b'UPS2', b'UPS3'):
+                if self.transactions.handle(data,source,self.session,self.motion_generation,self.physical,persistent,self.ready):
+                    if data[:4] == b'UPM1':
+                        owner,lease=source,now
+                elif len(data) == SUBSCRIBE.size and data[:4] in (b'UPS1', b'UPS2', b'UPS3'):
                     _, reserved, candidate, candidate_token = SUBSCRIBE.unpack(data)
                     self.subscription_versions.append(data[:4])
                     self.subscription_events.append(dict(time=now, version=data[:4],
@@ -135,6 +140,7 @@ class MockPi:
                                 if not click['completed'] and not click['release']:
                                     click['cancelled'] = True
                             scheduled = 0
+                            self.transactions.release()
                             self.release_requests.append(dict(time=now, client=click_client,
                                                               command=command_id, source=source))
                             terminal_status = 8 if self.release_cancel_count else 3
@@ -187,6 +193,7 @@ class MockPi:
                 pass
 
             now = time.perf_counter()
+            self.transactions.tick()
             for delayed in list(self.delayed_telemetry):
                 if now < delayed['send_at']:
                     continue

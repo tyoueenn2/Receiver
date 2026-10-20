@@ -583,6 +583,10 @@ InjectionMetrics InjectedButtonManager::metrics() const {
                                    request.accepted_clicks, request.completed_clicks, request.state});
     return result;
 }
+uint64_t InjectedButtonManager::reserve_command() {
+    std::lock_guard lock(mutex_);
+    return allocate_command_locked();
+}
 uint64_t InjectedButtonManager::click_client_session() const {
     std::lock_guard lock(mutex_);
     return click_client_;

@@ -15,6 +15,13 @@
 #endif
 namespace receiver {
 using nlohmann::json;
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(CalibrationRecord, version, context, verified, method, label,
+                                                xx, xy, yx, yy, error_px, return_error_px, tolerance_px,
+                                                max_counts, frame_width, frame_height, display_width,
+                                                display_height, display_left, display_top, layout, display,
+                                                poll_us)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ReturnActionSettings, enabled, verified_target, button,
+                                                settle_ms, press_ms, return_delay_ms)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ColorSettings, mode, min_h, max_h, min_s, max_s, min_v, max_v,
                                                 offset_x, offset_y, preview)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ClassPreferenceSettings, class_id, class_name, mode,
@@ -43,8 +50,13 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend, makcu_port,
     secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
     selected_class_names, inference_fps, auto_size, constant_tracking, cursor_check, trigger, visual, ui,
-    collection, frame_source, capture_output, class_preference, color)
+    collection, frame_source, capture_output, class_preference, color, calibration, return_action)
 void validate(const Settings& s) {
+    validate_calibration(s.calibration);
+    const auto& ra = s.return_action;
+    if (ra.button < 1 || ra.button > 8 || ra.settle_ms < 0 || ra.settle_ms > 1000 || ra.press_ms < 1 ||
+        ra.press_ms > 1000 || ra.return_delay_ms < 0 || ra.return_delay_ms > 1000)
+        throw std::runtime_error("Move and return timing is invalid");
     if (s.frame_source != "udp" && s.frame_source != "local")
         throw std::runtime_error("Frame source must be udp or local");
     if (s.capture_output < 0 || s.capture_output > 1024)

@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol.hpp"
+#include "calibration.hpp"
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,9 +29,9 @@ struct TrackingSettings {
     float sticky_distance = 0, held_radius = 100;
 };
 struct ClassPreferenceSettings {
-    int class_id = -1; // -1: disabled; independent of the normal target-class filter.
-    std::string class_name; // Retain identity if a model's class IDs are reordered.
-    int mode = 0; // 0: whenever available, 1: near the normally selected target.
+    int class_id = -1;       // -1: disabled; independent of the normal target-class filter.
+    std::string class_name;  // Retain identity if a model's class IDs are reordered.
+    int mode = 0;            // 0: whenever available, 1: near the normally selected target.
     float max_distance = 32; // Preferred center to normal target box, in image pixels.
 };
 class TargetPredictor {
@@ -98,7 +99,7 @@ struct CollectionSettings {
 struct Settings {
     int version = 1;
     std::string frame_source = "udp"; // udp or local (Windows Desktop Duplication)
-    int capture_output = 0; // Attached DXGI display index; independent of mouse output.
+    int capture_output = 0;           // Attached DXGI display index; independent of mouse output.
     std::string bind_ip = "0.0.0.0", sender_ip = "127.0.0.1", pi_ip = "127.0.0.1", model = "", metadata = "";
     std::string inference_backend = "auto"; // auto, tensorrt, yolo_omni
     std::string omni_python = "python", omni_source = "", omni_device = "cuda:0";
@@ -118,6 +119,8 @@ struct Settings {
     TrackingSettings tracking;
     ClassPreferenceSettings class_preference;
     ColorSettings color;
+    CalibrationRecord calibration;
+    ReturnActionSettings return_action;
     int mouse_backend = 0; // 0: Pi UDP, 1: local Windows test mouse, 2: MAKCU serial
     std::string makcu_port;
     int secondary_button = 0;

@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol.hpp"
+#include "cursor_protocol.hpp"
 #include <string>
 
 namespace receiver {
@@ -21,5 +22,6 @@ class LocalCapture {
     ~LocalCapture();
     // Bounded wait for a new desktop image; null for timeout or pointer-only updates.
     std::shared_ptr<const Frame> next(int size);
+    cursor_protocol::Sample cursor() const;
 };
 } // namespace receiver

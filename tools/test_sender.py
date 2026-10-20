@@ -1,6 +1,7 @@
 """Synthetic/raw-file frame sender; deliberately does not capture the desktop."""
 import argparse
 import random
+import struct
 import secrets
 import socket
 import threading
@@ -12,7 +13,12 @@ from wire import HELLO, SYNC_REQUEST, SYNC_REPLY, fragments
 class Sender:
     def __init__(self, host='127.0.0.1', port=5000, width=320, height=320, fps=120,
                  pixels=None, pixel_format=1, loss=0, duplicate=0, reorder=False,
-                 clock_offset_ms=0, stamp_delay_ms=0):
+                 clock_offset_ms=0, stamp_delay_ms=0, cursor_provider=None, frame_provider=None):
+        self.cursor_provider=cursor_provider
+        self.frame_provider=frame_provider
+        self.last_sequence=0
+        self.last_stamp=0
+        self.cursor_sequence=0
         self.target = (socket.gethostbyname(host), port)
         self.width, self.height, self.fps = width, height, fps
         self.pixel_format = pixel_format
@@ -76,7 +82,15 @@ class Sender:
                 if source != self.target or len(packet) != SYNC_REQUEST.size:
                     continue
                 magic, reserved, session, token = SYNC_REQUEST.unpack(packet)
-                if magic == b'UVC1' and reserved == 0 and session == self.session:
+                if magic == b'UVP1' and packet[4:8] == bytes((1,0,0,0)) and session == self.session and self.cursor_provider:
+                    x,y=self.cursor_provider()
+                    self.cursor_sequence=(self.cursor_sequence+1)&0xffffffff
+                    response=struct.pack('!4sBBHQQQIIiiiiiiiiiiI4xQQ8x', b'UVG1',1,7,0,self.session,token,
+                        self.stamp(),self.cursor_sequence,1,int(round(x)),int(round(y)),0,0,1920,1080,
+                        (1920-self.width)//2,(1080-self.height)//2,self.width,self.height,
+                        self.last_sequence,self.last_stamp,1)
+                    self.sock.sendto(response,source)
+                elif magic == b'UVC1' and reserved == 0 and session == self.session:
                     self.sock.sendto(SYNC_REPLY.pack(b'UVS1', 0, session, token, received, self.stamp()), source)
             except (socket.timeout, ConnectionResetError):
                 pass
@@ -94,8 +108,10 @@ class Sender:
                 self.sock.sendto(HELLO.pack(b'UVH1', 0, self.session), self.target)
                 last_hello = now
             if not self.paused:
-                packets = list(fragments(self.pixels, self.width, self.height, self.session, sequence,
-                                        self.stamp() - self.stamp_delay, self.pixel_format))
+                self.last_sequence=sequence;self.last_stamp=self.stamp()-self.stamp_delay
+                pixels=self.frame_provider() if self.frame_provider else self.pixels
+                packets = list(fragments(pixels, self.width, self.height, self.session, sequence,
+                                        self.last_stamp, self.pixel_format))
                 if self.reorder:
                     rng.shuffle(packets)
                 for packet in packets:

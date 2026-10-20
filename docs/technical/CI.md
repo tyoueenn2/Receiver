@@ -5,6 +5,7 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 
 | Check | What it verifies |
 | --- | --- |
+| Calibration on Linux and Windows | Dedicated Release jobs build calibration and shared command-state tests without a device, capture session or model. Unit tests cover mapping, quantization, persistence and image registration; seven loopback scenarios cover desktop/view/manual calibration, cancellation, old Sender compatibility, nonlinear rejection and skipping an incorrectly located click. The full calibration pipeline repeats three times and also runs in native and sanitizer suites. |
 | MAKCU on Linux and Windows | Dedicated jobs build the serial backend and run protocol/profile tests without hardware. Linux also runs the real receiver against pseudo-terminal firmware, checking baud negotiation, button activation/release, stale frames, response timeouts and unplugging. Full native and sanitizer suites include these checks too. |
 | Linux GCC Release and Clang Debug | Native compilation, core tests, independent UDP peers, worker processes and model workflows on real Linux runners |
 | Windows MSVC Release and Debug | The same checks plus rendering all eleven DirectX GUI pages at normal and minimum widths, enabled preference controls, search routing and the read-only mouse reader |
@@ -45,7 +46,7 @@ full worker fault/cleanup test three times in addition to the ordinary suite.
 
 Each native job uploads JUnit results, CTest failure logs, model fault reports and
 Windows GUI screenshots, including when a test fails. Sanitizer results are retained
-separately. MAKCU jobs upload their own JUnit report and diagnostics. The CUDA job uploads compiled PTX. Full command output is also available
+separately. Calibration and MAKCU jobs upload their own JUnit reports and diagnostics. The CUDA job uploads compiled PTX. Full command output is also available
 in the Actions job log.
 
 Release configurations produce `Receiver-ubuntu-24.04` and `Receiver-windows-2022`
