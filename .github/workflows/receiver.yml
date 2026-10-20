@@ -100,6 +100,9 @@ jobs:
       - name: Repeat Debug calibration with concurrent sender heartbeats
         if: matrix.configuration == 'Debug'
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:3 -R '^receiver_calibration_pipeline$' --output-junit calibration-heartbeat-stress.xml
+      - name: Repeat Windows network and synthetic-input process lifecycle
+        if: runner.os == 'Windows'
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:10 -R '^receiver_(network_pipeline|process_capture)$' --output-junit network-process-stress.xml
       - name: Repeat reload, settings and preference pipeline stress checks
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:20 -R "receiver_sender_sync|receiver_workflows|receiver_reliability|receiver_class_preference_pipeline|receiver_color_pipeline" --output-junit stress.xml
       - name: Repeat Windows worker cleanup regression
