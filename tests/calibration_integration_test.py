@@ -6,10 +6,12 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from mock_pi import MockPi
 from test_sender import Sender
+from wire import HELLO
 
 
 def free_port():
@@ -38,6 +40,16 @@ def run(binary, mode):
     sender = Sender(port=port, width=size, height=size, fps=60,
         cursor_provider=None if mode == 'old_sender' else cursor,
         frame_provider=image if mode == 'view' else None).start()
+    if mode == 'desktop':
+        # Race heartbeat publication against the controller's freshness snapshot
+        # while real calibration probes and a verified click are in flight.
+        def heartbeat_loop():
+            packet = HELLO.pack(b'UVH1', 0, sender.session)
+            while not sender.stop_event.wait(.0001):
+                sender.sock.sendto(packet, sender.target)
+        heartbeat = threading.Thread(target=heartbeat_loop, daemon=True)
+        sender.threads.append(heartbeat)
+        heartbeat.start()
     try:
         with tempfile.TemporaryDirectory(prefix='receiver-calibration-') as directory:
             directory = Path(directory)

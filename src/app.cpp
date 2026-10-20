@@ -1020,11 +1020,13 @@ void App::pi_loop() {
                 }
             }
         }
+        // Read the cross-thread publication before sampling time. A heartbeat
+        // received between these reads must not look newer than our clock.
+        const auto seen = sender_seen_.load();
         now = now_ns();
         const bool input_ok = input_fresh(now);
         const bool peer_lost = pi_udp && had_input && was_input_fresh && !input_ok;
         const bool peer_recovered = pi_udp && !was_input_fresh && input_ok;
-        const auto seen = sender_seen_.load();
         const bool sender_ok = local_mouse || (seen && now >= seen && now - seen <= 100'000'000);
         bool have_error = false;
         {
@@ -1135,7 +1137,10 @@ void App::pi_loop() {
                     }
                     if (!input_ok || !sender_ok || have_error) {
                         cancel_move_locked();
-                        injected_.release_all(ReleaseReason::stale_telemetry, true);
+                        injected_.release_all(have_error   ? ReleaseReason::pi_error
+                                              : !sender_ok ? ReleaseReason::sender_loss
+                                                           : ReleaseReason::stale_telemetry,
+                                              true);
                     } else if (now >= move_deadline_) {
                         cancel_move_locked();
                         injected_.release_all(ReleaseReason::manual, true);
