@@ -1,5 +1,7 @@
 """Exercise the real Receiver calibration controller against deterministic peers."""
 import json
+import os
+from contextlib import nullcontext
 from pathlib import Path
 import random
 import socket
@@ -12,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 from mock_pi import MockPi
 from test_sender import Sender
 from wire import HELLO
+from analyze_move_measurements import analyze, read_events
 
 
 def free_port():
@@ -51,7 +54,13 @@ def run(binary, mode):
         sender.threads.append(heartbeat)
         heartbeat.start()
     try:
-        with tempfile.TemporaryDirectory(prefix='receiver-calibration-') as directory:
+        artifact_root = os.environ.get('RECEIVER_MEASUREMENT_TEST_DIR')
+        if artifact_root:
+            Path(artifact_root).mkdir(parents=True, exist_ok=True)
+            directory_context = nullcontext(tempfile.mkdtemp(prefix=mode+'-', dir=artifact_root))
+        else:
+            directory_context = tempfile.TemporaryDirectory(prefix='receiver-calibration-')
+        with directory_context as directory:
             directory = Path(directory)
             config = dict(frame_port=port, pi_port=pi.sock.getsockname()[1], input_size=size,
                 sender_ip='127.0.0.1', pi_ip='127.0.0.1', model='',
@@ -62,9 +71,31 @@ def run(binary, mode):
                     display_width=1920, display_height=1080, frame_width=128, frame_height=128)
             path, report = directory/'config.json', directory/'report.json'
             path.write_text(json.dumps(config))
+            log = directory/'measurement.jsonl'
+            env = dict(os.environ, RECEIVER_MEASUREMENT_LOG=str(log))
             result = subprocess.run([binary, str(path), str(report), mode], capture_output=True,
-                                    text=True, timeout=35)
+                                    text=True, timeout=35, env=env)
+            (directory/'stdout.log').write_text(result.stdout, encoding='utf-8')
+            (directory/'stderr.log').write_text(result.stderr, encoding='utf-8')
             assert result.returncode == 0, result.stdout+result.stderr
+            cli = subprocess.run([sys.executable,
+                str(Path(__file__).resolve().parents[1]/'tools/analyze_move_measurements.py'),
+                str(log), '--json', str(directory/'analysis.json'),
+                '--csv', str(directory/'trials.csv')], capture_output=True, text=True, timeout=10)
+            assert cli.returncode == 0, cli.stdout+cli.stderr
+            measured = analyze(read_events([log]))
+            assert json.loads((directory/'analysis.json').read_text(encoding='utf-8')) == measured
+            assert not measured['integrity_issues'], measured['integrity_issues']
+            if mode in ('desktop', 'miss'):
+                actions = [r for r in measured['trials'] if not r['calibration']]
+                assert len(actions) == 1, actions
+                action = actions[0]
+                assert action['landing_pass'] == (mode == 'desktop'), action
+                assert action['return_pass'] == (mode == 'desktop'), action
+                assert action['residual_counts'] == [0, 0], action
+                assert action['usb_press_written'] == (mode == 'desktop'), action
+                assert action['application_click_result'] == 'unobserved', action
+                assert action['receiver_elapsed_ms'] >= 0, action
             data = json.loads(report.read_text())
             assert not data['armed'], data
             if mode in ('desktop', 'view', 'manual', 'miss'):

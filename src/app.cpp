@@ -978,6 +978,12 @@ void App::pi_loop() {
                                 move_stage_at_ = now;
                             if (move_protocol::terminal(a.status))
                                 move_completed_at_ = now;
+                            if (move_protocol::packet(a) != move_protocol::packet(move_result_))
+                                measure_locked("ack", {{"status", move_protocol::status_name(a.status)},
+                                    {"stage", int(a.stage)}, {"flags", a.flags},
+                                    {"out_counts", {a.out_x, a.out_y}}, {"return_counts", {a.return_x, a.return_y}},
+                                    {"residual_counts", {a.residual_x, a.residual_y}},
+                                    {"pi_stage_ns", a.written_ns}, {"terminal", move_protocol::terminal(a.status)}});
                             move_result_ = a;
                             calibration_state_.action = a;
                             calibration_state_.operation = move_protocol::status_name(a.status);
@@ -1127,6 +1133,13 @@ void App::pi_loop() {
                         now - cursor_received_ < 100'000'000) {
                         const double error = std::hypot(cursor_sample_.x - move_target_->first,
                                                         cursor_sample_.y - move_target_->second);
+                        measure_locked("landing", {{"error_px", error}, {"kind", "action"},
+                            {"position", {cursor_sample_.x, cursor_sample_.y}},
+                            {"target", {move_target_->first, move_target_->second}},
+                            {"tolerance_px", settings_.calibration.tolerance_px},
+                            {"sender_sample_ns", cursor_sample_.sample_ns},
+                            {"feedback_received_ns", cursor_received_}, {"feedback_requested_ns", cursor_requested_},
+                            {"reason", error <= settings_.calibration.tolerance_px ? "within_tolerance" : "target_miss_click_skipped"}});
                         move_request_->operation = error <= settings_.calibration.tolerance_px
                                                        ? move_protocol::Operation::Continue
                                                        : move_protocol::Operation::Cancel;
@@ -1136,13 +1149,13 @@ void App::pi_loop() {
                         move_target_.reset();
                     }
                     if (!input_ok || !sender_ok || have_error) {
-                        cancel_move_locked();
+                        cancel_move_locked(have_error ? "pi_error" : !sender_ok ? "sender_loss" : "stale_telemetry");
                         injected_.release_all(have_error   ? ReleaseReason::pi_error
                                               : !sender_ok ? ReleaseReason::sender_loss
                                                            : ReleaseReason::stale_telemetry,
                                               true);
                     } else if (now >= move_deadline_) {
-                        cancel_move_locked();
+                        cancel_move_locked("receiver_timeout");
                         injected_.release_all(ReleaseReason::manual, true);
                         calibration_state_.error = "Move command timed out; return is unverified";
                     } else if (now >= move_next_send_) {
@@ -1162,12 +1175,19 @@ void App::pi_loop() {
                         now - cursor_received_ < 100'000'000) {
                         const double error = std::hypot(cursor_sample_.x - move_origin_->first,
                                                         cursor_sample_.y - move_origin_->second);
+                        measure_locked("return", {{"error_px", error}, {"context", 0},
+                            {"position", {cursor_sample_.x, cursor_sample_.y}},
+                            {"origin", {move_origin_->first, move_origin_->second}},
+                            {"tolerance_px", settings_.calibration.tolerance_px},
+                            {"sender_sample_ns", cursor_sample_.sample_ns},
+                            {"feedback_received_ns", cursor_received_}, {"feedback_requested_ns", cursor_requested_}});
                         calibration_state_.operation =
                             std::string(move_protocol::status_name(move_result_.status)) +
                             (error <= settings_.calibration.tolerance_px ? "; return verified"
                                                                          : "; return outside tolerance");
                         move_origin_.reset();
                     } else if (now - move_completed_at_ > 1'000'000'000) {
+                        measure_locked("return_missing", {{"reason", "no_fresh_feedback"}});
                         calibration_state_.operation += "; return unverified (no feedback)";
                         move_origin_.reset();
                     }

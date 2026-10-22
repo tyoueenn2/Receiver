@@ -42,3 +42,6 @@ Targets outside the calibrated count radius or beyond achievable count quantizat
 The proxy's Python `MouseProxy.move_action_return()` submits relative HID counts directly; pixel conversion belongs to Receiver. See the proxy's `USAGE.md` for wire layouts and Python examples.
 
 Automated checks cover response fitting, signed/cross-axis mappings, quantization, profile persistence, image registration, protocol validation, partial writes, duplicate requests, cancellation, and real Receiver orchestration against loopback peers. The integration scenarios include automatic desktop/view calibration, manual verification, missing cursor feedback, nonlinear response rejection, and verification that skips a misplaced click. Windows cross-compilation/syntax checks do not measure a real desktop, Raw Gadget endpoint, or application. Precision and timing on actual Pi/Windows hardware remain deployment checks.
+
+For opt-in JSONL measurements, analysis scripts, the Windows click observer, and
+hardware validation steps, see [MEASUREMENT.md](MEASUREMENT.md).

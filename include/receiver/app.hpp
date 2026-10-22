@@ -4,6 +4,8 @@
 #include "network.hpp"
 #include "performance.hpp"
 #include "cursor_protocol.hpp"
+#include "measurement_log.hpp"
+#include <nlohmann/json.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <fstream>
@@ -57,6 +59,8 @@ class App {
         int64_t deadline = 0, completed_ns = 0;
         std::shared_ptr<const ColorMask> colors;
     };
+    measurement::Log measurement_{"RECEIVER_MEASUREMENT_LOG", "receiver"};
+    void measure_locked(const char* event, nlohmann::json fields = nlohmann::json::object());
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     ControlWake control_wake_;
@@ -89,7 +93,7 @@ class App {
     void calibration_loop(int context, bool verify);
     move_protocol::Ack wait_move(uint64_t id, bool midpoint);
     void continue_move(uint64_t id);
-    void cancel_move_locked();
+    void cancel_move_locked(const char* reason = "local_stop");
     std::pair<double, double> observe_cursor(int64_t after);
     std::shared_ptr<const Frame> observe_frame(int64_t after);
     bool calibration_compatible_locked() const;

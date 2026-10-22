@@ -4,6 +4,20 @@
 #include <stdexcept>
 
 namespace receiver {
+void App::measure_locked(const char* event, nlohmann::json fields) {
+    if (!measurement_.enabled()) return;
+    fields["event"] = event;
+    fields["receiver_ns"] = now_ns();
+    if (move_request_ && std::string(event) != "rejected") {
+        fields["session"] = std::to_string(move_request_->session);
+        fields["command"] = std::to_string(move_request_->command);
+        fields["generation"] = std::to_string(move_request_->generation);
+        fields["epoch"] = std::to_string(move_request_->epoch);
+    }
+    auto text = fields.dump();
+    measurement_.emit(text.substr(1, text.size() - 2));
+}
+
 bool App::calibration_compatible_locked() const {
     const auto& r = settings_.calibration;
     if (!r.verified || !move_capabilities_.ready || now_ns() - capabilities_at_ > 500'000'000 ||
@@ -42,8 +56,9 @@ void App::clear_calibration() {
     calibration_state_.error.clear();
     ++calibration_state_.revision;
 }
-void App::cancel_move_locked() {
+void App::cancel_move_locked(const char* reason) {
     if (move_request_ && !move_protocol::terminal(move_result_.status)) {
+        measure_locked("local_stop", {{"reason", reason}});
         move_result_.status = move_protocol::Status::Cancelled;
         move_result_.flags |= 1;
         calibration_state_.action = move_result_;
@@ -82,7 +97,14 @@ uint64_t App::submit_move_locked(int dx, int dy, int button, bool midpoint) {
     move_protocol::Request check;
     if (button < 0 || button > 8 || !move_protocol::parse(wire.data(), wire.size(), check))
         throw std::runtime_error("Movement or timing is outside the Pi limits");
+    if (move_origin_)
+        measure_locked("return_missing", {{"reason", "superseded_before_feedback"}});
     move_request_ = r;
+    measure_locked("submit", {{"counts", {dx, dy}}, {"button", button},
+        {"midpoint", midpoint}, {"calibration", calibration_state_.running},
+        {"context", settings_.calibration.context}, {"tolerance_px", settings_.calibration.tolerance_px},
+        {"settle_us", r.settle_us}, {"press_us", r.press_us}, {"return_us", r.return_us},
+        {"layout", std::to_string(move_capabilities_.layout)}, {"poll_us", move_capabilities_.poll_us}});
     move_result_ = {};
     move_result_.status = move_protocol::Status::Accepted;
     move_result_.session = r.session;
@@ -104,57 +126,67 @@ uint64_t App::submit_move_locked(int dx, int dy, int button, bool midpoint) {
 }
 uint64_t App::move_click_return(double x, double y, bool desktop, bool click) {
     std::lock_guard lock(mutex_);
-    if (calibration_state_.running)
-        throw std::runtime_error("Finish calibration first");
-    if (!calibration_compatible_locked())
-        throw std::runtime_error("Verify a compatible calibration first");
-    const auto& r = settings_.calibration;
-    double dx = x, dy = y;
-    if (desktop) {
-        if (r.context != 0)
-            throw std::runtime_error("Desktop coordinates require desktop calibration");
-        if (x < cursor_sample_.left || y < cursor_sample_.top ||
-            x >= int64_t(cursor_sample_.left) + cursor_sample_.width ||
-            y >= int64_t(cursor_sample_.top) + cursor_sample_.height)
-            throw std::runtime_error("Target is outside the calibrated display");
-        dx = x - cursor_sample_.x;
-        dy = y - cursor_sample_.y;
-    } else if (r.context == 0) {
-        if (!calibration_frame_ || !cursor_sample_.has_frame() ||
-            cursor_sample_.frame_sequence != calibration_frame_->header.sequence ||
-            now_ns() - calibration_frame_->first_ns > int64_t(settings_.max_age_ms) * 1'000'000)
-            throw std::runtime_error("Wait for fresh frame geometry matching the cursor feedback");
-        if (x < 0 || y < 0 || x >= calibration_frame_->header.width || y >= calibration_frame_->header.height)
-            throw std::runtime_error("Target is outside the captured image");
-        x += cursor_sample_.crop_left;
-        y += cursor_sample_.crop_top;
-        dx = x - cursor_sample_.x;
-        dy = y - cursor_sample_.y;
-    } else {
-        if (!calibration_frame_ ||
-            now_ns() - calibration_frame_->first_ns > int64_t(settings_.max_age_ms) * 1'000'000)
-            throw std::runtime_error("Wait for a fresh view frame");
-        dx = x - (settings_.reference_x < 0 ? calibration_frame_->header.width / 2.0 : settings_.reference_x);
-        dy =
-            y - (settings_.reference_y < 0 ? calibration_frame_->header.height / 2.0 : settings_.reference_y);
+    try {
+        if (calibration_state_.running)
+            throw std::runtime_error("Finish calibration first");
+        if (!calibration_compatible_locked())
+            throw std::runtime_error("Verify a compatible calibration first");
+        const auto& r = settings_.calibration;
+        double dx = x, dy = y;
+        if (desktop) {
+            if (r.context != 0)
+                throw std::runtime_error("Desktop coordinates require desktop calibration");
+            if (x < cursor_sample_.left || y < cursor_sample_.top ||
+                x >= int64_t(cursor_sample_.left) + cursor_sample_.width ||
+                y >= int64_t(cursor_sample_.top) + cursor_sample_.height)
+                throw std::runtime_error("Target is outside the calibrated display");
+            dx = x - cursor_sample_.x;
+            dy = y - cursor_sample_.y;
+        } else if (r.context == 0) {
+            if (!calibration_frame_ || !cursor_sample_.has_frame() ||
+                cursor_sample_.frame_sequence != calibration_frame_->header.sequence ||
+                now_ns() - calibration_frame_->first_ns > int64_t(settings_.max_age_ms) * 1'000'000)
+                throw std::runtime_error("Wait for fresh frame geometry matching the cursor feedback");
+            if (x < 0 || y < 0 || x >= calibration_frame_->header.width || y >= calibration_frame_->header.height)
+                throw std::runtime_error("Target is outside the captured image");
+            x += cursor_sample_.crop_left;
+            y += cursor_sample_.crop_top;
+            dx = x - cursor_sample_.x;
+            dy = y - cursor_sample_.y;
+        } else {
+            if (!calibration_frame_ ||
+                now_ns() - calibration_frame_->first_ns > int64_t(settings_.max_age_ms) * 1'000'000)
+                throw std::runtime_error("Wait for a fresh view frame");
+            dx = x - (settings_.reference_x < 0 ? calibration_frame_->header.width / 2.0 : settings_.reference_x);
+            dy =
+                y - (settings_.reference_y < 0 ? calibration_frame_->header.height / 2.0 : settings_.reference_y);
+        }
+        if (settings_.return_action.verified_target && r.context != 0)
+            throw std::runtime_error("Verification before clicking requires desktop cursor feedback");
+        auto counts = calibrated_counts(r, dx, dy);
+        const auto id =
+            submit_move_locked(counts.first, counts.second, click ? settings_.return_action.button : 0,
+                               settings_.return_action.verified_target);
+        if (r.context == 0) {
+            move_origin_ = std::pair<double, double>{cursor_sample_.x, cursor_sample_.y};
+            if (settings_.return_action.verified_target)
+                move_target_ = std::pair<double, double>{x, y};
+        }
+        measure_locked("target", {{"target", {x, y}}, {"delta_px", {dx, dy}},
+            {"origin", r.context == 0 ? nlohmann::json::array({cursor_sample_.x, cursor_sample_.y})
+                                     : nlohmann::json(nullptr)}, {"context", r.context}});
+        stats_.armed = stats_.active = false;
+        action_latched_ = true;
+        result_.reset();
+        ++epoch_;
+        return id;
+    } catch (const std::exception& e) {
+        measure_locked("rejected", {{"reason", e.what()}, {"target", {x, y}},
+            {"desktop", desktop}, {"click", click}});
+        throw;
     }
-    if (settings_.return_action.verified_target && r.context != 0)
-        throw std::runtime_error("Verification before clicking requires desktop cursor feedback");
-    auto counts = calibrated_counts(r, dx, dy);
-    const auto id =
-        submit_move_locked(counts.first, counts.second, click ? settings_.return_action.button : 0,
-                           settings_.return_action.verified_target);
-    if (r.context == 0) {
-        move_origin_ = std::pair<double, double>{cursor_sample_.x, cursor_sample_.y};
-        if (settings_.return_action.verified_target)
-            move_target_ = std::pair<double, double>{x, y};
-    }
-    stats_.armed = stats_.active = false;
-    action_latched_ = true;
-    result_.reset();
-    ++epoch_;
-    return id;
 }
+
 void App::start_calibration(const Settings& config, int context, bool verify) {
     validate(config);
     if (context < 0 || context > 1 || config.mouse_backend != 0)
@@ -343,6 +375,9 @@ void App::calibration_loop(int context, bool verify) {
                 id = submit_move_locked(dx, dy, 0, true);
                 move_request_->settle_us = context ? 60000 : 20000;
                 move_request_->return_us = 0;
+                measure_locked("probe_config", {{"context", context}, {"settle_us", move_request_->settle_us},
+                    {"return_us", 0}, {"origin", context == 0 ? nlohmann::json::array({baseline.first, baseline.second})
+                                                             : nlohmann::json(nullptr)}});
             }
             wait_move(id, true);
             int64_t barrier;
@@ -362,6 +397,11 @@ void App::calibration_loop(int context, bool verify) {
                 sample.pixels_y = -d.y;
             }
             ensure_stable();
+            {
+                std::lock_guard lock(mutex_);
+                measure_locked("probe_landing", {{"context", context},
+                    {"counts", {dx, dy}}, {"delta_px", {sample.pixels_x, sample.pixels_y}}});
+            }
             continue_move(id);
             wait_move(id, false);
             {
@@ -378,6 +418,11 @@ void App::calibration_loop(int context, bool verify) {
                 error = std::hypot(d.x, d.y);
             }
             ensure_stable();
+            {
+                std::lock_guard lock(mutex_);
+                measure_locked("return", {{"error_px", error}, {"context", context},
+                    {"tolerance_px", record.tolerance_px}});
+            }
             max_return_error = std::max(max_return_error, error);
             if (error > record.tolerance_px)
                 throw std::runtime_error("Return error exceeds tolerance. Check acceleration, scene "
@@ -438,6 +483,11 @@ void App::calibration_loop(int context, bool verify) {
                 const double error =
                     std::hypot(sample.pixels_x - record.xx * sample.counts_x - record.xy * sample.counts_y,
                                sample.pixels_y - record.yx * sample.counts_x - record.yy * sample.counts_y);
+                {
+                    std::lock_guard lock(mutex_);
+                    measure_locked("landing", {{"error_px", error}, {"context", context},
+                        {"tolerance_px", record.tolerance_px}, {"kind", "verification"}});
+                }
                 if (error > record.tolerance_px)
                     throw std::runtime_error("Manual calibration does not match the measured response");
                 record.error_px = std::max(record.error_px, error);
@@ -448,6 +498,11 @@ void App::calibration_loop(int context, bool verify) {
             auto s = probe(delta.first, delta.second);
             const double error = std::hypot(s.pixels_x - record.xx * s.counts_x - record.xy * s.counts_y,
                                             s.pixels_y - record.yx * s.counts_x - record.yy * s.counts_y);
+            {
+                std::lock_guard lock(mutex_);
+                measure_locked("landing", {{"error_px", error}, {"context", context},
+                    {"tolerance_px", record.tolerance_px}, {"kind", "verification"}});
+            }
             record.error_px = std::max(record.error_px, error);
             if (error > record.tolerance_px)
                 throw std::runtime_error(
@@ -470,6 +525,8 @@ void App::calibration_loop(int context, bool verify) {
             record.verified = true;
             record.method = verify && record.method == "manual" ? "verified manual" : "automatic";
             validate_calibration(record);
+            measure_locked("calibration_complete", {{"context", context}, {"max_error_px", record.error_px},
+                {"max_return_error_px", record.return_error_px}, {"max_counts", record.max_counts}});
             settings_.calibration = record;
             ++calibration_state_.revision;
             calibration_state_.message = "Calibration verified and applied";
@@ -493,6 +550,7 @@ void App::calibration_loop(int context, bool verify) {
         calibration_state_.running = false;
         calibration_state_.message = "Calibration stopped";
         calibration_state_.error = e.what();
+        measure_locked("calibration_failed", {{"reason", e.what()}, {"context", context}});
     }
     cv_.notify_all();
     control_wake_.notify();

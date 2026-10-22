@@ -11,7 +11,9 @@ concurrency:
 
 jobs:
   calibration:
-    name: Calibration and move-return / ${{ matrix.os }}
+    env:
+      RECEIVER_MEASUREMENT_TEST_DIR: ${{ github.workspace }}/build/calibration/measurements
+    name: Calibration, measurement and move-return / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
@@ -27,8 +29,10 @@ jobs:
         run: cmake -S . -B build/calibration -DCMAKE_BUILD_TYPE=Release -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF -DRECEIVER_INTEGRATION_TESTS=ON
       - name: Build calibration controller, protocol and shared command-state tests
         run: cmake --build build/calibration --config Release --target receiver_calibration_tests receiver_calibration_runner receiver_injection_tests --parallel 2
-      - name: Calibration math, protocol and seven simulated action scenarios
-        run: ctest --test-dir build/calibration -C Release --output-on-failure --no-tests=error -R '^receiver_(calibration|calibration_pipeline|injection)$' --output-junit calibration.xml
+      - name: Calibration math, measurement analysis and seven simulated action scenarios
+        run: ctest --test-dir build/calibration -C Release --output-on-failure --no-tests=error -R '^receiver_(calibration|calibration_pipeline|measurement_analysis|injection)$' --output-junit calibration.xml
+      - name: Syntax-check the Windows application observer (no hardware validation)
+        run: python -m py_compile tools/click_observer.py
       - name: Repeat calibration and verified-click lifecycle
         run: ctest --test-dir build/calibration -C Release --output-on-failure --no-tests=error --repeat until-fail:3 -R '^receiver_calibration_pipeline$' --output-junit calibration-stress.xml
       - name: Keep calibration diagnostics even on failure
@@ -37,6 +41,7 @@ jobs:
         with:
           name: calibration-${{ matrix.os }}
           path: |
+            build/calibration/measurements/
             build/calibration/*.xml
             build/calibration/Testing/Temporary/
             build/calibration/CMakeFiles/CMakeConfigureLog.yaml
