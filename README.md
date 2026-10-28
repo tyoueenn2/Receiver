@@ -51,3 +51,7 @@ models/         Sample model and metadata
 profiles/       Example settings
 integrations/   Raspberry Pi integration assets
 ```
+
+### YOLO26 compatibility
+
+See [YOLO26 compatibility and CPU regression results](docs/yolo26-compatibility.md) for the raw one-to-many path, supported environment, export commands, and verification limits.

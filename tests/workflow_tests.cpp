@@ -299,6 +299,12 @@ int main() {
         nms = data;
         metadata(nms, "args", "{'nms': False}");
         CHECK(inspect_onnx(nms).names.size() == 2);
+        auto raw = data;
+        metadata(raw, "end2end", "False");
+        CHECK(inspect_onnx(raw).metadata.at("end2end") == false);
+        auto end2end = dynamic;
+        metadata(end2end, "end2end", "True");
+        rejects([&] { inspect_onnx(end2end); });
         rejects([&] { inspect_onnx(onnx(640, R"({"1":"missing zero"})")); });
         rejects([&] { inspect_onnx(onnx(160, R"({0: __import__('os'), 1: 'second'})")); });
         rejects([&] { inspect_onnx(onnx(33)); });

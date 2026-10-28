@@ -195,6 +195,36 @@ jobs:
           name: diagnostics-cpu-model
           path: build/cpu/CMakeFiles/CMakeConfigureLog.yaml
 
+  yolo-compatibility:
+    name: YOLO11 and YOLO26 real CPU compatibility
+    env:
+      ORT_DISABLE_TELEMETRY: "1"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated current Ultralytics dependencies
+        run: |
+          python -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install ultralytics==8.4.191 onnx==1.23.2 onnxruntime==1.31.1
+      - run: cmake -S . -B build/yolo -DCMAKE_BUILD_TYPE=Release -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF
+      - run: cmake --build build/yolo --target receiver_verify receiver_inspect_model receiver_decode --parallel 2
+      - name: Fetch official trained checkpoints explicitly
+        run: python -c "from ultralytics import YOLO; YOLO('yolo26s.pt'); YOLO('yolo11s.pt')"
+      - name: Worker and fixed/dynamic ONNX at 320 and 640
+        shell: bash
+        run: |
+          IMAGE=$(python -c 'from ultralytics.utils import ASSETS; print(ASSETS / "bus.jpg")')
+          python tests/yolo_raw_compatibility_test.py --weights yolo26s.pt --weights yolo11s.pt --image "$IMAGE" --decoder build/yolo/receiver_decode --inspector build/yolo/receiver_inspect_model --verify-exe build/yolo/receiver_verify 2>&1 | tee build/yolo/compatibility.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-yolo-compatibility
+          path: build/yolo/compatibility.log
+
   cuda-compile:
     name: CUDA kernels and TensorRT API (no GPU)
     runs-on: ubuntu-24.04
@@ -238,7 +268,7 @@ jobs:
   release:
     name: Publish tested hardware-free packages on version tags
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    needs: [calibration, makcu, native, sanitizers, cpu-model, cuda-compile]
+    needs: [calibration, makcu, native, sanitizers, cpu-model, yolo-compatibility, cuda-compile]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

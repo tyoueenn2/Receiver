@@ -6,8 +6,6 @@ import sys
 import tempfile
 from pathlib import Path
 import numpy as np
-import onnx
-import onnxruntime as ort
 import torch
 from PIL import Image
 from torchvision.ops import batched_nms
@@ -37,6 +35,8 @@ def reference(output, width, height, size, class_filter):
 
 
 def main():
+    import onnx
+    import onnxruntime as ort
     p = argparse.ArgumentParser(); p.add_argument('--model', required=True); p.add_argument('--image', required=True); p.add_argument('--decoder', required=True); a = p.parse_args()
     model = onnx.load(a.model); onnx.checker.check_model(model)
     session = ort.InferenceSession(a.model, providers=['CPUExecutionProvider'])

@@ -8,7 +8,7 @@ import struct
 import time
 import traceback
 
-from omni_support import class_names, model_family, use_source
+from omni_support import class_names, model_family, select_raw_detection, use_source
 
 MAX_JSON = 65536
 MAX_FLOATS = 16 * 1024 * 1024
@@ -119,8 +119,7 @@ class Model:
         self.size = model_input_size(self.size, request.get('auto_size', False), saved,
                                      int(stride.max().item()) if stride is not None else 32)
         self.family = model_family(self.network)
-        if getattr(self.network, 'end2end', False):
-            raise ValueError('End-to-end/NMS checkpoints do not provide the required raw detection layout')
+        select_raw_detection(self.network)
         self.synchronize()
         with torch.inference_mode():
             tensor = torch.zeros((1, 3, self.size, self.size), device=self.device)

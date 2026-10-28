@@ -58,6 +58,11 @@ int main(int argc, char** argv) {
         rejects([&] { inspect_engine_payload(wrapped); }, "truncated");
         meta["args"]["nms"] = true;
         rejects([&] { engine_class_names(meta, "hash"); }, "NMS");
+        meta["args"]["nms"] = nullptr;
+        CHECK(engine_class_names(meta, "hash").size() == 2);
+        meta["end2end"] = true;
+        rejects([&] { engine_class_names(meta, "hash"); }, "NMS");
+        meta["end2end"] = false;
         meta["args"]["nms"] = false;
         meta["task"] = "pose";
         rejects([&] { engine_class_names(meta, "hash"); }, "detection");

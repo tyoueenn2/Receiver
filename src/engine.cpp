@@ -28,7 +28,10 @@ std::vector<std::string> engine_class_names(const nlohmann::json& meta, const st
             "Engine must be an NCHW detection model; pose/segmentation/OBB are unsupported");
     auto output = meta.value("output", "raw_yolo");
     if ((output != "raw_yolo" && output != "raw_yolo11" && output != "raw_yolo_omni") ||
-        meta.value("nms", false) || (meta.contains("args") && meta.at("args").value("nms", false)))
+        meta.value("end2end", false) ||
+        (meta.contains("nms") && !meta.at("nms").is_null() && meta.at("nms").get<bool>()) ||
+        (meta.contains("args") && meta.at("args").contains("nms") &&
+         !meta.at("args").at("nms").is_null() && meta.at("args").at("nms").get<bool>()))
         throw std::runtime_error("Engine must expose raw detections without embedded NMS");
     if (meta.contains("sha256") && meta.at("sha256") != file_sha256)
         throw std::runtime_error("Engine metadata SHA-256 mismatch");
