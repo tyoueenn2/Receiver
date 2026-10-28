@@ -270,6 +270,17 @@ ModelInfo inspect_onnx(Bytes data) {
     info.fixed_size = in[2] > 0 ? checked_size(in[2]) : in[3] > 0 ? checked_size(in[3]) : 0;
     info.dynamic = info.fixed_size == 0;
     info.preferred_size = info.fixed_size;
+    // Shape alone is ambiguous for dynamic exports (or a 296-class model).
+    if (info.metadata.contains("end2end")) {
+        auto value = info.metadata["end2end"].get<std::string>();
+        std::transform(value.begin(), value.end(), value.begin(),
+                       [](unsigned char c) { return char(std::tolower(c)); });
+        if (value == "true" || value == "1")
+            throw std::runtime_error("End-to-end output is unsupported; export raw one-to-many detection");
+        if (value != "false" && value != "0")
+            throw std::runtime_error("Invalid end2end metadata");
+        info.metadata["end2end"] = false;
+    }
     if (info.metadata.contains("args")) {
         auto args = json::parse(info.metadata["args"].get<std::string>(), nullptr, false);
         if (args.is_object())

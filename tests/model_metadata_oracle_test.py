@@ -16,7 +16,7 @@ def main():
     count = 0
     with tempfile.TemporaryDirectory(prefix='receiver-onnx-oracle-') as directory:
         root = Path(directory)
-        def run(shape, output=(1, 6, 1), names=None, preferred=None, valid=True, external=False):
+        def run(shape, output=(1, 6, 1), names=None, preferred=None, valid=True, external=False, metadata=None):
             nonlocal count
             count += 1
             constant = numpy_helper.from_array(np.zeros((1, 6, 1), np.float32), name='fixture')
@@ -26,6 +26,7 @@ def main():
             model = helper.make_model(graph, opset_imports=[helper.make_opsetid('', 17)])
             model.ir_version = 10
             props = dict(task='detect', names=names or json.dumps(['object', 'other']))
+            props.update(metadata or {})
             if preferred:
                 props['imgsz'] = json.dumps([preferred, preferred])
             helper.set_model_props(model, props)
@@ -54,6 +55,11 @@ def main():
         run((1, 3, 320, 320), output=(1, 1, 6), valid=False)
         run((1, 3, 320, 320), names=json.dumps({'1': 'missing zero'}), valid=False)
         run((1, 3, 320, 320), external=True, valid=False)
+        for size, candidates in ((320, 2100), (640, 8400)):
+            run((1, 3, size, size), output=(1, 6, candidates), metadata={'end2end': 'False'})
+            run((1, 3, size, size), output=(1, 300, 6), valid=False)
+            run((1, 3, size, size), output=(1, 'channels', 'anchors'),
+                metadata={'end2end': 'True'}, valid=False)
     print(f'{count} official-schema ONNX metadata cases passed; no GPU required.')
 
 

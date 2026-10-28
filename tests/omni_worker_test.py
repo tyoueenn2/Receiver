@@ -8,12 +8,32 @@ import tempfile
 import hashlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from omni_support import class_names, model_family
+from omni_support import class_names, model_family, select_raw_detection
 from yolo_omni_worker import dimensions, read_json, send_json, Model, model_input_size
 from prepare_engine import prepare
 
 
 class WorkerTests(unittest.TestCase):
+    def test_one_to_many_selection(self):
+        from types import SimpleNamespace
+        head = type('Detect', (), dict(end2end=True, cv2=object(), cv3=object()))()
+        network = SimpleNamespace(model=[head], end2end=True)
+        select_raw_detection(network)
+        self.assertFalse(network.end2end)
+        self.assertFalse(head.end2end)
+        # Legacy YOLO11/Omni models need no changes.
+        legacy = SimpleNamespace()
+        select_raw_detection(legacy)
+        self.assertEqual(vars(legacy), {})
+        head.end2end = True
+        head.cv2 = None
+        with self.assertRaisesRegex(ValueError, 'original checkpoint'):
+            select_raw_detection(network)
+        head.end2end = False
+        head.xyxy = True
+        with self.assertRaisesRegex(ValueError, 'xywh'):
+            select_raw_detection(network)
+
     def test_raw_engine_sidecar(self):
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(folder)

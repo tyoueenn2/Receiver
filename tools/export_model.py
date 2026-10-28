@@ -1,10 +1,10 @@
-"""Export a YOLO11 or YOLO-Omni raw detection model and verified I/O manifest."""
+"""Export a YOLO11, YOLO26 or YOLO-Omni raw detection model and verified I/O manifest."""
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
-from omni_support import class_names, model_family, use_source
+from omni_support import class_names, model_family, select_raw_detection, use_source
 
 
 def main():
@@ -24,9 +24,14 @@ def main():
     if model.task != 'detect':
         raise ValueError('Only raw detection weights are supported')
     family = model_family(model.model)
+    select_raw_detection(model.model)
     output = Path(model.export(format='onnx', imgsz=a.size, batch=1, dynamic=not a.fixed,
-                               simplify=False, opset=17, half=False, nms=False, device='cpu'))
+                               simplify=False, opset=17, half=False, nms=None, device='cpu'))
     graph = onnx.load(output)
+    onnx.checker.check_model(graph)
+    metadata = {entry.key: entry.value for entry in graph.metadata_props}
+    if metadata.get('end2end', '').lower() in ('true', '1'):
+        raise ValueError('Export selected end-to-end output instead of raw one-to-many detection')
     inp, out = graph.graph.input, graph.graph.output
     if len(inp) != 1 or len(out) != 1 or len(inp[0].type.tensor_type.shape.dim) != 4 or len(out[0].type.tensor_type.shape.dim) != 3:
         raise ValueError('Unsupported exported graph layout')
