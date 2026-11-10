@@ -5,34 +5,34 @@
 #include "receiver/preferences.hpp"
 #include "receiver/assist.hpp"
 #include "preview_window.hpp"
-#include <windows.h>
-#include <commdlg.h>
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
-#include <d3d11.h>
-#include <dxgi.h>
 #include <fstream>
 #include <future>
 #include <imgui.h>
-#include <imgui_impl_dx11.h>
-#include <imgui_impl_win32.h>
 #include <sstream>
 #include <type_traits>
 #include <filesystem>
 #include <nlohmann/json.hpp>
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+#ifdef _WIN32
+#include "gui_win32.hpp"
+#else
+#include "gui_sdl.hpp"
+#endif
+#include "gui_file_dialog.hpp"
 namespace {
-ID3D11Device* device = nullptr;
-ID3D11DeviceContext* context = nullptr;
-IDXGISwapChain* swapchain = nullptr;
-ID3D11RenderTargetView* target = nullptr;
 ImFont* title_font = nullptr;
 ImFont* label_font = nullptr;
 ImFont* detail_font = nullptr;
 ImVec4 accent{.19f, .59f, 1.f, 1.f};
 constexpr ImVec4 muted{.53f, .59f, .68f, 1.f};
+#ifdef _WIN32
+constexpr bool windows_desktop = true;
+#else
+constexpr bool windows_desktop = false;
+#endif
 
 enum class Page {
     connections,
@@ -97,39 +97,6 @@ constexpr PageInfo settings_pages[] = {
      "test hub troubleshooting timings latency metrics error reports logs telemetry"},
 };
 
-void release_target() {
-    if (target) {
-        target->Release();
-        target = nullptr;
-    }
-}
-void create_target() {
-    ID3D11Texture2D* back = nullptr;
-    if (SUCCEEDED(swapchain->GetBuffer(0, IID_PPV_ARGS(&back)))) {
-        device->CreateRenderTargetView(back, nullptr, &target);
-        back->Release();
-    }
-}
-LRESULT WINAPI window_proc(HWND window, UINT message, WPARAM w, LPARAM l) {
-    if (ImGui_ImplWin32_WndProcHandler(window, message, w, l))
-        return true;
-    if (message == WM_GETMINMAXINFO) {
-        auto* limits = reinterpret_cast<MINMAXINFO*>(l);
-        limits->ptMinTrackSize = {1060, 740};
-        return 0;
-    }
-    if (message == WM_SIZE && device && w != SIZE_MINIMIZED) {
-        release_target();
-        swapchain->ResizeBuffers(0, LOWORD(l), HIWORD(l), DXGI_FORMAT_UNKNOWN, 0);
-        create_target();
-        return 0;
-    }
-    if (message == WM_DESTROY) {
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcW(window, message, w, l);
-}
 bool input_string(const char* label, std::string& value) {
     std::array<char, 1024> b{};
     std::snprintf(b.data(), b.size(), "%s", value.c_str());
@@ -218,6 +185,21 @@ template <typename Value, typename... Args> bool number_input(const char* label,
     else
         return ImGui::InputFloat(id.c_str(), value, args...);
 }
+bool platform_combo(const char* label, int* value, const char* const* items, int count, int windows_only) {
+    bool changed = false;
+    if (begin_combo(label, items[*value])) {
+        for (int i = 0; i < count; ++i) {
+            ImGui::BeginDisabled(!windows_desktop && i == windows_only);
+            if (ImGui::Selectable(items[i], *value == i)) {
+                *value = i;
+                changed = true;
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
 bool setting_columns(const char* id) {
     const int columns = ImGui::GetContentRegionAvail().x >= 580 ? 2 : 1;
     const bool opened = ImGui::BeginTable(id, columns, ImGuiTableFlags_SizingStretchSame);
@@ -232,24 +214,6 @@ bool percent_slider(const char* label, float& value) {
     value = percent / 100;
     return true;
 }
-std::optional<std::string> choose_file(HWND window, bool save, int model = 0) {
-    std::array<char, 4096> path{};
-    OPENFILENAMEA dialog{};
-    dialog.lStructSize = sizeof(dialog);
-    dialog.hwndOwner = window;
-    dialog.lpstrFile = path.data();
-    dialog.nMaxFile = DWORD(path.size());
-    dialog.lpstrFilter = model == 3   ? "Aimmy configs (*.cfg;*.json)\0*.cfg;*.json\0\0"
-                         : model == 2 ? "Programs (*.exe)\0*.exe\0\0"
-                         : model      ? "Detection models (*.onnx;*.pt;*.engine)\0*.onnx;*.pt;*.engine\0\0"
-                                      : "Saved settings (*.json)\0*.json\0\0";
-    dialog.lpstrDefExt = model ? "onnx" : "json";
-    dialog.Flags =
-        OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | (save ? OFN_OVERWRITEPROMPT : OFN_FILEMUSTEXIST);
-    if (save ? GetSaveFileNameA(&dialog) : GetOpenFileNameA(&dialog))
-        return std::string(path.data());
-    return std::nullopt;
-}
 const char* mouse_buttons[] = {"Left mouse button",
                                "Right mouse button",
                                "Middle mouse button",
@@ -258,154 +222,39 @@ const char* mouse_buttons[] = {"Left mouse button",
                                "Button 6",
                                "Button 7",
                                "Button 8"};
-struct Texture {
-    ID3D11Texture2D* image = nullptr;
-    ID3D11ShaderResourceView* view = nullptr;
-    int w = 0, h = 0;
-    uint64_t session = 0;
-    uint32_t sequence = 0;
-    std::vector<uint8_t> rgba;
-    ~Texture() {
-        clear();
-    }
-    void clear() {
-        if (view)
-            view->Release();
-        if (image)
-            image->Release();
-        view = nullptr;
-        image = nullptr;
-        w = h = 0;
-        session = 0;
-        rgba.clear();
-    }
-    void update(const receiver::Frame& f) {
-        if (view && session == f.header.session && sequence == f.header.sequence)
-            return;
-        if (w != f.header.width || h != f.header.height) {
-            clear();
-            w = f.header.width;
-            h = f.header.height;
-            D3D11_TEXTURE2D_DESC desc{};
-            desc.Width = w;
-            desc.Height = h;
-            desc.MipLevels = desc.ArraySize = 1;
-            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            desc.SampleDesc.Count = 1;
-            desc.Usage = D3D11_USAGE_DEFAULT;
-            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            if (FAILED(device->CreateTexture2D(&desc, nullptr, &image)) ||
-                FAILED(device->CreateShaderResourceView(image, nullptr, &view))) {
-                clear();
-                return;
-            }
-            rgba.resize(size_t(w) * h * 4);
-        }
-        int c = f.header.format == 1 ? 3 : 4;
-        for (size_t i = 0; i < size_t(w) * h; ++i) {
-            rgba[i * 4] = f.pixels[i * c + (c == 4 ? 2 : 0)];
-            rgba[i * 4 + 1] = f.pixels[i * c + 1];
-            rgba[i * 4 + 2] = f.pixels[i * c + (c == 4 ? 0 : 2)];
-            rgba[i * 4 + 3] = 255;
-        }
-        context->UpdateSubresource(image, 0, nullptr, rgba.data(), UINT(w * 4), 0);
-        session = f.header.session;
-        sequence = f.header.sequence;
-    }
-};
-void save_backbuffer(const char* path, IDXGISwapChain* source = swapchain) {
-    ID3D11Texture2D* back = nullptr;
-    ID3D11Texture2D* staging = nullptr;
-    if (FAILED(source->GetBuffer(0, IID_PPV_ARGS(&back))))
-        throw std::runtime_error("Cannot read GUI framebuffer");
-    D3D11_TEXTURE2D_DESC desc{};
-    back->GetDesc(&desc);
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    if (FAILED(device->CreateTexture2D(&desc, nullptr, &staging))) {
-        back->Release();
-        throw std::runtime_error("Cannot stage GUI framebuffer");
-    }
-    context->CopyResource(staging, back);
-    back->Release();
-    D3D11_MAPPED_SUBRESOURCE map{};
-    if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &map))) {
-        staging->Release();
-        throw std::runtime_error("Cannot map GUI framebuffer");
-    }
-    BITMAPFILEHEADER file{};
-    file.bfType = 0x4d42;
-    file.bfOffBits = sizeof(file) + sizeof(BITMAPINFOHEADER);
-    file.bfSize = file.bfOffBits + desc.Width * desc.Height * 4;
-    BITMAPINFOHEADER info{};
-    info.biSize = sizeof(info);
-    info.biWidth = LONG(desc.Width);
-    info.biHeight = -LONG(desc.Height);
-    info.biPlanes = 1;
-    info.biBitCount = 32;
-    info.biCompression = BI_RGB;
-    std::ofstream out(path, std::ios::binary);
-    out.write(reinterpret_cast<const char*>(&file), sizeof(file));
-    out.write(reinterpret_cast<const char*>(&info), sizeof(info));
-    std::vector<uint8_t> row(desc.Width * 4);
-    for (UINT y = 0; y < desc.Height; ++y) {
-        auto* src = static_cast<const uint8_t*>(map.pData) + y * map.RowPitch;
-        for (UINT x = 0; x < desc.Width; ++x) {
-            row[4 * x] = src[4 * x + 2];
-            row[4 * x + 1] = src[4 * x + 1];
-            row[4 * x + 2] = src[4 * x];
-            row[4 * x + 3] = 255;
-        }
-        out.write(reinterpret_cast<const char*>(row.data()), std::streamsize(row.size()));
-    }
-    context->Unmap(staging, 0);
-    staging->Release();
-    if (!out)
-        throw std::runtime_error("Cannot save GUI smoke-test image");
-}
 } // namespace
-int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    const std::string options(arguments);
+int run_gui(const std::string& options) {
     bool smoke = options.find("--smoke-test") != std::string::npos;
     bool demo = options.find("--demo") != std::string::npos;
     const bool compact = smoke && options.find("--compact") != std::string::npos;
-    WNDCLASSEXW wc{sizeof(wc), CS_CLASSDC, window_proc,          0,      0, instance, nullptr, nullptr,
-                   nullptr,    nullptr,    L"UdpVisionReceiver", nullptr};
-    RegisterClassExW(&wc);
-    HWND window =
-        CreateWindowW(wc.lpszClassName, L"UDP Vision Receiver", WS_OVERLAPPEDWINDOW, 80, 60,
-                      compact ? 1060 : 1280, compact ? 740 : 900, nullptr, nullptr, instance, nullptr);
-    DXGI_SWAP_CHAIN_DESC desc{};
-    desc.BufferCount = 2;
-    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.OutputWindow = window;
-    desc.SampleDesc.Count = 1;
-    desc.Windowed = TRUE;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    D3D_FEATURE_LEVEL feature;
-    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_0};
-    if (FAILED(D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, levels, 1,
-                                             D3D11_SDK_VERSION, &desc, &swapchain, &device, &feature,
-                                             &context))) {
-        MessageBoxW(window, L"DirectX 11 initialization failed", L"Receiver", MB_ICONERROR);
-        DestroyWindow(window);
-        UnregisterClassW(wc.lpszClassName, instance);
-        return 1;
-    }
-    create_target();
-    ShowWindow(window, smoke ? SW_HIDE : SW_SHOWDEFAULT);
-    UpdateWindow(window);
+    GuiBackend gui;
+    gui.open(compact, smoke);
+    const auto window = gui.window;
+    FileDialog file_dialog;
     IMGUI_CHECKVERSION();
     auto* main_gui = ImGui::CreateContext();
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     auto* fonts = ImGui::GetIO().Fonts;
+#ifdef _WIN32
     fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16);
     title_font = fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\bahnschrift.ttf", 28);
     label_font = fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeuib.ttf", 15);
     detail_font = fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 14);
+#else
+    auto linux_font = [&](const char* path, float size) {
+        if (std::filesystem::is_regular_file(path))
+            return fonts->AddFontFromFileTTF(path, size);
+        ImFontConfig config;
+        config.SizePixels = size;
+        return fonts->AddFontDefault(&config);
+    };
+    constexpr auto regular_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    constexpr auto bold_font = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+    linux_font(regular_font, 16);
+    title_font = linux_font(bold_font, 28);
+    label_font = linux_font(bold_font, 15);
+    detail_font = linux_font(regular_font, 14);
+#endif
     ImGui::StyleColorsDark();
     auto& style = ImGui::GetStyle();
     style.WindowRounding = 0;
@@ -446,8 +295,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     style.Colors[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0);
     style.Colors[ImGuiCol_ScrollbarGrab] = ImVec4(.23f, .30f, .39f, 1);
     style.Colors[ImGuiCol_NavCursor] = accent;
-    ImGui_ImplWin32_Init(window);
-    ImGui_ImplDX11_Init(device, context);
+    gui.initialize_imgui();
     receiver::App app;
     receiver::TestHub test_hub;
     receiver::TestOptions test_options;
@@ -614,13 +462,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     };
     while (!done) {
         auto ui_start = receiver::now_ns();
-        MSG message;
-        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-            if (message.message == WM_QUIT)
-                done = true;
-        }
+        if (!gui.poll(separate_preview))
+            done = true;
         if (done)
             break;
         if (operation.valid() && !busy()) {
@@ -663,17 +506,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         style.Colors[ImGuiCol_CheckMark] = style.Colors[ImGuiCol_SliderGrab] =
             style.Colors[ImGuiCol_NavCursor] = accent;
         if (!smoke && last_topmost != int(settings.ui.always_on_top)) {
-            SetWindowPos(window, settings.ui.always_on_top ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            gui.set_topmost(settings.ui.always_on_top);
             last_topmost = int(settings.ui.always_on_top);
         }
         if (!smoke && last_stream_guard != int(settings.ui.stream_guard)) {
-            if (!SetWindowDisplayAffinity(window, settings.ui.stream_guard ? 0x11 : 0))
+            if (!gui.set_capture_exclusion(settings.ui.stream_guard))
                 error = "Windows could not apply capture exclusion to this window.";
             last_stream_guard = int(settings.ui.stream_guard);
         }
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
+        gui.new_frame();
         auto& io = ImGui::GetIO();
         if (io.DisplaySize.x > 0 && io.DisplaySize.y > 0)
             last_display_size = io.DisplaySize;
@@ -731,22 +572,24 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 visible_pages.push_back(&item);
         std::array<bool, 256> pressed{};
         for (int key = 8; key < 255; ++key) {
-            const bool down = (GetAsyncKeyState(key) & 0x8000) != 0;
+            const bool down = gui.key_down(key);
             pressed[key] = down && !previous_keys[key];
             previous_keys[key] = down;
         }
-        if (!smoke && GetForegroundWindow() == window && !ImGui::GetIO().WantTextInput) {
+        if (!smoke && gui.focused() && pressed[0x2E])
+            app.arm(false);
+        if (!smoke && gui.focused() && !ImGui::GetIO().WantTextInput) {
             if (capture_model_key) {
                 for (int key = 8; key < 255; ++key)
-                    if (pressed[key] && key != VK_SHIFT && key != VK_CONTROL && key != VK_MENU &&
-                        (key < VK_LSHIFT || key > VK_RMENU) && key != VK_ESCAPE && key != VK_DELETE &&
+                    if (pressed[key] && key != 0x10 && key != 0x11 && key != 0x12 &&
+                        (key < 0xA0 || key > 0xA5) && key != 0x1B && key != 0x2E &&
                         key != 'Q' && key != 'E') {
                         settings.ui.model_switch_key = key;
                         capture_model_key = false;
                         changed = true;
                         break;
                     }
-                if (pressed[VK_ESCAPE])
+                if (pressed[0x1B])
                     capture_model_key = false;
             } else if (pressed['Q'] || pressed['E']) {
                 for (size_t i = 0; i < visible_pages.size(); ++i)
@@ -937,33 +780,40 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 mark_preferences();
             }
             section("Mouse output", "Choose which device receives the corrections.");
-            if (combo("Output device", &settings.mouse_backend,
-                      "Raspberry Pi / simulated Pi\0This computer's Windows mouse\0MAKCU (USB serial)\0")) {
+            const char* outputs[] = {"Raspberry Pi / simulated Pi", "This computer's Windows mouse", "MAKCU (USB serial)"};
+            if (platform_combo("Output device", &settings.mouse_backend, outputs, 3, 1)) {
                 settings.activation_button = 2;
                 settings.secondary_button = 0;
                 settings.tracking.fov_button = 1;
                 if (settings.mouse_backend == 2) {
                     settings.direction.enabled = false;
                     if (settings.makcu_port.empty())
-                        settings.makcu_port = "COM3";
+                        settings.makcu_port = windows_desktop ? "COM3" : "/dev/ttyACM0";
                 }
                 changed = true;
             }
             if (settings.mouse_backend == 2) {
                 input_string("MAKCU serial port", settings.makcu_port);
                 changed |= ImGui::IsItemDeactivatedAfterEdit();
-                hint("Use the MAKCU control port shown in Device Manager, such as COM3. Close other MAKCU "
-                     "apps. Arming sends real mouse movement, including with practice pictures.");
-            } else
+                hint(windows_desktop
+                         ? "Use the MAKCU control port shown in Device Manager, such as COM3. Close other MAKCU apps."
+                         : "Use the MAKCU control port, such as /dev/ttyACM0. Your user needs serial-port access.");
+                hint("Arming sends real mouse movement, including with practice pictures.");
+            } else if (settings.mouse_backend == 1)
                 hint("Windows output moves this computer's real cursor when assistance is armed.");
+            if (!windows_desktop)
+                hint("Linux supports Pi and MAKCU output. Local Windows mouse output is unavailable.");
             if (columns)
                 ImGui::TableNextColumn();
             section("Video source", "Capture this computer's desktop or receive pictures over UDP.");
             int source = settings.frame_source == "local" ? 1 : 0;
-            if (combo("Picture source", &source, "UDP sender\0Local desktop capture\0")) {
+            const char* sources[] = {"UDP sender", "Local desktop capture (Windows)"};
+            if (platform_combo("Picture source", &source, sources, 2, 1)) {
                 settings.frame_source = source ? "local" : "udp";
                 changed = true;
             }
+            if (!windows_desktop)
+                hint("On Linux, receive video over UDP from FrameSender or another compatible sender.");
             if (settings.frame_source == "local") {
                 if (ImGui::Button("Refresh displays") || !capture_displays_loaded) {
                     capture_displays_loaded = true;
@@ -997,9 +847,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                          ? "Practice uses example detections. MAKCU still controls the real connected mouse."
                      : settings.frame_source == "local"
                          ? "Practice uses desktop images with example detections and a simulated Pi."
-                         : "Run Start Demo.cmd to launch the example video sender and simulated Pi. No model "
-                           "or "
-                           "hardware is required.");
+                         : windows_desktop
+                         ? "Run Start Demo.cmd to launch the example video sender and simulated Pi."
+                         : "Run python3 tools/ui_demo.py to launch the example video sender and simulated Pi.");
             } else {
                 if (settings.frame_source == "udp")
                     changed |= input_string("Video sender IP address", settings.sender_ip);
@@ -1043,8 +893,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             if (ImGui::Button("Load selected model"))
                 open_model(model_draft);
             ImGui::SameLine();
-            if (ImGui::Button("Browse..."))
-                if (auto path = choose_file(window, false, true))
+            if (ImGui::Button("Browse...") || file_dialog.ready("model"))
+                if (auto path = file_dialog.choose(window, false, 1, "model"))
                     open_model(*path);
             hint("Models and profiles in your chosen folders refresh automatically. Settings are "
                  "remembered separately for each model.");
@@ -1195,7 +1045,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             if (columns)
                 ImGui::TableNextColumn();
             section("Pause conditions", "These checks still apply in continuous mode.");
-            ImGui::BeginDisabled(settings.mouse_backend != 1);
+            ImGui::BeginDisabled(!windows_desktop || settings.mouse_backend != 1);
             changed |= ImGui::Checkbox("Pause while the Windows cursor is visible", &settings.cursor_check);
             ImGui::EndDisabled();
             hint("Cursor visibility is available only with Windows mouse output. The other computer's cursor "
@@ -1698,7 +1548,10 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             changed |= ImGui::Checkbox("Enable automatic clicks", &settings.trigger.enabled);
             ImGui::BeginDisabled(!settings.trigger.enabled);
             int repeat = settings.trigger.spray ? 1 : 0;
-            if (combo("Click behavior", &repeat, "Once per target\0Repeat while target stays centered\0")) {
+            if (combo("Click behavior", &repeat,
+                      settings.color.mode == 1
+                          ? "Once per continuous color match\0Repeat while colors surround crosshair\0"
+                          : "Once per target\0Repeat while target stays centered\0")) {
                 settings.trigger.spray = repeat == 1;
                 changed = true;
             }
@@ -1706,6 +1559,18 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             if (combo("Mouse button to click", &button, mouse_buttons, 8)) {
                 settings.trigger.button = button + 1;
                 changed = true;
+            }
+            if (settings.color.mode == 1) {
+                section("Color trigger", "Requires matching pixels left, right and above the crosshair.");
+                if (slider_int("Color scan distance", &settings.trigger.color_radius, 1, 1024, "%d px")) {
+                    settings.trigger.color_tolerance =
+                        std::min(settings.trigger.color_tolerance, settings.trigger.color_radius);
+                    changed = true;
+                }
+                changed |= slider_int("Color scan tolerance", &settings.trigger.color_tolerance, 0,
+                                      settings.trigger.color_radius, "%d px");
+                hint("Distance limits each scan. Tolerance widens the horizontal and vertical strips. "
+                     "Aim offsets do not move these scans. A match under the crosshair is not required.");
             }
             if (columns)
                 ImGui::TableNextColumn();
@@ -1751,8 +1616,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             hint("The preview stays open while you browse settings. Move it to another monitor or "
                  "resize it as needed. Closing it turns this option off.");
             if (settings.preview && separate_preview.handle() && ImGui::Button("Bring preview to front")) {
-                ShowWindow(separate_preview.handle(), SW_RESTORE);
-                SetForegroundWindow(separate_preview.handle());
+                gui.show_preview(separate_preview);
             }
             if (!receiving)
                 hint(stats.running ? "Waiting for fresh video. The preview may show the last received frame."
@@ -1826,8 +1690,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     "Save your connections, detection settings, and mouse preferences together. Mouse "
                     "control is never turned on by loading a file.");
             ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
-            if (ImGui::Button("Import Aimmy config...", ImVec2(190, 36))) {
-                if (auto path = choose_file(window, false, 3)) {
+            if (ImGui::Button("Import Aimmy config...", ImVec2(190, 36)) || file_dialog.ready("import")) {
+                if (auto path = file_dialog.choose(window, false, 3, "import")) {
                     try {
                         auto imported = receiver::import_aimmy(*path, settings);
                         app.arm(false);
@@ -1847,8 +1711,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 ImGui::CollapsingHeader("Import details", ImGuiTreeNodeFlags_DefaultOpen))
                 for (const auto& note : import_notes)
                     hint(note.c_str());
-            if (ImGui::Button("Save profile as...", ImVec2(190, 36))) {
-                if (auto path = choose_file(window, true)) {
+            if (ImGui::Button("Save profile as...", ImVec2(190, 36)) || file_dialog.ready("save")) {
+                if (auto path = file_dialog.choose(window, true, 0, "save")) {
                     try {
                         receiver::save_settings(settings, *path);
                         profile = *path;
@@ -1865,8 +1729,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             ImGui::Spacing();
             hint("Your latest settings restore automatically next time. Mouse control always starts off.");
             ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
-            if (ImGui::Button("Load profile...", ImVec2(190, 36)))
-                if (auto path = choose_file(window, false))
+            if (ImGui::Button("Load profile...", ImVec2(190, 36)) || file_dialog.ready("profile"))
+                if (auto path = file_dialog.choose(window, false, 0, "profile"))
                     open_profile(*path);
             input_string("Search profiles", profile_filter);
             for (const auto& item : library)
@@ -1892,23 +1756,23 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             const bool columns = setting_columns("App groups");
             section("Window and theme", "Preferences for the Receiver application window.");
             changed |= ImGui::Checkbox("Keep Receiver above other windows", &settings.ui.always_on_top);
+            ImGui::BeginDisabled(!windows_desktop);
             changed |= ImGui::Checkbox("Hide Receiver from screen capture", &settings.ui.stream_guard);
-            hint("Capture exclusion applies to this window and depends on Windows and the recording "
-                 "software.");
+            ImGui::EndDisabled();
+            hint(windows_desktop ? "Capture exclusion depends on Windows and the recording software."
+                                 : "Capture exclusion is unavailable on Linux.");
             changed |= ImGui::ColorEdit3("Interface accent color", settings.ui.accent.data(),
                                          ImGuiColorEditFlags_NoInputs);
             if (columns)
                 ImGui::TableNextColumn();
             section("Keyboard shortcuts",
-                    "Shortcuts apply while Receiver is focused, except the global Delete stop key.");
+                    windows_desktop
+                        ? "Shortcuts apply while Receiver is focused, except the global Delete stop key."
+                        : "Shortcuts, including Delete to disarm, apply while Receiver is focused.");
             ImGui::TextUnformatted("Delete  -  Disarm assistance");
             ImGui::TextUnformatted("Q / E   -  Previous / next category");
             changed |= ImGui::Checkbox("Enable next-model shortcut", &settings.ui.model_switch);
-            char key_name[64]{};
-            const UINT scan = MapVirtualKeyA(settings.ui.model_switch_key, MAPVK_VK_TO_VSC);
-            if (!GetKeyNameTextA(LONG(scan << 16), key_name, sizeof(key_name)))
-                std::snprintf(key_name, sizeof(key_name), "Key %d", settings.ui.model_switch_key);
-            ImGui::Text("Next model: %s", key_name);
+            ImGui::Text("Next model: %s", gui.key_name(settings.ui.model_switch_key).c_str());
             if (ImGui::Button(capture_model_key ? "Press a key (Esc cancels)" : "Change model shortcut"))
                 capture_model_key = !capture_model_key;
             hint("Cycles the model library and disarms assistance. Shortcuts do not run while typing in a "
@@ -2004,8 +1868,8 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                     if (ImGui::CollapsingHeader("Test settings and optional GPU checks")) {
                         ImGui::BeginDisabled(test_hub.running() || busy());
                         input_string("Python executable", test_options.python);
-                        if (ImGui::Button("Choose Python..."))
-                            if (auto file = choose_file(window, false, 2))
+                        if (ImGui::Button("Choose Python...") || file_dialog.ready("python"))
+                            if (auto file = file_dialog.choose(window, false, 2, "python"))
                                 test_options.python = *file;
                         hint("The first four checks need no Python. The demo launcher fills this path "
                              "automatically. Optional checks require their model files and Python "
@@ -2188,7 +2052,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
         }
         if (settings.preview) {
             try {
-                separate_preview.open(device, context, swapchain, smoke);
+                gui.open_preview(separate_preview, smoke);
                 if (!separate_preview.update_options(settings.ui))
                     notice = "Windows could not apply capture exclusion to the separate preview.";
             } catch (const std::exception& e) {
@@ -2214,18 +2078,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             }
         }
         ImGui::End();
+        file_dialog.render();
         ImGui::Render();
-        if (target) {
-            const float clear[] = {.06f, .07f, .09f, 1};
-            context->OMSetRenderTargets(1, &target, nullptr);
-            context->ClearRenderTargetView(target, clear);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        if (gui.render()) {
             if (separate_preview.handle()) {
                 try {
                     const auto picture = app.preview();
                     if (picture.frame)
                         texture.update(*picture.frame);
-                    separate_preview.render({texture.view, texture.w, texture.h}, picture, settings, stats,
+                    separate_preview.render({texture.id(), texture.w, texture.h}, picture, settings, stats,
                                             names, simulate);
                 } catch (const std::exception& e) {
                     separate_preview.close();
@@ -2235,9 +2096,9 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
             }
             if (smoke && receiver::now_ns() - smoke_started > 3'000'000'000) {
                 try {
-                    save_backbuffer("gui-smoke.bmp");
+                    gui.save_frame("gui-smoke.bmp");
                     if (separate_preview.handle())
-                        save_backbuffer("gui-smoke-preview.bmp", separate_preview.swap_chain());
+                        gui.save_frame("gui-smoke-preview.bmp", &separate_preview);
                     auto result = app.stats();
                     if (!result.inferred || !result.pi_ready || !result.synchronized)
                         smoke_exit = 2;
@@ -2274,7 +2135,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
                 }
                 done = true;
             }
-            swapchain->Present(0, 0);
+            gui.present();
             try {
                 separate_preview.present();
             } catch (const std::exception& e) {
@@ -2303,14 +2164,22 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int) {
     app.stop();
     separate_preview.close();
     texture.clear();
-    ImGui_ImplDX11_Shutdown();
-    ImGui_ImplWin32_Shutdown();
-    ImGui::DestroyContext();
-    release_target();
-    swapchain->Release();
-    context->Release();
-    device->Release();
-    DestroyWindow(window);
-    UnregisterClassW(wc.lpszClassName, instance);
+    gui.close();
     return smoke_exit;
 }
+#ifdef _WIN32
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR arguments, int) {
+    try { return run_gui(arguments); }
+    catch (const std::exception& e) { MessageBoxA(nullptr, e.what(), "Receiver", MB_ICONERROR); return 1; }
+}
+#else
+int main(int argc, char** argv) {
+    std::string options;
+    for (int i = 1; i < argc; ++i) {
+        if (!options.empty()) options += ' ';
+        options += argv[i];
+    }
+    try { return run_gui(options); }
+    catch (const std::exception& e) { std::fprintf(stderr, "Receiver: %s\n", e.what()); return 1; }
+}
+#endif

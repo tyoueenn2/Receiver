@@ -79,6 +79,7 @@ struct Detection {
 struct TriggerSettings {
     bool enabled = false, spray = false;
     int button = 1, delay_ms = 100, interval_ms = 100, press_ms = 10;
+    int color_radius = 32, color_tolerance = 2; // HSV-only: scan distance and strip half-width, in pixels.
 };
 struct VisualSettings {
     bool boxes = true, fov = true, confidence = true, tracers = false;

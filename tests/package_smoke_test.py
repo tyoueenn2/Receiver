@@ -67,6 +67,9 @@ def main():
         if os.name == 'nt':
             subprocess.run([sys.executable, str(root / 'tests/gui_preview_test.py'),
                             str(root / 'receiver.exe')], cwd=working, check=True, timeout=75)
+        elif (root / 'receiver').is_file():
+            subprocess.run([sys.executable, str(root / 'tests/gui_preview_linux_test.py'),
+                            str(root / 'receiver')], cwd=working, check=True, timeout=75)
     print('Extracted package starts disarmed and passes preference, worker reload and fault checks.')
 
 

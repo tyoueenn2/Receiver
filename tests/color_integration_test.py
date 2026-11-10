@@ -12,7 +12,7 @@ from test_sender import Sender
 from integration_test import free_port
 
 
-def main():
+def targeting():
     with tempfile.TemporaryDirectory(prefix='receiver-color-') as directory:
         root = Path(directory)
         model = root / 'players.pt'
@@ -105,5 +105,106 @@ def main():
                 pi.stop()
 
 
+def triggering():
+    with tempfile.TemporaryDirectory(prefix='receiver-color-trigger-') as directory:
+        frame_port, pi_port = free_port(), free_port()
+        pi = MockPi(pi_port, physical=0).start()
+        left, right, above = (56, 48), (72, 48), (64, 40)
+
+        def pixels(points):
+            data = bytearray(128 * 96 * 3)
+            for x, y in points:
+                offset = (y * 128 + x) * 3
+                data[offset:offset + 3] = bytes([255, 0, 0])
+            return bytes(data)
+
+        sender = Sender(port=frame_port, width=128, height=96, fps=60,
+                        pixels=pixels([left, right])).start()
+        profile = Path(directory) / 'profile.json'
+        profile.write_text(json.dumps(dict(
+            bind_ip='127.0.0.1', sender_ip='127.0.0.1', pi_ip='127.0.0.1',
+            frame_port=frame_port, pi_port=pi_port, max_age_ms=250,
+            model='', omni_python='missing-python', omni_worker='missing-worker.py',
+            gain_x=0, gain_y=0, constant_tracking=True,
+            color=dict(mode=1, offset_x=7, offset_y=10),
+            trigger=dict(enabled=True, delay_ms=60, interval_ms=100,
+                         color_radius=8, color_tolerance=0))))
+        control = None
+        try:
+            control = Control(sys.argv[1], profile)
+            control.wait(lambda s: s['pi_ready'] and s['synchronized'] and s['inferred'] > 3,
+                         'Color trigger session did not become ready')
+            assert not pi.click_requests, 'Disarmed color session clicked'
+            assert control.request('arm', enabled=True)['ok']
+
+            def set_frame(points):
+                sender.pixels = pixels(points)
+                inferred = control.request()['stats']['inferred']
+                control.wait(lambda s: s['inferred'] > inferred + 5, 'New color frame not processed')
+
+            def no_clicks():
+                before = control.request()['stats']['auto_triggered']
+                time.sleep(.18)
+                assert control.request()['stats']['auto_triggered'] == before, \
+                    'Color trigger fired without the required geometry or repeated a single click'
+                return before
+
+            for points in ([left, right], [left, above], [right, above],
+                           [(64, 48)], [left, right, (64, 56)]):
+                set_frame(points)
+                assert no_clicks() == 0
+            set_frame([left, right, above])
+            control.wait(lambda s: s['auto_triggered'] == 1 and s['click_completed'] >= 1,
+                         'Left/right/above mask did not trigger with nonzero aim offsets')
+            assert len(pi.click_requests) == 1
+            set_frame([left, right, above, (50, 20)])
+            assert no_clicks() == 1, 'Changing the topmost aim pixel re-armed single click'
+
+            set_frame([left, right])
+            assert no_clicks() == 1
+            set_frame([left, right, above])
+            control.wait(lambda s: s['auto_triggered'] == 2, 'Missing above did not allow reacquisition')
+
+            # Scan settings persist and changing them disarms, just like existing click settings.
+            response = control.request('configure', settings=dict(trigger=dict(color_radius=4)))
+            assert response['ok'] and not response['stats']['armed'], response
+            assert control.request('arm', enabled=True)['ok']
+            assert no_clicks() == 2, 'Scan distance did not exclude distant matches'
+            response = control.request('configure', settings=dict(trigger=dict(color_radius=8)))
+            assert response['ok'] and not response['stats']['armed'], response
+            set_frame([(56, 50), (72, 50), above])
+            assert control.request('arm', enabled=True)['ok']
+            assert no_clicks() == 2, 'Zero tolerance accepted off-axis side matches'
+            response = control.request('configure', settings=dict(trigger=dict(color_tolerance=2)))
+            assert response['ok'] and not response['stats']['armed'], response
+            assert control.request('arm', enabled=True)['ok']
+            control.wait(lambda s: s['auto_triggered'] == 3, 'Tolerance did not accept nearby side matches')
+
+            pi.telemetry_enabled = False
+            control.wait(lambda s: not s['active'], 'Color trigger ignored telemetry loss')
+            assert no_clicks() == 3
+            pi.telemetry_enabled = True
+            control.wait(lambda s: s['active'], 'Color trigger did not recover telemetry')
+            assert no_clicks() == 3, 'Telemetry recovery re-armed continuous occupancy'
+
+            assert control.request('configure', settings=dict(trigger=dict(spray=True)))['ok']
+            assert control.request('arm', enabled=True)['ok']
+            control.wait(lambda s: s['auto_triggered'] >= 6, 'Color repeat mode did not repeat')
+            sender.paused = True
+            # Allow the current 250 ms frame deadline to expire while clock/hello traffic continues.
+            time.sleep(.35)
+            no_clicks()
+            print('Color directional geometry, aim jitter, offsets, scan settings, single/repeat, '
+                  'telemetry and stale-frame gates passed')
+        finally:
+            try:
+                if control is not None:
+                    control.close()
+            finally:
+                sender.stop()
+                pi.stop()
+
+
 if __name__ == '__main__':
-    main()
+    targeting()
+    triggering()
