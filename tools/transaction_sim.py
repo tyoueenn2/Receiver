@@ -12,6 +12,7 @@ class MoveSimulator:
         self.position = (0, 0)
         self.requests = []
         self.clicks = []
+        self.minimum_settle_s = 0
 
     def reply(self, record):
         r = record
@@ -64,7 +65,8 @@ class MoveSimulator:
                   4 if any(r['status'] <= 2 for r in self.records.values()) else 2)
         record = dict(status=status, stage=0, flags=0, session=session, command=command,
                       epoch=epoch, generation=generation, ox=0, oy=0, rx=0, ry=0,
-                      dx=dx, dy=dy, button=button, source=source, settle=settle/1e6,
+                      dx=dx, dy=dy, button=button, source=source,
+                      settle=max(settle/1e6, self.minimum_settle_s),
                       press=press/1e6, delay=delay/1e6, wait=wait/1e6, midpoint=bool(flags & 1),
                       deadline=time.perf_counter()+budget/1e6, due=time.perf_counter(),
                       fingerprint=fingerprint, cancel=False, **{'continue': False})

@@ -1,4 +1,5 @@
 """Exercise the real Receiver calibration controller against deterministic peers."""
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import random
@@ -14,17 +15,45 @@ from test_sender import Sender
 from wire import HELLO
 
 
+@contextmanager
+def peer_timer_resolution():
+    if sys.platform != 'win32':
+        yield
+        return
+    import ctypes
+    winmm = ctypes.WinDLL('winmm')
+    # Receiver's timeBeginPeriod call affects only its own process on current
+    # Windows. The Python peers also need fine waits to meet the 50 ms lease.
+    if winmm.timeBeginPeriod(1):
+        raise RuntimeError('Cannot request 1 ms timer resolution for calibration peers')
+    try:
+        yield
+    finally:
+        winmm.timeEndPeriod(1)
+
+
 def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.bind(('127.0.0.1', 0))
         return sock.getsockname()[1]
 
 
-def run(binary, mode):
-    pi = MockPi(free_port(), physical=0).start()
+class PeerTimingError(RuntimeError):
+    """The safety gate cancelled a probe after a loopback peer missed its lease."""
+
+
+def run_once(binary, mode):
+    pi = MockPi(port=0, physical=0)
+    if mode == 'telemetry_loss':
+        # Keep the first probe outbound until the lease expires, so the test
+        # checks an interrupted return rather than a pause between probes.
+        pi.transactions.minimum_settle_s = .25
+    pi.start()
     rng = random.Random(61)
     texture = bytes(rng.randrange(256) for _ in range(256*256*3))
     def cursor():
+        if mode == 'telemetry_loss' and pi.transactions.requests:
+            pi.telemetry_enabled = False
         x, y = pi.transactions.position
         extra = .2*x*abs(x) if mode == 'nonlinear' else 0
         if mode == 'miss' and pi.transactions.requests and pi.transactions.requests[-1]['button']:
@@ -64,10 +93,25 @@ def run(binary, mode):
             path.write_text(json.dumps(config))
             result = subprocess.run([binary, str(path), str(report), mode], capture_output=True,
                                     text=True, timeout=35)
-            assert result.returncode == 0, result.stdout+result.stderr
             data = json.loads(report.read_text())
+            assert result.returncode == 0, (data, result.returncode, result.stdout, result.stderr)
             assert not data['armed'], data
-            if mode in ('desktop', 'view', 'manual', 'miss'):
+            peer_timeout = (data.get('error') in ('Pi operation: cancelled',
+                                                'Requires a ready Pi with move and return support') and
+                            data.get('release_reason') in ('stale telemetry', 'sender loss'))
+            if mode == 'telemetry_loss':
+                assert peer_timeout and data['release_reason'] == 'stale telemetry', data
+                assert not data['verified'] and not pi.transactions.clicks, data
+                assert pi.transactions.position != (0, 0) and data['probe_flags'] & 1, data
+            elif peer_timeout:
+                # Hosted runners may stall longer than the real 50 ms lease.
+                # A transport abort stops movement; it cannot promise a return.
+                # Never retry a click, an incorrectly verified return, another
+                # error, or a persistent timeout.
+                assert not pi.transactions.clicks, (mode, data, pi.transactions.clicks)
+                assert pi.transactions.position == (0, 0) or data['probe_flags'] & 1, (mode, data)
+                raise PeerTimingError(str(data))
+            elif mode in ('desktop', 'view', 'manual', 'miss'):
                 assert data['verified'] and not data['error'], (data, result.stdout, result.stderr)
                 assert abs(data['xx']-2) <= .1 and abs(data['yy']-1.5) <= .1, data
                 if mode == 'desktop':
@@ -86,13 +130,38 @@ def run(binary, mode):
                 assert not pi.transactions.clicks
                 if mode == 'nonlinear':
                     assert data['verified'] and data['xx'] == 2, data  # Previous calibration retained.
-            assert pi.transactions.position == (0, 0), (mode, pi.transactions.position, data)
+            if mode != 'telemetry_loss':
+                assert pi.transactions.position == (0, 0), (mode, pi.transactions.position, data)
             print(mode, data)
+    except Exception as error:
+        def max_gap_ms(events):
+            times = [event['time'] for event in events]
+            return round(1000 * max((b - a for a, b in zip(times, times[1:])), default=0), 3)
+        error.add_note(json.dumps(dict(
+            scenario=mode,
+            max_telemetry_gap_ms=max_gap_ms(pi.telemetry_events),
+            max_subscription_gap_ms=max_gap_ms(pi.subscription_events),
+            recent_telemetry=pi.telemetry_events[-8:],
+            recent_subscriptions=pi.subscription_events[-8:]), default=str))
+        raise
     finally:
         sender.stop()
         pi.stop()
 
 
+@peer_timer_resolution()
+def run(binary, mode):
+    for attempt in range(3):
+        try:
+            return run_once(binary, mode)
+        except PeerTimingError as error:
+            if attempt == 2:
+                raise
+            print(f'{mode}: safe peer-timeout cancellation; retry {attempt + 1}/2',
+                  error, *error.__notes__, sep='\n', flush=True)
+
+
 if __name__ == '__main__':
-    for scenario in ('desktop', 'view', 'manual', 'cancel', 'old_sender', 'nonlinear', 'miss'):
+    for scenario in ('desktop', 'view', 'manual', 'cancel', 'old_sender', 'nonlinear', 'miss',
+                     'telemetry_loss'):
         run(sys.argv[1], scenario)

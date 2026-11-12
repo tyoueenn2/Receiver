@@ -71,7 +71,7 @@ jobs:
         run: cmake -S . -B build/calibration -DCMAKE_BUILD_TYPE=Release -DRECEIVER_GUI=OFF -DRECEIVER_TENSORRT=OFF -DRECEIVER_INTEGRATION_TESTS=ON
       - name: Build calibration controller, protocol and shared command-state tests
         run: cmake --build build/calibration --config Release --target receiver_calibration_tests receiver_calibration_runner receiver_injection_tests --parallel 2
-      - name: Calibration math, protocol and seven simulated action scenarios
+      - name: Calibration math, protocol and simulated action scenarios
         run: ctest --test-dir build/calibration -C Release --output-on-failure --no-tests=error -R '^receiver_(calibration|calibration_pipeline|injection)$' --output-junit calibration.xml
       - name: Repeat calibration and verified-click lifecycle
         run: ctest --test-dir build/calibration -C Release --output-on-failure --no-tests=error --repeat until-fail:3 -R '^receiver_calibration_pipeline$' --output-junit calibration-stress.xml
@@ -143,7 +143,7 @@ jobs:
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --output-junit junit.xml
       - name: Repeat Debug calibration with concurrent sender heartbeats
         if: matrix.configuration == 'Debug'
-        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:3 -R '^receiver_calibration_pipeline$' --output-junit calibration-heartbeat-stress.xml
+        run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:10 -R '^receiver_calibration_pipeline$' --output-junit calibration-heartbeat-stress.xml
       - name: Repeat Windows network and synthetic-input process lifecycle
         if: runner.os == 'Windows'
         run: ctest --test-dir build/ci -C ${{ matrix.configuration }} --output-on-failure --no-tests=error --repeat until-fail:10 -R '^receiver_(network_pipeline|process_capture)$' --output-junit network-process-stress.xml
