@@ -29,6 +29,22 @@ x11.XInternAtom.argtypes = [c.c_void_p, c.c_char_p, c.c_int]
 x11.XInternAtom.restype = c.c_ulong
 x11.XFlush.argtypes = [c.c_void_p]
 x11.XCloseDisplay.argtypes = [c.c_void_p]
+x11.XSync.argtypes = [c.c_void_p, c.c_int]
+x11.XCreateSimpleWindow.argtypes = [c.c_void_p, Window, c.c_int, c.c_int,
+                                   c.c_uint, c.c_uint, c.c_uint, c.c_ulong, c.c_ulong]
+x11.XCreateSimpleWindow.restype = Window
+x11.XDestroyWindow.argtypes = [c.c_void_p, Window]
+
+
+class XError(c.Structure):
+    _fields_ = [('type', c.c_int), ('display', c.c_void_p), ('resource', Window),
+                ('serial', c.c_ulong), ('code', c.c_ubyte),
+                ('request', c.c_ubyte), ('minor', c.c_ubyte)]
+
+
+ErrorHandler = c.CFUNCTYPE(c.c_int, c.c_void_p, c.POINTER(XError))
+x11.XSetErrorHandler.argtypes = [ErrorHandler]
+x11.XSetErrorHandler.restype = ErrorHandler
 
 
 class ClientData(c.Union):
@@ -48,7 +64,7 @@ class Event(c.Union):
 x11.XSendEvent.argtypes = [c.c_void_p, Window, c.c_int, c.c_long, c.POINTER(Event)]
 
 
-def find_window(display, name, parent=None):
+def _find_window(display, name, parent=None):
     parent = parent or x11.XDefaultRootWindow(display)
     root, owner, count = Window(), Window(), c.c_uint()
     children = c.POINTER(Window)()
@@ -63,13 +79,67 @@ def find_window(display, name, parent=None):
                 x11.XFree(title)
                 if matches:
                     return window
-            found = find_window(display, name, window)
+            found = _find_window(display, name, window)
             if found:
                 return found
     finally:
         if children:
             x11.XFree(children)
     return None
+
+
+def find_window(display, name, parent=None):
+    errors = []
+
+    @ErrorHandler
+    def handle_error(_display, event):
+        error = event.contents
+        # XQueryTree and XFetchName are separate requests. SDL can destroy a
+        # probe/preview window after enumeration and before either lookup.
+        if not (error.code == 3 and error.request in (15, 20)):
+            errors.append((error.code, error.request, error.minor, error.resource))
+        return 0
+
+    # Deliver errors from earlier resize/map/send operations to their normal
+    # handler. Suppress BadWindow only while looking up window names/children.
+    x11.XSync(display, 0)
+    previous = x11.XSetErrorHandler(handle_error)
+    try:
+        result = _find_window(display, name, parent)
+        x11.XSync(display, 0)
+        assert not errors, ('Unexpected X11 lookup errors', errors)
+        return result
+    finally:
+        x11.XSetErrorHandler(previous)
+
+
+def check_window_disappearance():
+    display = x11.XOpenDisplay(None)
+    assert display, 'Window lookup checks require X11'
+    victim = x11.XCreateSimpleWindow(display, x11.XDefaultRootWindow(display), 0, 0, 10, 10, 0, 0, 0)
+    fetch_name = x11.XFetchName
+    destroyed = False
+
+    def destroy_before_lookup(connection, window, title):
+        nonlocal destroyed
+        if window == victim:
+            x11.XDestroyWindow(connection, window)
+            x11.XSync(connection, 0)
+            destroyed = True
+        return fetch_name(connection, window, title)
+
+    try:
+        x11.XSync(display, 0)
+        x11.XFetchName = destroy_before_lookup
+        assert find_window(display, 'Receiver missing-window fixture') is None
+        assert destroyed, 'Fixture window was not enumerated'
+        assert find_window(display, 'Receiver missing-window fixture', victim) is None
+        print('X11 lookup survives a window destroyed between enumeration and lookup', flush=True)
+    finally:
+        x11.XFetchName = fetch_name
+        if not destroyed:
+            x11.XDestroyWindow(display, victim)
+        x11.XCloseDisplay(display)
 
 
 def until(process, condition):
@@ -146,5 +216,6 @@ def run_case(executable, case):
 
 
 if __name__ == '__main__':
+    check_window_disappearance()
     for name in ('standalone', 'close', 'reopen'):
         run_case(sys.argv[1], name)

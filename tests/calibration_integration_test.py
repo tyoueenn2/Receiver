@@ -93,8 +93,8 @@ def run_once(binary, mode):
             path.write_text(json.dumps(config))
             result = subprocess.run([binary, str(path), str(report), mode], capture_output=True,
                                     text=True, timeout=35)
-            assert result.returncode == 0, result.stdout+result.stderr
             data = json.loads(report.read_text())
+            assert result.returncode == 0, (data, result.returncode, result.stdout, result.stderr)
             assert not data['armed'], data
             peer_timeout = (data.get('error') in ('Pi operation: cancelled',
                                                 'Requires a ready Pi with move and return support') and
