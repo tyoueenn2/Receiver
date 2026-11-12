@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
                   {"yy", record.yy},
                   {"range", record.max_counts},
                   {"completed", status.completed},
+                  {"probe_flags", status.action.flags},
                   {"armed", app.stats().armed},
                   {"release_reason", app.stats().injection.last_release_reason}};
         if (record.verified && status.error.empty() && (mode == "desktop" || mode == "miss")) {

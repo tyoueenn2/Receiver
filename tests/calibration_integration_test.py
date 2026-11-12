@@ -43,7 +43,12 @@ class PeerTimingError(RuntimeError):
 
 
 def run_once(binary, mode):
-    pi = MockPi(free_port(), physical=0).start()
+    pi = MockPi(port=0, physical=0)
+    if mode == 'telemetry_loss':
+        # Keep the first probe outbound until the lease expires, so the test
+        # checks an interrupted return rather than a pause between probes.
+        pi.transactions.minimum_settle_s = .25
+    pi.start()
     rng = random.Random(61)
     texture = bytes(rng.randrange(256) for _ in range(256*256*3))
     def cursor():
@@ -97,12 +102,14 @@ def run_once(binary, mode):
             if mode == 'telemetry_loss':
                 assert peer_timeout and data['release_reason'] == 'stale telemetry', data
                 assert not data['verified'] and not pi.transactions.clicks, data
+                assert pi.transactions.position != (0, 0) and data['probe_flags'] & 1, data
             elif peer_timeout:
                 # Hosted runners may stall longer than the real 50 ms lease.
-                # Retry only a safe abort; clicks, residual movement, other errors
-                # and persistent timeouts must still fail the test.
+                # A transport abort stops movement; it cannot promise a return.
+                # Never retry a click, an incorrectly verified return, another
+                # error, or a persistent timeout.
                 assert not pi.transactions.clicks, (mode, data, pi.transactions.clicks)
-                assert pi.transactions.position == (0, 0), (mode, data, pi.transactions.position)
+                assert pi.transactions.position == (0, 0) or data['probe_flags'] & 1, (mode, data)
                 raise PeerTimingError(str(data))
             elif mode in ('desktop', 'view', 'manual', 'miss'):
                 assert data['verified'] and not data['error'], (data, result.stdout, result.stderr)
@@ -123,7 +130,8 @@ def run_once(binary, mode):
                 assert not pi.transactions.clicks
                 if mode == 'nonlinear':
                     assert data['verified'] and data['xx'] == 2, data  # Previous calibration retained.
-            assert pi.transactions.position == (0, 0), (mode, pi.transactions.position, data)
+            if mode != 'telemetry_loss':
+                assert pi.transactions.position == (0, 0), (mode, pi.transactions.position, data)
             print(mode, data)
     except Exception as error:
         def max_gap_ms(events):
