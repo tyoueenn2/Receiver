@@ -36,6 +36,8 @@ def main():
                    ('dataset','data-capture'),('mouse sensitivity','movement'),
                    ('maximum frame age','activation'),('class preference','targeting'),
                    ('proximity','targeting'),('hsv','targeting'),('separate window','preview'),
+                   ('setup file','connections'),('python','connections'),
+                   ('discover','connections'),
                    ('does-not-exist',None)]]
     if args.preference_checks:
         cases += [('targeting',None,None,mode) for mode in ('global','near')]

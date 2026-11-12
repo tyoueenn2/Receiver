@@ -151,6 +151,91 @@ void send_picture(UdpSocket& sender, const Address& to, uint32_t sequence) {
     packet.resize(48 + h.bytes, 114);
     sender.send(packet, to);
 }
+void setup_workflows(const std::filesystem::path& root) {
+    Preferences fresh(root / "fresh");
+    fresh.load();
+    auto defaults = read_json_file(fresh.setup_path());
+    CHECK(defaults.at("frame_port") == 5000 && defaults.at("omni_python") == "python");
+    CHECK(!defaults.contains("confidence") && !defaults.contains("model"));
+
+    // Existing installations migrate the latest machine setup, not a model's older snapshot.
+    auto directory = root / "migrated";
+    Preferences old(directory);
+    Settings s;
+    s.model = "first.pt";
+    s.sender_ip = "192.168.1.20";
+    s.pi_ip = "192.168.1.30";
+    s.frame_port = 5100;
+    s.pi_port = 12400;
+    s.makcu_port = "COM7";
+    s.omni_python = "C:/Python/python.exe";
+    s.omni_source = "C:/Models/omni";
+    s.omni_worker = "C:/Receiver/worker.py";
+    s.omni_device = "cpu";
+    s.confidence = .7f;
+    old.save(s, "");
+    CHECK(!std::filesystem::exists(old.setup_path()));
+    auto latest = s;
+    latest.model = "second.pt";
+    latest.sender_ip = "192.168.1.21";
+    latest.omni_python = "C:/New Python/python.exe";
+    old.save(latest, "");
+    Preferences migrated(directory);
+    migrated.load();
+    auto setup = read_json_file(migrated.setup_path());
+    CHECK(setup.at("sender_ip") == latest.sender_ip);
+    CHECK(setup.at("omni_python") == latest.omni_python);
+    auto restored = migrated.select_model(latest, "first.pt");
+    CHECK(restored.sender_ip == latest.sender_ip && restored.omni_python == latest.omni_python);
+    CHECK(restored.confidence == s.confidence && restored.makcu_port == "COM7");
+
+    // Setup wins over imported profiles and model snapshots, while tuning still restores.
+    auto profile = root / "imported.json";
+    s.confidence = .3f;
+    save_settings(s, profile.string());
+    auto imported = migrated.load_profile(profile.string());
+    CHECK(imported.sender_ip == latest.sender_ip && imported.omni_python == latest.omni_python);
+    CHECK(imported.confidence == .3f && imported.model == "first.pt");
+    CHECK(load_settings(profile.string()).sender_ip == s.sender_ip); // CLI profiles are unchanged.
+
+    // Autosave must never overwrite edits made in a text editor, including during practice.
+    setup["pi_port"] = 12500;
+    setup["omni_device"] = "cuda:0";
+    write_json_atomic(setup, migrated.setup_path());
+    auto practice = latest;
+    practice.sender_ip = practice.pi_ip = "127.0.0.1";
+    migrated.save(practice, "");
+    CHECK(read_json_file(migrated.setup_path()) == setup);
+    CHECK(migrated.current.sender_ip == latest.sender_ip);
+    auto reloaded = migrated.reload_setup(latest);
+    CHECK(reloaded.pi_port == 12500 && reloaded.omni_device == "cuda:0");
+    Preferences restarted(directory);
+    restarted.load();
+    CHECK(restarted.current.pi_port == 12500);
+    CHECK(restarted.select_model(latest, "first.pt").omni_device == "cuda:0");
+
+    // Bad files produce an error, retain the last good setup, and are never repaired silently.
+    for (auto bad : {nlohmann::json{{"frame_port", 0}}, nlohmann::json{{"pi_port", 65536}},
+                     nlohmann::json{{"omni_device", "invalid"}}, nlohmann::json{{"omni_python", ""}},
+                     nlohmann::json{{"sender_ipv4", "192.168.1.2"}}, nlohmann::json::array()}) {
+        write_json_atomic(bad, migrated.setup_path());
+        rejects([&] { migrated.reload_setup(latest); });
+        CHECK(migrated.apply_setup(latest).pi_port == 12500);
+        rejects([&] { Preferences(directory).load(); });
+        CHECK(read_json_file(migrated.setup_path()) == bad);
+    }
+    {
+        std::ofstream file(migrated.setup_path());
+        file << "{invalid json";
+    }
+    rejects([&] { migrated.reload_setup(latest); });
+    CHECK(migrated.apply_setup(latest).pi_port == 12500);
+
+    // A small hand-written setup is enough; omitted values use documented defaults.
+    write_json_atomic({{"sender_ip", "192.168.1.22"}}, fresh.setup_path());
+    fresh.load();
+    CHECK(fresh.current.sender_ip == "192.168.1.22" && fresh.current.pi_port == 12345);
+}
 void app_workflows() {
     Settings s;
     s.model = "first.pt";
@@ -419,6 +504,7 @@ int main() {
         auto engine_report =
             benchmark_model(s, frame, fake_factory, PerformanceGoal::fastest, {}, {}, {0, 2});
         CHECK(engine_report.samples.size() == 1 && engine_report.recommended_size == 1024);
+        setup_workflows(root / "setup");
         app_workflows();
         std::filesystem::remove_all(root);
         std::cout << checks << " workflow checks passed\n";

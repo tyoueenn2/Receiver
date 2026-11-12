@@ -7,6 +7,8 @@ desktop interface; Linux runs from the command line.
 ## Features
 
 - Choose UDP video or local Windows desktop capture with a selectable display.
+- Find Raspberry Pi proxies from Connections and save their address automatically.
+- Let FrameSender discover this Receiver on the local network.
 - Switch models during a session, with automatic image sizing.
 - Remember settings for each model and restore saved profiles.
 - Adjust detection, tracking and movement while viewing a separate, resizable preview window.
@@ -33,6 +35,9 @@ models require a TensorRT build.
 
 The searchable sidebar separates connections, activation, targeting, movement,
 automatic clicking, preview, data capture, profiles and app preferences.
+One-time network, serial-port and Python runtime settings live in
+[`user-settings/setup.json`](docs/technical/MACHINE_SETUP.md), with a reload button
+in Connections. Existing saved settings migrate automatically on first launch.
 The interface includes continuous tracking, timed auto trigger and spray, configurable
 preview overlays, Aimmy config import, model-switch shortcuts, and local frame collection.
 See the [feature guide](docs/technical/AIMMY_FEATURES.md) for setup and compatibility.
