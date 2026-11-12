@@ -13,6 +13,8 @@ struct ColorMask {
     std::vector<uint64_t> bits;
     std::optional<ColorAim> highest(const Detection& region, float reference_x, float reference_y,
                                     float radius, const ColorSettings& settings) const;
+    // Require matches left, right and above the reference pixel in bounded horizontal/vertical strips.
+    bool surrounds(float reference_x, float reference_y, int radius, int tolerance) const;
 };
 class ColorMatcher {
     std::array<std::shared_ptr<ColorMask>, 4> pool_{};

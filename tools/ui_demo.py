@@ -12,16 +12,17 @@ from test_sender import Sender
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--exe', type=Path, help='Location of receiver.exe')
+    parser.add_argument('--exe', type=Path, help='Location of the Receiver GUI executable')
     parser.add_argument('--page', choices=['setup', 'detect', 'mouse', 'human', 'saved', 'hub'], default='setup')
     parser.add_argument("--cycle-motion", action="store_true", help="Cycle simulated direction every four seconds; off by default")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    candidates = [root / 'receiver.exe', root / 'build/tests/Release/receiver.exe',
-                  root / 'build/local/receiver.exe']
+    candidates = ([root / 'receiver.exe', root / 'build/tests/Release/receiver.exe',
+                   root / 'build/local/receiver.exe'] if os.name == 'nt' else
+                  [root / 'receiver', root / 'build/linux-gui/receiver', root / 'build/linux-cuda/receiver'])
     executable = args.exe or next((path for path in candidates if path.is_file()), None)
     if not executable or not executable.is_file():
-        parser.error('Receiver is not built yet. Build it first, or use --exe to select receiver.exe.')
+        parser.error('Receiver GUI is not built yet. Build it first, or use --exe to select it.')
     pi = MockPi()
     pi.commands = deque(maxlen=10000)
     sender = Sender()
@@ -38,9 +39,11 @@ def main():
         sender.start()
         if args.cycle_motion:
             motion_thread.start()
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 1
+        startup = None
+        if os.name == 'nt':
+            startup = subprocess.STARTUPINFO()
+            startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startup.wShowWindow = 1
         result = subprocess.run([str(executable.resolve()), '--demo', '--page=' + args.page], cwd=root,
                                 startupinfo=startup, env=dict(os.environ, RECEIVER_PYTHON=sys.executable))
         return result.returncode

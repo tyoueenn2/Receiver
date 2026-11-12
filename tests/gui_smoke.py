@@ -1,6 +1,7 @@
-"""Render each requested page into the app's own hidden DirectX framebuffer."""
+"""Render each requested page into the app's hidden desktop framebuffer."""
 import argparse
 import json
+import secrets
 import socket
 import shutil
 import subprocess
@@ -11,9 +12,17 @@ from mock_pi import MockPi
 from test_sender import Sender
 
 def free_port():
-    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
-        sock.bind(('127.0.0.1',0))
-        return sock.getsockname()[1]
+    # Keep receiver destinations below the default ephemeral range so a peer's
+    # bind(0) cannot claim the chosen port before the GUI starts receiving.
+    for _ in range(100):
+        with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sock:
+            port = 12000 + secrets.randbelow(18000)
+            try:
+                sock.bind(('127.0.0.1',port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError('No free UDP port for GUI smoke test')
 
 def main():
     pages=['connections','models','activation','targeting','movement','auto-click',
@@ -43,6 +52,7 @@ def main():
         cases += [('targeting',None,None,mode) for mode in ('global','near')]
     if args.color_checks:
         cases += [('targeting',None,None,mode) for mode in ('only','hybrid')]
+        cases += [('auto-click',None,None,'only')]
     for page,query,expected,preference in cases:
         suffix = '-compact' if args.compact else ''
         if query:
@@ -51,7 +61,7 @@ def main():
             suffix += '-preference-'+preference
         for filename in ('gui-smoke.bmp','gui-smoke-state.json'):
             Path(filename).unlink(missing_ok=True)
-        pi=MockPi(port=free_port()).start()
+        pi=MockPi(port=0).start()
         port=free_port()
         sender=Sender(port=port).start()
         try:

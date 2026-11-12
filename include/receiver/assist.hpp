@@ -12,7 +12,7 @@ class AutoTrigger {
     void reset();
     void suspend();
     bool update(const Correction& correction, int width, int height, const Settings& settings, int64_t now,
-                bool can_fire = true);
+                bool can_fire = true, const ColorMask* colors = nullptr);
 };
 bool activation_held(uint8_t physical, const Settings& settings);
 // Writes received images and optional normalized YOLO labels, never desktop screenshots.
