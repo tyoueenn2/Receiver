@@ -14,6 +14,7 @@ struct LibraryEntry {
 class Preferences {
     std::filesystem::path root_;
     nlohmann::json models_ = nlohmann::json::object();
+    nlohmann::json setup_ = nlohmann::json::object();
     std::vector<std::filesystem::path> model_dirs_{"models"}, profile_dirs_{"profiles"};
     static std::string key(const std::string& model);
 
@@ -22,6 +23,13 @@ class Preferences {
     std::string profile;
     explicit Preferences(std::filesystem::path root = "user-settings") : root_(std::move(root)) {}
     void load();
+    std::filesystem::path setup_path() const {
+        return root_ / "setup.json";
+    }
+    Settings apply_setup(const Settings& settings) const;
+    Settings reload_setup(const Settings& settings);
+    Settings connect_pi(const Settings& settings, const std::string& ip, uint16_t port);
+    Settings load_profile(const std::string& path) const;
     void save(const Settings& settings, const std::string& profile_path,
               const std::vector<std::string>& names = {});
     Settings select_model(const Settings& base, const std::string& path) const;

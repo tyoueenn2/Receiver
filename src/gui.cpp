@@ -4,6 +4,7 @@
 #include "receiver/capture.hpp"
 #include "receiver/preferences.hpp"
 #include "receiver/assist.hpp"
+#include "receiver/discovery.hpp"
 #include "preview_window.hpp"
 #include <algorithm>
 #include <cctype>
@@ -58,11 +59,11 @@ struct PageInfo {
 constexpr PageInfo settings_pages[] = {
     {Page::connections, "connections", "Connections", "GET STARTED",
      "Choose the video source and where mouse commands are sent.",
-     "setup practice demo network ip address ports raspberry pi mouse backend local windows capture udp "
-     "display desktop makcu serial com usb"},
+     "setup file json reload python practice demo network ip address ports raspberry pi mouse backend "
+     "local windows capture udp display desktop makcu serial com usb discover find connect auto connector"},
     {Page::models, "models", "Model", "GET STARTED",
      "Load a detection model and choose its speed and input size.",
-     "onnx pt engine python runtime gpu fps performance benchmark image resolution inference"},
+     "onnx pt engine runtime gpu fps performance benchmark image resolution inference"},
     {Page::activation, "activation", "Activation", "ASSISTANCE",
      "Choose when assistance runs and when it should pause.",
      "aim keybind primary secondary button constant tracking continuous cursor frame age stop safety "
@@ -356,6 +357,7 @@ int run_gui(const std::string& options) {
     int last_topmost = -1;
     int last_stream_guard = -1;
     receiver::Preferences preferences;
+    bool setup_ready = smoke || demo;
     bool preferences_dirty = false;
     int64_t preferences_changed = 0, library_updated = 0;
     uint64_t model_revision = 0;
@@ -365,6 +367,7 @@ int run_gui(const std::string& options) {
     if (!smoke && !demo) {
         try {
             preferences.load();
+            setup_ready = true;
             settings = preferences.current;
             profile = preferences.profile;
             if (!settings.model.empty())
@@ -373,10 +376,40 @@ int run_gui(const std::string& options) {
             error = e.what();
         }
     }
+    std::unique_ptr<receiver::DiscoveryBeacon> discovery_beacon;
+    if (!smoke && !demo && setup_ready) {
+        try {
+            discovery_beacon = std::make_unique<receiver::DiscoveryBeacon>(settings);
+        } catch (const std::exception& e) {
+            notice = std::string("Sender discovery unavailable: ") + e.what();
+        }
+    }
+    std::future<std::vector<lan_discovery::Endpoint>> pi_search;
+    std::vector<lan_discovery::Endpoint> found_pis;
     model_draft = settings.model;
     auto mark_preferences = [&] {
         preferences_dirty = true;
         preferences_changed = receiver::now_ns();
+    };
+    auto session_settings = [&](const receiver::Settings& base) {
+        auto cfg = preferences.apply_setup(base);
+        if (simulate)
+            cfg.sender_ip = cfg.pi_ip = "127.0.0.1";
+        return cfg;
+    };
+    auto connect_pi = [&](const lan_discovery::Endpoint& endpoint) {
+        try {
+            settings = preferences.connect_pi(settings, endpoint.ip, endpoint.port);
+            simulate = false;
+            setup_ready = true;
+            mark_preferences();
+            found_pis.clear();
+            notice = "Pi selected: " + endpoint.ip + ":" + std::to_string(endpoint.port) +
+                     ". Saved to setup.json. Start the session to connect.";
+            error.clear();
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
     };
     auto open_model = [&](const std::string& path) {
         try {
@@ -386,7 +419,7 @@ int run_gui(const std::string& options) {
             if (selected.color.mode != 1)
                 receiver::select_backend(selected);
             if (app.stats().running)
-                app.configure(selected, true);
+                app.configure(session_settings(selected), true);
             settings = selected;
             model_draft = settings.model;
             preferences.add_directory(std::filesystem::absolute(path).parent_path(), true);
@@ -401,10 +434,10 @@ int run_gui(const std::string& options) {
     };
     auto open_profile = [&](const std::string& path) {
         try {
-            auto loaded = receiver::load_settings(path);
+            auto loaded = preferences.load_profile(path);
             app.arm(false);
             if (app.stats().running)
-                app.configure(loaded);
+                app.configure(session_settings(loaded));
             settings = loaded;
             profile = path;
             model_draft = settings.model;
@@ -475,6 +508,21 @@ int run_gui(const std::string& options) {
             }
         }
         auto stats = app.stats();
+        if (pi_search.valid() && pi_search.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            try {
+                found_pis = pi_search.get();
+                if (found_pis.size() == 1) {
+                    const auto endpoint = found_pis.front();
+                    connect_pi(endpoint);
+                } else if (found_pis.empty())
+                    notice = "No Pi found. Check the proxy is running on the same LAN, its UDP port, "
+                             "firewall, and USB_PROXY_PEER setting.";
+                else
+                    notice = "Several Pi proxies found. Choose one in Connections.";
+            } catch (const std::exception& e) {
+                error = e.what();
+            }
+        }
         const auto calibration_status = app.calibration_status();
         static uint64_t calibration_revision = 0;
         if (calibration_status.revision != calibration_revision) {
@@ -646,14 +694,12 @@ int run_gui(const std::string& options) {
             : simulate
                 ? "Practice is active. Commands go to the simulator; your real mouse is unaffected."
                 : "Mouse control is enabled. Movement requires a fresh picture and a matching detection.";
-        ImGui::BeginDisabled(busy() || test_hub.running());
+        ImGui::BeginDisabled(busy() || test_hub.running() || !setup_ready || pi_search.valid());
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(.13f, .46f, .80f, 1));
         if (!stats.running) {
             if (ImGui::Button(simulate ? "Start practice" : "Start session", ImVec2(150, 34))) {
-                auto cfg = settings;
+                auto cfg = session_settings(settings);
                 const bool use_simulation = simulate;
-                if (use_simulation)
-                    cfg.sender_ip = cfg.pi_ip = "127.0.0.1";
                 names =
                     use_simulation ? std::vector<std::string>{"Example object"} : std::vector<std::string>{};
                 model_revision = 0;
@@ -772,7 +818,6 @@ int run_gui(const std::string& options) {
             ImGui::BeginDisabled(stats.running || busy());
             if (ImGui::RadioButton("Practice with simulated devices", simulate)) {
                 simulate = true;
-                settings.sender_ip = settings.pi_ip = "127.0.0.1";
                 mark_preferences();
             }
             if (ImGui::RadioButton("Use connected devices", !simulate)) {
@@ -785,24 +830,41 @@ int run_gui(const std::string& options) {
                 settings.activation_button = 2;
                 settings.secondary_button = 0;
                 settings.tracking.fov_button = 1;
-                if (settings.mouse_backend == 2) {
+                if (settings.mouse_backend == 2)
                     settings.direction.enabled = false;
-                    if (settings.makcu_port.empty())
-                        settings.makcu_port = windows_desktop ? "COM3" : "/dev/ttyACM0";
-                }
                 changed = true;
             }
             if (settings.mouse_backend == 2) {
-                input_string("MAKCU serial port", settings.makcu_port);
-                changed |= ImGui::IsItemDeactivatedAfterEdit();
+                ImGui::Text("MAKCU serial port: %s", settings.makcu_port.c_str());
                 hint(windows_desktop
-                         ? "Use the MAKCU control port shown in Device Manager, such as COM3. Close other MAKCU apps."
-                         : "Use the MAKCU control port, such as /dev/ttyACM0. Your user needs serial-port access.");
-                hint("Arming sends real mouse movement, including with practice pictures.");
+                         ? "Set the MAKCU control port in setup.json, such as COM3."
+                         : "Set the MAKCU control port in setup.json, such as /dev/ttyACM0. "
+                           "Your user needs serial-port access.");
+                hint("Close other MAKCU apps. Arming sends real mouse movement, "
+                     "including with practice pictures.");
             } else if (settings.mouse_backend == 1)
                 hint("Windows output moves this computer's real cursor when assistance is armed.");
             if (!windows_desktop)
                 hint("Linux supports Pi and MAKCU output. Local Windows mouse output is unavailable.");
+            ImGui::BeginDisabled(pi_search.valid() || smoke || demo || !setup_ready);
+            if (ImGui::Button(pi_search.valid() ? "Searching for Pi..." : "Find Raspberry Pi")) {
+                found_pis.clear();
+                const auto port = uint16_t(preferences.apply_setup(previous_settings).pi_port);
+                pi_search = std::async(std::launch::async, [port] { return receiver::discover_pi(port); });
+                notice = "Searching the local network for Pi proxies...";
+                error.clear();
+            }
+            ImGui::EndDisabled();
+            for (size_t i = 0; i < found_pis.size(); ++i) {
+                const auto endpoint = found_pis[i];
+                const auto label = "Use Pi " + endpoint.ip + ":" + std::to_string(endpoint.port) +
+                                   (endpoint.ready ? "" : " (USB not ready)");
+                if (ImGui::Button(label.c_str())) {
+                    connect_pi(endpoint);
+                    break;
+                }
+            }
+            hint("Finds Pi proxies on the same LAN and saves the selected address to setup.json.");
             if (columns)
                 ImGui::TableNextColumn();
             section("Video source", "Capture this computer's desktop or receive pictures over UDP.");
@@ -842,7 +904,6 @@ int run_gui(const std::string& options) {
                      "that region. No separate sender is needed.");
             }
             if (simulate) {
-                settings.sender_ip = settings.pi_ip = "127.0.0.1";
                 hint(settings.mouse_backend == 2
                          ? "Practice uses example detections. MAKCU still controls the real connected mouse."
                      : settings.frame_source == "local"
@@ -850,27 +911,36 @@ int run_gui(const std::string& options) {
                          : windows_desktop
                          ? "Run Start Demo.cmd to launch the example video sender and simulated Pi."
                          : "Run python3 tools/ui_demo.py to launch the example video sender and simulated Pi.");
-            } else {
-                if (settings.frame_source == "udp")
-                    changed |= input_string("Video sender IP address", settings.sender_ip);
-                ImGui::BeginDisabled(settings.mouse_backend != 0);
-                changed |= input_string("Raspberry Pi IP address", settings.pi_ip);
-                ImGui::EndDisabled();
-                hint("For example: 192.168.1.20. Addresses apply only to connected UDP devices.");
-            }
-            if (ImGui::CollapsingHeader("Advanced network options")) {
-                if (settings.frame_source == "udp") {
-                    changed |= input_string("Listen on IP address", settings.bind_ip);
-                    changed |= number_input("Video UDP port", &settings.frame_port);
-                }
-                ImGui::BeginDisabled(settings.mouse_backend != 0);
-                changed |= number_input("Pi command UDP port", &settings.pi_port);
-                ImGui::EndDisabled();
-                hint("0.0.0.0 listens on every local interface. Ports must match the sender and Pi.");
             }
             ImGui::EndDisabled();
             if (stats.running || busy())
                 hint("End the session before changing connections.");
+            section("Machine setup", "Set network addresses, ports, and Python runtime once in this file.");
+            ImGui::TextWrapped("%s", preferences.setup_path().string().c_str());
+            // Show the configured endpoints even when practice uses loopback addresses.
+            const auto configured = preferences.apply_setup(previous_settings);
+            if (settings.frame_source == "udp")
+                ImGui::TextWrapped("Video: %s -> %s:%d", configured.sender_ip.c_str(),
+                                   configured.bind_ip.c_str(), configured.frame_port);
+            if (settings.mouse_backend == 0)
+                ImGui::TextWrapped("Pi: %s:%d", configured.pi_ip.c_str(), configured.pi_port);
+            ImGui::BeginDisabled(stats.running || busy() || smoke || demo || pi_search.valid());
+            if (ImGui::Button("Reload setup file")) {
+                try {
+                    settings = preferences.reload_setup(settings);
+                    setup_ready = true;
+                    mark_preferences();
+                    notice = "Machine setup reloaded. Assistance is off.";
+                    error.clear();
+                } catch (const std::exception& e) {
+                    error = e.what();
+                }
+            }
+            ImGui::EndDisabled();
+            hint("Edit the file in a text editor, then reload it while the session is stopped. "
+                 "Model and profile changes keep this setup.");
+            if (discovery_beacon && !discovery_beacon->error().empty())
+                hint(discovery_beacon->error().c_str());
             section("Next step", "Choose a model for live detection, then start the session. Preview works "
                                  "while assistance is disarmed.");
             if (ImGui::Button("Choose model"))
@@ -935,17 +1005,8 @@ int run_gui(const std::string& options) {
                                                                 : "auto";
                     changed = true;
                 }
-                input_string("Python executable", settings.omni_python);
-                if (ImGui::IsItemDeactivatedAfterEdit())
-                    changed = true;
-                input_string("YOLO-Omni source folder", settings.omni_source);
-                if (ImGui::IsItemDeactivatedAfterEdit())
-                    changed = true;
-                int device = settings.omni_device == "cpu" ? 1 : 0;
-                if (combo("PyTorch device", &device, "NVIDIA GPU\0CPU (testing)\0")) {
-                    settings.omni_device = device == 1 ? "cpu" : "cuda:0";
-                    changed = true;
-                }
+                hint("Python paths and the PyTorch device are configured in user-settings/setup.json. "
+                     "Reload it from Connections after editing.");
                 input_string("Model metadata file", settings.metadata);
                 if (ImGui::IsItemDeactivatedAfterEdit())
                     changed = true;
@@ -1687,8 +1748,8 @@ int run_gui(const std::string& options) {
         if (rendered_page == Page::profiles) {
 
             section("Save and restore profiles",
-                    "Save your connections, detection settings, and mouse preferences together. Mouse "
-                    "control is never turned on by loading a file.");
+                    "Save detection settings and mouse preferences. Machine setup stays in setup.json. "
+                    "Mouse control is never turned on by loading a file.");
             ImGui::BeginDisabled(busy() || stats.model_loading || stats.benchmarking);
             if (ImGui::Button("Import Aimmy config...", ImVec2(190, 36)) || file_dialog.ready("import")) {
                 if (auto path = file_dialog.choose(window, false, 3, "import")) {
@@ -1714,7 +1775,7 @@ int run_gui(const std::string& options) {
             if (ImGui::Button("Save profile as...", ImVec2(190, 36)) || file_dialog.ready("save")) {
                 if (auto path = file_dialog.choose(window, true, 0, "save")) {
                     try {
-                        receiver::save_settings(settings, *path);
+                        receiver::save_settings(preferences.apply_setup(settings), *path);
                         profile = *path;
                         preferences.add_directory(std::filesystem::absolute(*path).parent_path(), false);
                         library_updated = 0;
@@ -1743,7 +1804,7 @@ int run_gui(const std::string& options) {
                     ImGui::PopID();
                 }
             ImGui::EndDisabled();
-            hint("A profile with different connection addresses requires stopping the session first.");
+            hint("Profiles use this machine's network and runtime setup from setup.json.");
             if (!profile.empty()) {
                 ImGui::Spacing();
                 hint("Current settings file");
@@ -2041,7 +2102,7 @@ int run_gui(const std::string& options) {
             try {
                 receiver::validate(settings);
                 if (stats.running)
-                    app.configure(settings);
+                    app.configure(session_settings(settings));
                 pending_preview_close = false;
                 mark_preferences();
                 error.clear();
@@ -2077,6 +2138,8 @@ int run_gui(const std::string& options) {
                 preferences_changed = receiver::now_ns();
             }
         }
+        if (discovery_beacon)
+            discovery_beacon->configure(preferences.apply_setup(settings));
         ImGui::End();
         file_dialog.render();
         ImGui::Render();

@@ -45,6 +45,8 @@ def main():
                    ('dataset','data-capture'),('mouse sensitivity','movement'),
                    ('maximum frame age','activation'),('class preference','targeting'),
                    ('proximity','targeting'),('hsv','targeting'),('separate window','preview'),
+                   ('setup file',['connections','profiles']),('python','connections'),
+                   ('discover','connections'),
                    ('does-not-exist',None)]]
     if args.preference_checks:
         cases += [('targeting',None,None,mode) for mode in ('global','near')]
@@ -86,9 +88,10 @@ def main():
                 assert state['preferred_class'] == 0, state
                 assert state['preference_type'] == (preference == 'near'), state
             if query:
-                assert state['visible'] == ([expected] if expected else []), state
-                if expected:
-                    assert state['page'] == expected, state
+                expected_pages = ([expected] if isinstance(expected, str) else expected) or []
+                assert state['visible'] == expected_pages, (query, state)
+                if expected_pages:
+                    assert state['page'] == expected_pages[0], (query, state)
             else:
                 assert state['page'] == aliases.get(page,page) and state['visible'] == pages, state
             print(page+suffix+': category, search, rendering, sync and disarmed startup passed.',flush=True)

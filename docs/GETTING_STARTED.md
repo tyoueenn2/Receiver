@@ -10,8 +10,8 @@ the matching category. Q/E moves between categories when you are not typing.
 
 | Category | What belongs here |
 | --- | --- |
-| Connections | Practice/live mode, UDP/local video source, capture display, mouse output and network ports |
-| Model | Model library, input resolution, inference FPS limit, runtime and performance benchmark |
+| Connections | Practice/live mode, UDP/local video source, capture display, mouse output and setup-file reload |
+| Model | Model library, input resolution, inference FPS limit, backend and performance benchmark |
 | Activation | Held-button or continuous mode, activation buttons, cursor pause and maximum frame age |
 | Targeting | Confidence, classes, class preference/type, target priority/lock, search radius, aim point and prediction |
 | Movement | Sensitivity, smoothing, correction limits, movement path, jitter and directional strength |
@@ -27,6 +27,20 @@ session. Turn on **Preview → Enable preview window** to inspect the video befo
 global **Arm assistance** control permits output; **Activation** determines when
 that output runs. **Disarm** or **Delete** stops it. Accepted settings restore
 automatically next launch, with assistance disarmed.
+
+One-time network addresses, ports, the MAKCU serial port and Python runtime paths
+live in `user-settings/setup.json`. The regular app creates it from existing
+preferences on first launch. Edit it in a text editor, then stop the session and
+choose **Connections > Reload setup file**. See the
+[machine setup file guide](technical/MACHINE_SETUP.md) for all keys and defaults.
+
+To find the mouse proxy automatically, end the session and click
+**Connections > Find Raspberry Pi**. One match is selected automatically; choose
+from the list if several respond. This saves the Pi address and port in
+`setup.json` and selects connected-device mode with Pi output. Start the session
+when ready. The proxy must be running on the same LAN, on the configured
+`pi_port` (12345 by default), and support the `UPQ1` capability query. No Pi update
+is needed for the current USB Proxy UDP build. See [LAN discovery](technical/DISCOVERY.md).
 
 See [model switching, automatic sizes and preferences](technical/MODEL_WORKFLOWS.md)
 for supported metadata, rollback behavior, library refresh and performance tuning.
@@ -49,11 +63,16 @@ From a terminal, the same demo is `py tools/ui_demo.py`; use `--exe path/to/rece
 
 ## Local mouse and automated checks
 
-For video from another PC, select the UDP picture source in **Connections**, enter
-that PC's sender IP address, and start the session. Run
+For video from another PC, set `sender_ip` in `user-settings/setup.json` to that
+PC's IPv4 address and reload the file in **Connections**. Select the UDP picture
+source and start the session. Run
 `frame_sender.exe --host RECEIVER_IPV4 --output 0` on the sending PC. FrameSender
 automatically follows the loaded model's input size, including live model changes.
 See [sender setup and compatibility](technical/SENDER.md).
+
+With FrameSender's GUI, **Find Receiver** fills this Receiver's address and video
+port automatically. Keep Receiver open with UDP video selected and allow inbound
+UDP 39570 on the Receiver PC for discovery.
 
 For desktop capture on this PC, end the session and choose **Connections > Video
 source > Picture source > Local desktop capture**, then select a display. Receiver
@@ -67,7 +86,7 @@ output > This computer's Windows mouse**. Set buttons or continuous mode in
 **Activation**, then start and arm the session. This output moves your real mouse.
 See [movement and tracking details](technical/HUMANIZATION.md).
 
-For a MAKCU device, end the session and choose **Connections > Mouse output > MAKCU (USB serial)**. Enter its control port, start the session, arm assistance, and hold an activation button on the mouse connected through MAKCU. See [MAKCU setup and tests](technical/MAKCU.md).
+For a MAKCU device, set `makcu_port` in `user-settings/setup.json` and reload the file while stopped. Choose **Connections > Mouse output > MAKCU (USB serial)**, start the session, arm assistance, and hold an activation button on the mouse connected through MAKCU. See [MAKCU setup and tests](technical/MAKCU.md).
 
 Open **Diagnostics > Setup checks** to run individual or selected checks, inspect
 results, and save logs automatically. The demo launcher fills in Python

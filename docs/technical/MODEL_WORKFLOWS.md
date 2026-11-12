@@ -63,6 +63,11 @@ setup. Writes replace the file atomically. The next launch restores settings
 and the current model selection, with the session stopped and movement off.
 Practice demo and interface smoke tests do not overwrite personal preferences.
 
+One-time network, serial port and Python installation settings live in
+[`user-settings/setup.json`](MACHINE_SETUP.md). This file overrides those fields
+in saved preferences, model snapshots and imported profiles. Reload it from
+Connections while stopped after editing; autosave never rewrites it.
+
 Each model has its own processing size, FPS limit, detection/class selection
 and control settings. Switching back restores those choices while preserving
 the application's connection addresses, activation buttons and preview setting.

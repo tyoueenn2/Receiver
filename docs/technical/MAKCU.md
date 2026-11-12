@@ -4,9 +4,10 @@ Receiver supports MAKCU USB serial output on Windows and Linux. Connect the
 MAKCU control USB port to the Receiver computer and the mouse through MAKCU using
 the device's normal wiring. Close other applications using its control port.
 
-On Windows, end the session, open **Connections > Mouse output**, select
-**MAKCU (USB serial)**, and enter the control port shown in Device Manager,
-such as `COM3` or `COM12`. Start the session and wait for MAKCU to connect. Select
+On Windows, set `makcu_port` in `user-settings/setup.json` to the control port
+shown in Device Manager, such as `COM3` or `COM12`. End the session and choose
+**Connections > Reload setup file**, then select **Mouse output > MAKCU (USB serial)**.
+Start the session and wait for MAKCU to connect. Select
 **Arm MAKCU assistance**, then hold a physical activation button after startup. The
 left, right, middle and two side buttons are supported, including alternate
 activation and dynamic search-area buttons.
@@ -24,7 +25,8 @@ movement is intended. Activation follows the selected held-button or continuous
 mode; held-button activation is the default.
 
 Profiles store `"mouse_backend": 2` and `"makcu_port": "COM3"` (or the Linux
-device path). Existing profiles retain their previous connection. Changing the
+device path). The GUI takes the serial port from [machine setup](MACHINE_SETUP.md)
+when loading a profile. Changing the
 backend or port requires stopping the session first. An attempted live change
 disarms movement and is rejected; restart to use the new connection. Selecting a
 different model preserves the serial-port preference. The Activation page selects

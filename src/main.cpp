@@ -1,5 +1,6 @@
 #include "receiver/app.hpp"
 #include "receiver/capture.hpp"
+#include "receiver/discovery.hpp"
 #include <atomic>
 #include <csignal>
 #include <iomanip>
@@ -256,6 +257,14 @@ int main(int argc, char** argv) {
 
         receiver::App app;
         app.start(cfg, simulate);
+        std::unique_ptr<receiver::DiscoveryBeacon> discovery;
+        if (!simulate && cfg.frame_source == "udp") {
+            try {
+                discovery = std::make_unique<receiver::DiscoveryBeacon>(cfg);
+            } catch (const std::exception& e) {
+                log.write(LogLevel::error, std::string("Sender discovery unavailable: ") + e.what());
+            }
+        }
         if (arm) {
             app.arm(true);
             log.write(LogLevel::info, "arming requested");

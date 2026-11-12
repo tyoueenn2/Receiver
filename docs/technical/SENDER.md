@@ -6,8 +6,9 @@ reference, not a desktop-capture implementation or performance benchmark.
 
 ## Automatic capture size
 
-Configure Receiver's **Video sender IP address** to the sending PC, select the UDP
-picture source, and start the session. On the sending PC run:
+Set `sender_ip` in Receiver's `user-settings/setup.json` to the sending PC's IPv4
+address. Reload the file in **Connections** while stopped, select the UDP picture
+source, and start the session. On the sending PC run:
 
 ```powershell
 frame_sender.exe --host RECEIVER_IPV4 --output 0

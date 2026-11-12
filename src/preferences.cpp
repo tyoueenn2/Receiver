@@ -1,8 +1,71 @@
 #include "receiver/preferences.hpp"
+#include "receiver/network.hpp"
 #include <algorithm>
 #include <cctype>
 #include <fstream>
 namespace receiver {
+namespace {
+// Machine-specific values have one editable home, independent of model/profile snapshots.
+constexpr const char* setup_fields[] = {"bind_ip", "sender_ip", "pi_ip", "frame_port", "pi_port",
+                                      "makcu_port", "omni_python", "omni_source", "omni_device",
+                                      "omni_worker"};
+nlohmann::json setup_values(const Settings& settings) {
+    const auto all = settings_json(settings);
+    auto result = nlohmann::json::object();
+    for (auto field : setup_fields)
+        result[field] = all.at(field);
+    return result;
+}
+nlohmann::json read_setup(const std::filesystem::path& path) {
+    try {
+        const auto value = read_json_file(path);
+        if (!value.is_object())
+            throw std::runtime_error("Expected a JSON object");
+        auto result = setup_values(Settings{});
+        for (const auto& item : value.items()) {
+            if (!result.contains(item.key()))
+                throw std::runtime_error("Unknown setup setting: " + item.key());
+            result[item.key()] = item.value();
+        }
+        // Reuse the profile's type and range checks for these shared fields.
+        settings_from_json(result);
+        return result;
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Cannot load " + path.string() + ": " + e.what());
+    }
+}
+} // namespace
+Settings Preferences::apply_setup(const Settings& settings) const {
+    auto value = settings_json(settings);
+    value.update(setup_);
+    return settings_from_json(value);
+}
+Settings Preferences::load_profile(const std::string& path) const {
+    auto value = read_json_file(path);
+    value.update(setup_);
+    return settings_from_json(value);
+}
+Settings Preferences::reload_setup(const Settings& settings) {
+    auto next = *this;
+    next.setup_ = read_setup(setup_path());
+    auto result = next.apply_setup(settings);
+    setup_ = std::move(next.setup_);
+    return result;
+}
+Settings Preferences::connect_pi(const Settings& settings, const std::string& ip, uint16_t port) {
+    address(ip, port);
+    auto next = *this;
+    // Read the latest file so connecting a Pi preserves edits made in a text editor.
+    next.setup_ = read_setup(setup_path());
+    next.setup_["pi_ip"] = ip;
+    next.setup_["pi_port"] = port;
+    auto connected = settings;
+    connected.mouse_backend = 0;
+    auto result = next.apply_setup(connected);
+    write_json_atomic(next.setup_, setup_path());
+    setup_ = std::move(next.setup_);
+    return result;
+}
 std::string Preferences::key(const std::string& model) {
     if (model.empty())
         return {};
@@ -24,36 +87,53 @@ void Preferences::add_directory(const std::filesystem::path& directory, bool mod
         dirs.push_back(normalized);
 }
 void Preferences::load() {
-    auto path = root_ / "preferences.json";
-    if (!std::filesystem::exists(path))
-        return;
-    const auto j = read_json_file(path);
-    if (j.value("version", 0) != 1)
-        throw std::runtime_error("Unsupported preference version");
-    auto settings = settings_from_json(j.at("settings"));
-    auto models = j.value("models", nlohmann::json::object());
-    if (!models.is_object() || models.size() > 1000)
-        throw std::runtime_error("Invalid saved model library");
-    for (const auto& value : models.items())
-        settings_from_json(value.value());
     auto next = *this;
-    next.current = std::move(settings);
-    next.models_ = std::move(models);
-    next.profile = j.value("profile", "");
-    for (const auto& [field, is_model] :
-         {std::pair{"model_directories", true}, {"profile_directories", false}}) {
-        if (!j.contains(field))
-            continue;
-        if (!j[field].is_array() || j[field].size() > 64)
-            throw std::runtime_error("Invalid saved library directories");
-        for (const auto& directory : j[field])
-            next.add_directory(directory.get<std::string>(), is_model);
+    next.setup_ = nlohmann::json::object();
+    auto path = root_ / "preferences.json";
+    const bool has_preferences = std::filesystem::exists(path);
+    const bool has_setup = std::filesystem::exists(setup_path());
+    if (has_setup)
+        next.setup_ = read_setup(setup_path());
+    if (has_preferences) {
+        const auto j = read_json_file(path);
+        if (j.value("version", 0) != 1)
+            throw std::runtime_error("Unsupported preference version");
+        auto saved = j.at("settings");
+        saved.update(next.setup_);
+        auto settings = settings_from_json(saved);
+        auto models = j.value("models", nlohmann::json::object());
+        if (!models.is_object() || models.size() > 1000)
+            throw std::runtime_error("Invalid saved model library");
+        for (const auto& value : models.items()) {
+            auto model = value.value();
+            model.update(next.setup_);
+            settings_from_json(model);
+        }
+        next.current = std::move(settings);
+        next.models_ = std::move(models);
+        next.profile = j.value("profile", "");
+        for (const auto& [field, is_model] :
+             {std::pair{"model_directories", true}, {"profile_directories", false}}) {
+            if (!j.contains(field))
+                continue;
+            if (!j[field].is_array() || j[field].size() > 64)
+                throw std::runtime_error("Invalid saved library directories");
+            for (const auto& directory : j[field])
+                next.add_directory(directory.get<std::string>(), is_model);
+        }
     }
+    if (!has_setup) {
+        // The first run migrates the user's existing connections and Python installation.
+        next.setup_ = setup_values(next.current);
+        std::filesystem::create_directories(root_);
+        write_json_atomic(next.setup_, setup_path());
+    }
+    next.current = next.apply_setup(next.current);
     *this = std::move(next);
 }
 void Preferences::save(const Settings& settings, const std::string& profile_path,
                        const std::vector<std::string>& names) {
-    auto s = settings;
+    auto s = apply_setup(settings);
     reconcile_classes(s, names);
     validate(s);
     auto next = *this;
@@ -87,7 +167,9 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
     auto identity = key(path);
     auto s = base;
     if (models_.contains(identity)) {
-        s = settings_from_json(models_[identity]);
+        auto saved = models_[identity];
+        saved.update(setup_);
+        s = settings_from_json(saved);
         // Connections and activation are application preferences, not properties of a model.
         s.frame_source = base.frame_source;
         s.capture_output = base.capture_output;
@@ -124,7 +206,7 @@ Settings Preferences::select_model(const Settings& base, const std::string& path
     }
     s.model = path;
     // Header inspection takes place on the inference worker while running.
-    return s;
+    return apply_setup(s);
 }
 std::vector<LibraryEntry> Preferences::library() const {
     std::vector<LibraryEntry> result;

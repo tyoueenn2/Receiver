@@ -1,6 +1,6 @@
 # Native YOLO-Omni models
 
-Choose a trained `.pt` model in Setup and leave **Detection backend** on **Auto**.
+Choose a trained `.pt` model in **Model** and leave **Detection backend** on **Auto**.
 Auto routes `.pt` files to the persistent PyTorch worker and `.onnx`/`.engine` files to
 TensorRT. See [direct engine loading](ENGINE_FILES.md) for serialized engines.
 The worker identifies YOLO-Omni from the model's actual modules, so
@@ -15,26 +15,28 @@ checkout of the [YOLO-Omni fork](https://github.com/z637826/yolo-omni).
 Install PyTorch for your CUDA/driver combination
 using the [official PyTorch selector](https://pytorch.org/get-started/locally/).
 Then install the fork's remaining dependencies with that environment's Python:
-`python -m pip install -r tools/requirements-omni.txt`. Set **YOLO-Omni source folder**
+`python -m pip install -r tools/requirements-omni.txt`. Set `omni_source`
 to the checkout root; this selects its custom modules ahead of stock Ultralytics.
 The receiver does not install packages or download checkpoints automatically.
 Native inference uses FP32, preserving compatibility with the fork's custom
 modules. TensorRT exports use the existing FP16 path.
 
-In **Advanced connection settings**, set:
+For the GUI, set these once in `user-settings/setup.json`, then choose
+**Connections > Reload setup file** while stopped. See [machine setup](MACHINE_SETUP.md).
+Headless tools use the same keys in their profile or the CLI options below.
 
-- **Python executable**: the environment's actual interpreter, such as
+- `omni_python`: the environment's actual interpreter, such as
   `C:/Models/omni-env/Scripts/python.exe` on Windows or
   `/home/user/omni-env/bin/python` on Linux. This is one executable path, not a
   shell command; use the interpreter directly instead of `py -3.12`.
-- **YOLO-Omni source folder**: the repository root containing `ultralytics/`.
+- `omni_source`: the repository root containing `ultralytics/`.
   Leave empty if the fork is already installed in that environment. Stock
   Ultralytics does not contain the fork's custom modules.
-- **PyTorch device**: NVIDIA GPU by default. CPU must be selected explicitly for
+- `omni_device`: `cuda:0` (NVIDIA GPU) by default. Set `cpu` explicitly for
   testing; there is no automatic CPU fallback.
 
 The included `profiles/yolo-omni.json` is an example. Supply your own trained
-weights and update its interpreter path and device addresses. No Omni checkpoint
+weights and configure your interpreter path and device addresses. No Omni checkpoint
 is bundled. Both GUI and headless builds support the Python backend even when
 compiled without TensorRT.
 
@@ -48,10 +50,12 @@ Linux uses the same options with its executable and interpreter paths. Use
 `--backend yolo_omni` or `--backend tensorrt` to override Auto. A conflicting file
 format is rejected with an explanation. The resolved runtime appears in the GUI
 and headless status. Class names are read from the native checkpoint after loading;
-`.pt` models do not need an ONNX manifest. Model, runtime, source-folder and device
-changes use the [hot reload workflow](MODEL_WORKFLOWS.md), which turns movement off
-and restores the previous model if loading fails. `omni_worker` defaults to `tools/yolo_omni_worker.py`
-relative to the working directory and can be set to an absolute path in a profile.
+`.pt` models do not need an ONNX manifest. Model and backend changes use the
+[hot reload workflow](MODEL_WORKFLOWS.md), which turns movement off and restores
+the previous model if loading fails. Python paths and device changes in the GUI
+setup file require stopping the session and reloading the file. `omni_worker`
+defaults to `tools/yolo_omni_worker.py` relative to the working directory and can
+be set to an absolute path in the GUI setup file or a headless profile.
 
 ## Contract and timing
 

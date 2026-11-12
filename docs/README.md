@@ -12,6 +12,8 @@ in `licenses/`.
 | Guide | Contents |
 | --- | --- |
 | [Connect devices](technical/SETUP.md) | Sender, network and Raspberry Pi setup |
+| [Machine setup file](technical/MACHINE_SETUP.md) | One-time network, serial port and Python runtime settings |
+| [LAN discovery](technical/DISCOVERY.md) | Find a Pi proxy or let FrameSender find Receiver |
 | [Local desktop capture](technical/LOCAL_CAPTURE.md) | Windows display selection, center crops and capture behavior |
 | [MAKCU mouse connection](technical/MAKCU.md) | USB serial setup, physical activation and hardware-free tests |
 | [Headless operation](technical/HEADLESS.md) | Command-line use, simulation and logging |
