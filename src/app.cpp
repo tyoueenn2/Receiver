@@ -206,7 +206,9 @@ void App::configure(const Settings& s, bool reload_model) {
                 s.trigger.spray != settings_.trigger.spray || s.trigger.button != settings_.trigger.button ||
                 s.trigger.delay_ms != settings_.trigger.delay_ms ||
                 s.trigger.interval_ms != settings_.trigger.interval_ms ||
-                s.trigger.press_ms != settings_.trigger.press_ms) {
+                s.trigger.press_ms != settings_.trigger.press_ms ||
+                s.trigger.color_radius != settings_.trigger.color_radius ||
+                s.trigger.color_tolerance != settings_.trigger.color_tolerance) {
                 stats_.armed = stats_.active = false;
                 injected_.release_all(ReleaseReason::configuration_restart, true);
             }
@@ -1312,7 +1314,7 @@ void App::pi_loop() {
                 trigger.suspend();
                 stats_.trigger_status = "Needs Pi UPT3 click support";
             } else if (trigger.update(correction, r.frame->header.width, r.frame->header.height, settings_,
-                                      now, !occupied)) {
+                                      now, !occupied, r.colors.get())) {
                 const auto send_at = now_ns();
                 if (send_at <= r.deadline && input_fresh(send_at)) {
                     try {

@@ -2,7 +2,7 @@
 
 Receiver processes image frames with YOLO models and sends mouse commands through
 a Raspberry Pi USB proxy, MAKCU, or local Windows mouse output. Windows includes a
-desktop interface; Linux runs from the command line.
+desktop interface; Linux supports both the desktop interface and command-line operation.
 
 ## Features
 
@@ -23,6 +23,23 @@ desktop interface; Linux runs from the command line.
 
 The demo starts with movement off and does not move your actual mouse. To use
 your own model or connect devices, follow the [getting started guide](docs/GETTING_STARTED.md).
+
+## Build the Linux GUI
+
+On Debian/Ubuntu, install `build-essential cmake ninja-build libsdl2-dev libgl-dev`.
+Then run:
+
+```bash
+cmake --preset linux-gui
+cmake --build --preset linux-gui
+./build/linux-gui/receiver
+```
+
+For a demo with simulated video and Pi telemetry, run `python3 tools/ui_demo.py`.
+The Linux GUI includes the same settings, color targeting, profiles, diagnostics,
+and separate preview window. Linux uses SDL2/OpenGL with an X11 or Wayland desktop.
+Receive video over UDP and use Pi or MAKCU output; local desktop capture, local
+Windows mouse output, and screen-capture exclusion are Windows-only features.
 
 ## Documentation
 

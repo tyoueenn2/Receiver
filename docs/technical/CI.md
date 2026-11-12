@@ -9,6 +9,7 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 | MAKCU on Linux and Windows | Dedicated jobs build the serial backend and run protocol/profile tests without hardware. Linux also runs the real receiver against pseudo-terminal firmware, checking baud negotiation, button activation/release, stale frames, response timeouts and unplugging. Full native and sanitizer suites include these checks too. |
 | Linux GCC Release and Clang Debug | Native compilation, core tests, independent UDP peers, worker processes and model workflows on real Linux runners |
 | Windows MSVC Release and Debug | The same checks plus rendering all eleven DirectX GUI pages at normal and minimum widths, enabled preference controls, search routing and the read-only mouse reader |
+| Linux SDL2/OpenGL GUI | A dedicated Release job builds the shared settings interface and preview, renders all eleven pages and color controls under Xvfb/Mesa, checks search and disarmed startup, and runs the interface diagnostics runner. Native preview resize, close/reopen and known received video pixels are checked through X11. |
 | Separate preview window | A real second HWND renders known video pixels; native resize, close, reopen and a minimized main window are checked while disarmed. Both Windows configurations repeat the lifecycle test three times, and the extracted Windows package reruns it outside the checkout. |
 | Linux Clang ASan + UBSan | Memory errors, leaks and undefined behavior in the full native/process/network suite |
 | Repeated workflows | 20 runs per native build and 10 sanitized runs of reload, rollback, settings and the class-preference pipeline |
@@ -53,9 +54,12 @@ Release configurations produce `Receiver-ubuntu-24.04` and `Receiver-windows-202
 artifacts containing a tested archive and SHA-256 checksum. They include the worker
 tools, profiles, documentation, sample model, licenses and Windows C++ runtime DLLs.
 Python/model dependencies and CUDA/TensorRT runtimes remain separately installed.
+The Linux GUI job also uploads `Receiver-Linux-GUI`, including the interface,
+headless executable, tools and checksum. Its extracted archive reruns the Linux
+preview lifecycle check under Xvfb. SDL2 and OpenGL runtimes are installed separately.
 
 Pushing a `v*` version tag publishes those packages to GitHub Releases only after
-all native, sanitizer, CPU-model and CUDA/API jobs succeed. Ordinary branch pushes
+all desktop GUI, native, sanitizer, CPU-model and CUDA/API jobs succeed. Ordinary branch pushes
 and pull requests upload artifacts without creating a release. Release publishing
 has write permission only in its gated job; other jobs use read-only repository
 permissions. These packages are built with `RECEIVER_TENSORRT=OFF`.
@@ -72,7 +76,9 @@ ctest --preset linux-tests --output-junit junit.xml
 ```
 
 On Windows replace the preset name with `windows-tests`. Integration tests are
-opt-in locally and always enabled in the native CI jobs. For Linux memory checks:
+opt-in locally and always enabled in the native CI jobs. To build and test the
+Linux interface, use `linux-gui` after installing SDL2/OpenGL development packages
+and Xvfb as described in [BUILD.md](BUILD.md). For Linux memory checks:
 
 ```sh
 CC=clang CXX=clang++ cmake -S . -B build/sanitized \

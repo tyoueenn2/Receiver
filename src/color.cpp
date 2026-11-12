@@ -101,4 +101,30 @@ std::optional<ColorAim> ColorMask::highest(const Detection& region, float rx, fl
     }
     return {};
 }
+bool ColorMask::surrounds(float rx, float ry, int radius, int tolerance) const {
+    if (!count || !std::isfinite(rx) || !std::isfinite(ry) || rx < 0 || ry < 0 || rx >= width ||
+        ry >= height || radius < 1 || radius > 1024 || tolerance < 0 || tolerance > radius)
+        return false;
+    const int cx = int(std::floor(rx)), cy = int(std::floor(ry));
+    const size_t stride = (width + 63) / 64;
+    auto any = [&](int x0, int y0, int x1, int y1) {
+        x0 = std::max(x0, 0);
+        y0 = std::max(y0, 0);
+        x1 = std::min(x1, width - 1);
+        y1 = std::min(y1, height - 1);
+        if (x0 > x1 || y0 > y1)
+            return false;
+        for (int y = y0; y <= y1; ++y)
+            for (int word = x0 / 64; word <= x1 / 64; ++word) {
+                const int lo = std::max(x0 - word * 64, 0), hi = std::min(x1 - word * 64, 63);
+                const auto range = (~uint64_t(0) << lo) & (~uint64_t(0) >> (63 - hi));
+                if (bits[size_t(y) * stride + word] & range)
+                    return true;
+            }
+        return false;
+    };
+    return any(cx - radius, cy - tolerance, cx - 1, cy + tolerance) &&
+           any(cx + 1, cy - tolerance, cx + radius, cy + tolerance) &&
+           any(cx - tolerance, cy - radius, cx + tolerance, cy - 1);
+}
 } // namespace receiver

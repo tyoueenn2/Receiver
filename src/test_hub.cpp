@@ -1,11 +1,23 @@
 #include "receiver/test_hub.hpp"
 #include "receiver/protocol.hpp"
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <cerrno>
+#include <cstdlib>
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
+#endif
 #include <fstream>
 #include <sstream>
 #include <nlohmann/json.hpp>
 namespace receiver {
 namespace {
+#ifdef _WIN32
 std::wstring wide(const std::string& s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
     std::wstring w(n, 0);
@@ -93,6 +105,69 @@ int execute(const std::vector<std::string>& args, const std::filesystem::path& d
     GetExitCodeProcess(child.value, &code);
     return int(code);
 }
+#else
+int execute(const std::vector<std::string>& args, const std::filesystem::path& directory,
+            const std::filesystem::path& log, std::atomic<bool>& cancel) {
+    std::vector<char*> argv;
+    for (const auto& arg : args)
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    if (posix_spawn_file_actions_init(&actions))
+        return -4;
+    if (posix_spawnattr_init(&attributes)) {
+        posix_spawn_file_actions_destroy(&actions);
+        return -4;
+    }
+    int result = posix_spawn_file_actions_addchdir_np(&actions, directory.c_str());
+    if (!result)
+        result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!result)
+        result = posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, log.c_str(),
+                                                  O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (!result)
+        result = posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+    if (!result)
+        result = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+    if (!result)
+        result = posix_spawnattr_setpgroup(&attributes, 0);
+    pid_t child = -1;
+    if (!result)
+        result = posix_spawnp(&child, argv[0], &actions, &attributes, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attributes);
+    if (result)
+        return -1;
+    const auto started = std::chrono::steady_clock::now();
+    int status = 0;
+    for (;;) {
+        const auto waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            kill(-child, SIGKILL); // Also clean up any children left behind by a test.
+            return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+        }
+        if (waited < 0 && errno != EINTR) {
+            kill(-child, SIGKILL);
+            return -4;
+        }
+        if (cancel || std::chrono::steady_clock::now() - started > std::chrono::minutes(3)) {
+            kill(-child, SIGKILL);
+            while (waitpid(child, &status, 0) < 0 && errno == EINTR) {
+            }
+            return cancel ? -2 : -3;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+}
+#endif
+std::string executable(const char* name) {
+#ifdef _WIN32
+    return std::string(name) + ".exe";
+#else
+    return name;
+#endif
+}
 std::string log_text(const std::filesystem::path& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f)
@@ -104,9 +179,13 @@ std::string log_text(const std::filesystem::path& path) {
 }
 } // namespace
 TestHub::TestHub() {
+#ifdef _WIN32
     std::array<wchar_t, 32768> file{};
     GetModuleFileNameW(nullptr, file.data(), DWORD(file.size()));
     binaries_ = std::filesystem::path(file.data()).parent_path();
+#else
+    binaries_ = std::filesystem::read_symlink("/proc/self/exe").parent_path();
+#endif
     root_ = binaries_;
     for (auto p = binaries_; !p.empty(); p = p.parent_path()) {
         if (std::filesystem::exists(p / "tools" / "test_sender.py")) {
@@ -121,11 +200,11 @@ TestHub::TestHub() {
         {"Humanization checks", "Movement styles, direction strength, slow input, resets and limits."},
         {"Tracking and input checks",
          "Prediction methods, sticky distance, dynamic search area and injected-input filtering."},
-        {"Synthetic button and click checks",
-         "Version-2 framing, persistent holds, release fences, heartbeats, retries, ACK ordering and Pi restarts."},
+        {"Synthetic button and click checks", "Version-2 framing, persistent holds, release fences, "
+                                              "heartbeats, retries, ACK ordering and Pi restarts."},
         {"Local mouse startup", "Starts the Windows mouse reader briefly. Does not move or click the mouse."},
-        {"Network pipeline",
-         "Runs a sender and independent fake Pi through the real receiver, including clicks and disconnects."},
+        {"Network pipeline", "Runs a sender and independent fake Pi through the real receiver, including "
+                             "clicks and disconnects."},
         {"Direction pipeline", "Checks direction ratios, missing motion data, release and recovery."},
         {"Interface pages", "Renders every page in a separate hidden test app and checks disarmed startup."},
         {"Model reference comparison",
@@ -151,6 +230,7 @@ std::string TestHub::report_path() const {
     return report_.string();
 }
 std::string TestHub::find_python() {
+#ifdef _WIN32
     std::array<wchar_t, 32768> path{};
     if (GetEnvironmentVariableW(L"RECEIVER_PYTHON", path.data(), DWORD(path.size())))
         return utf8(path.data());
@@ -158,6 +238,20 @@ std::string TestHub::find_python() {
         if (SearchPathW(nullptr, name, nullptr, DWORD(path.size()), path.data(), nullptr))
             return utf8(path.data());
     return {};
+#else
+    if (const char* configured = std::getenv("RECEIVER_PYTHON"))
+        return configured;
+    if (const char* path = std::getenv("PATH")) {
+        std::istringstream parts(path);
+        std::string part;
+        while (std::getline(parts, part, ':')) {
+            const auto candidate = std::filesystem::absolute(std::filesystem::path(part) / "python3");
+            if (access(candidate.c_str(), X_OK) == 0)
+                return candidate.string();
+        }
+    }
+    return {};
+#endif
 }
 void TestHub::start(std::vector<bool> selected, TestOptions options) {
     if (running_)
@@ -202,36 +296,42 @@ void TestHub::work(std::vector<bool> selected, TestOptions o) {
         std::vector<std::string> command;
         std::string blocked;
         auto require = [&](const std::string& path, const char* description) {
-            if (path.empty() || !std::filesystem::exists(wide(path)))
+            if (path.empty() || !std::filesystem::exists(std::filesystem::path(std::u8string(
+                                    reinterpret_cast<const char8_t*>(path.data()), path.size()))))
                 blocked = description;
         };
+#ifndef _WIN32
+        if (i == 4)
+            blocked = "Local mouse startup is a Windows-only check.";
+#endif
         if (i < 5) {
-            const char* names[] = {"receiver_tests.exe", "receiver_humanization_tests.exe",
-                                   "receiver_tracking_tests.exe", "receiver_injection_tests.exe",
-                                   "receiver_local_mouse_tests.exe"};
+            const std::string names[] = {
+                executable("receiver_tests"), executable("receiver_humanization_tests"),
+                executable("receiver_tracking_tests"), executable("receiver_injection_tests"),
+                executable("receiver_local_mouse_tests")};
             command = {(binaries_ / names[i]).string()};
             require(command[0], "This test executable is not included. Rebuild/package the test targets.");
         } else if (i == 12)
             blocked = "Run the authoritative public proxy's tests on the Pi, then validate physical USB "
-                      "output and destination behavior. This Windows hub cannot perform that hardware check.";
+                      "output and destination behavior. This hub cannot perform that hardware check.";
         else {
             require(o.python, "Choose a Python executable in Test settings.");
             command = {o.python};
             auto add = [&](std::initializer_list<std::string> args) { command.insert(command.end(), args); };
             if (i == 5)
                 add({(root_ / "tests/integration_test.py").string(),
-                     (binaries_ / "receiver_headless.exe").string()});
+                     (binaries_ / executable("receiver_headless")).string()});
             if (i == 6)
                 add({(root_ / "tests/direction_integration_test.py").string(),
-                     (binaries_ / "receiver_headless.exe").string()});
+                     (binaries_ / executable("receiver_headless")).string()});
             if (i == 7)
-                add({(root_ / "tests/gui_smoke.py").string(), (binaries_ / "receiver.exe").string(),
+                add({(root_ / "tests/gui_smoke.py").string(), (binaries_ / executable("receiver")).string(),
                      "--all-pages"});
             if (i == 8) {
                 require(o.model, "Choose the YOLO11n ONNX model in Test settings.");
                 require(o.image, "Choose a test image with detectable objects in Test settings.");
                 add({(root_ / "tests/model_reference_test.py").string(), "--model", o.model, "--image",
-                     o.image, "--decoder", (binaries_ / "receiver_decode.exe").string()});
+                     o.image, "--decoder", (binaries_ / executable("receiver_decode")).string()});
             }
             if (i == 9) {
                 require(o.nvrtc, "Choose the CUDA NVRTC DLL in Test settings.");
@@ -243,13 +343,13 @@ void TestHub::work(std::vector<bool> selected, TestOptions o) {
                 add({(root_ / "tests/preprocess_gpu_test.py").string(), "--nvrtc", o.nvrtc});
             }
             if (i == 11) {
-                require((binaries_ / "receiver_verify.exe").string(),
+                require((binaries_ / executable("receiver_verify")).string(),
                         "Requires a TensorRT build containing receiver_verify.exe.");
                 require(o.profile, "Choose a saved GPU profile in Test settings.");
                 require(o.raw, "Choose a tightly packed RGB24 test file in Test settings.");
                 add({(root_ / "tools/validate_gpu.py").string(), "--verify-exe",
-                     (binaries_ / "receiver_verify.exe").string(), "--profile", o.profile, "--raw", o.raw,
-                     "--width", std::to_string(o.width), "--height", std::to_string(o.height)});
+                     (binaries_ / executable("receiver_verify")).string(), "--profile", o.profile, "--raw",
+                     o.raw, "--width", std::to_string(o.width), "--height", std::to_string(o.height)});
             }
             if (command.size() > 1)
                 require(command[1], "The test scripts are missing from this package.");
@@ -273,7 +373,7 @@ void TestHub::work(std::vector<bool> selected, TestOptions o) {
         if (result == -3)
             details = "The test exceeded its three-minute time limit.\n" + details;
         if (result == -4)
-            details = "Windows could not create the isolated test process or its log.\n" + details;
+            details = "Could not create the isolated test process or its log.\n" + details;
         {
             std::lock_guard lock(mutex_);
             auto& entry = entries_[i];

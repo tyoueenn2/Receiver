@@ -48,6 +48,14 @@
         "RECEIVER_TENSORRT": "ON",
         "TENSORRT_ROOT": "$env{TENSORRT_ROOT}"
       }
+    },
+    {
+      "name": "linux-gui",
+      "inherits": "linux-tests",
+      "binaryDir": "${sourceDir}/build/linux-gui",
+      "cacheVariables": {
+        "RECEIVER_GUI": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -68,6 +76,10 @@
     {
       "name": "linux-cuda",
       "configurePreset": "linux-cuda"
+    },
+    {
+      "name": "linux-gui",
+      "configurePreset": "linux-gui"
     }
   ],
   "testPresets": [
@@ -97,6 +109,13 @@
     {
       "name": "linux-cuda",
       "configurePreset": "linux-cuda",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gui",
+      "configurePreset": "linux-gui",
       "output": {
         "outputOnFailure": true
       }

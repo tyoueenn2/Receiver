@@ -10,6 +10,50 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  linux-gui:
+    name: Linux SDL2/OpenGL GUI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install desktop and software display dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libgl-dev xvfb xauth fonts-dejavu-core
+      - name: Configure and build the Linux interface
+        run: |
+          cmake --preset linux-gui -DRECEIVER_INTEGRATION_TESTS=ON
+          cmake --build --preset linux-gui --parallel 2
+      - name: Run GUI, preview and core regression tests
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: ctest --preset linux-gui --output-junit linux-gui.xml
+      - name: Run checks through the interface diagnostics runner
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a -s '-screen 0 1280x1024x24 -noreset' ./build/linux-gui/receiver_test_hub_runner
+      - name: Package and test the extracted Linux GUI build
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: xvfb-run -a -s '-screen 0 1280x1024x24 -noreset' python tools/package_ci.py --build build/linux-gui --name Receiver-Linux-GUI-${{ github.sha }}
+      - name: Keep the Linux GUI archive and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: Receiver-Linux-GUI
+          path: dist/*
+      - name: Keep Linux GUI results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-gui-results
+          path: |
+            build/linux-gui/*.xml
+            build/linux-gui/gui-smoke-*.bmp
+            build/linux-gui/gui-smoke-*.json
+            build/linux-gui/Testing/Temporary/
+            test-results/
+
   calibration:
     name: Calibration and move-return / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -268,7 +312,7 @@ jobs:
   release:
     name: Publish tested hardware-free packages on version tags
     if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    needs: [calibration, makcu, native, sanitizers, cpu-model, yolo-compatibility, cuda-compile]
+    needs: [linux-gui, calibration, makcu, native, sanitizers, cpu-model, yolo-compatibility, cuda-compile]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

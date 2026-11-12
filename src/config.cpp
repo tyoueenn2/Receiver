@@ -27,7 +27,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ColorSettings, mode, min_h, max_
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(ClassPreferenceSettings, class_id, class_name, mode,
                                                 max_distance)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(TriggerSettings, enabled, spray, button, delay_ms,
-                                                interval_ms, press_ms)
+                                                interval_ms, press_ms, color_radius, color_tolerance)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(VisualSettings, boxes, fov, confidence, tracers,
                                                 tracer_origin, thickness, corner_radius, opacity, font_size,
                                                 box_color, fov_color)
@@ -77,6 +77,9 @@ void validate(const Settings& s) {
     if (a.button < 1 || a.button > 8 || a.delay_ms < 0 || a.delay_ms > 5000 || a.interval_ms < 10 ||
         a.interval_ms > 5000 || a.press_ms < 1 || a.press_ms > 1000)
         throw std::runtime_error("Auto trigger timing or button is invalid");
+    if (a.color_radius < 1 || a.color_radius > 1024 || a.color_tolerance < 0 ||
+        a.color_tolerance > a.color_radius)
+        throw std::runtime_error("Color trigger needs a 1..1024 pixel radius and tolerance from 0 to radius");
     if (v.tracer_origin < 0 || v.tracer_origin > 2 || !range(v.thickness, 1, 6) ||
         !range(v.corner_radius, 0, 30) || !range(v.opacity, .1f, 1) || !range(v.font_size, 10, 32))
         throw std::runtime_error("Preview appearance is invalid");

@@ -1,4 +1,5 @@
 #include "receiver/assist.hpp"
+#include "receiver/color.hpp"
 #include "receiver/preferences.hpp"
 #include <algorithm>
 #include <cmath>
@@ -18,16 +19,22 @@ void AutoTrigger::suspend() {
     acquired_ = observed_at_ = 0;
 }
 bool AutoTrigger::update(const Correction& c, int width, int height, const Settings& s, int64_t now,
-                         bool can_fire) {
+                         bool can_fire, const ColorMask* colors) {
     const float x = s.reference_x < 0 ? width * .5f : s.reference_x;
     const float y = s.reference_y < 0 ? height * .5f : s.reference_y;
-    if (!s.trigger.enabled || !c.target || x < c.target->x || x > c.target->x + c.target->w ||
-        y < c.target->y || y > c.target->y + c.target->h) {
+    const bool color_only = s.color.mode == 1;
+    const bool centered = color_only
+                              ? colors && colors->width == width && colors->height == height &&
+                                    colors->surrounds(x, y, s.trigger.color_radius, s.trigger.color_tolerance)
+                              : c.target && x >= c.target->x && x <= c.target->x + c.target->w &&
+                                    y >= c.target->y && y <= c.target->y + c.target->h;
+    if (!s.trigger.enabled || !c.target || !centered) {
         reset();
         return false;
     }
     const bool same =
-        previous_ && previous_->cls == c.target->cls && iou(*previous_, *c.target) >= s.persistence_iou;
+        previous_ && (color_only || (previous_->cls == c.target->cls &&
+                                    iou(*previous_, *c.target) >= s.persistence_iou));
     if (!same) {
         reset();
         acquired_ = now;
