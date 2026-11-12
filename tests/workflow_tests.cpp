@@ -241,8 +241,23 @@ void app_workflows() {
     s.model = "first.pt";
     s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
     s.preview = true;
-    s.frame_port = 30000 + int(random_id() % 20000);
-    s.pi_port = s.frame_port + 1;
+    // Keep the receiver below the ephemeral range used by its own sockets.
+    // Bind a Pi sink as well: an unopened UDP port can deliver an asynchronous
+    // connection-reset error on Windows, unrelated to the model workflows.
+    std::unique_ptr<UdpSocket> pi_sink;
+    for (int attempt = 0; attempt < 100 && !pi_sink; ++attempt) {
+        const int port = 12000 + int(random_id() % 18000);
+        try {
+            UdpSocket receiver_probe("127.0.0.1", port);
+            pi_sink = std::make_unique<UdpSocket>("127.0.0.1", port + 1);
+            s.frame_port = port;
+            s.pi_port = port + 1;
+        } catch (const std::runtime_error&) {
+            // Try another pair if either endpoint is occupied or reserved.
+        }
+    }
+    if (!pi_sink)
+        throw std::runtime_error("No available loopback ports for workflow checks");
     s.max_age_ms = 250;
     s.classes = {1};
     s.selected_class_names = {"second"};
@@ -250,7 +265,9 @@ void app_workflows() {
     App app(fake_factory);
     app.start(s);
     until([&] { return app.stats().model_revision == 1 || !app.stats().error.empty(); });
-    CHECK(app.stats().error.empty());
+    const auto startup_error = app.stats().error;
+    if (!startup_error.empty())
+        throw std::runtime_error("Workflow receiver startup failed: " + startup_error);
     CHECK(!app.stats().armed);
     CHECK(app.settings().input_size == 320);
     UdpSocket sender("127.0.0.1", 0);
