@@ -182,14 +182,20 @@ struct GuiBackend {
     ~GuiBackend() {
         close();
     }
-    void open(bool compact, bool smoke) {
+    void open(bool compact, bool smoke, bool exact_hidden_size) {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         wc = WNDCLASSEXW{sizeof(wc), CS_CLASSDC, window_proc,          0,      0, instance, nullptr, nullptr,
                          nullptr,    nullptr,    L"UdpVisionReceiver", nullptr};
         RegisterClassExW(&wc);
-        window =
-            CreateWindowW(wc.lpszClassName, L"UDP Vision Receiver", WS_OVERLAPPEDWINDOW, 80, 60,
-                          compact ? 1060 : 1280, compact ? 740 : 900, nullptr, nullptr, instance, nullptr);
+        const int width = compact ? 1060 : 1280;
+        const int height = compact ? 740 : 900;
+        // An offscreen layout test needs the requested client size, even on the
+        // CI desktop where Windows can clamp a decorated top-level window.
+        const DWORD window_style = exact_hidden_size ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+        window = CreateWindowW(wc.lpszClassName, L"UDP Vision Receiver", window_style, 80, 60,
+                               width, height, nullptr, nullptr, instance, nullptr);
+        if (!window)
+            throw std::runtime_error("Cannot create Receiver window");
         DXGI_SWAP_CHAIN_DESC desc{};
         desc.BufferCount = 2;
         desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;

@@ -259,7 +259,7 @@ int run_gui(const std::string& options) {
     bool passive_selected = passive_smoke || (!smoke && !demo);
     const bool compact = smoke && options.find("--compact") != std::string::npos;
     GuiBackend gui;
-    gui.open(compact, smoke);
+    gui.open(compact, smoke, passive_smoke);
     const auto window = gui.window;
     FileDialog file_dialog;
     IMGUI_CHECKVERSION();
