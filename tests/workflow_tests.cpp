@@ -214,6 +214,20 @@ void setup_workflows(const std::filesystem::path& root) {
     CHECK(restarted.current.pi_port == 12500);
     CHECK(restarted.select_model(latest, "first.pt").omni_device == "cuda:0");
 
+    // Sender correction comes from the UI without overwriting unrelated edits.
+    setup["pi_port"] = 12501;
+    write_json_atomic(setup, migrated.setup_path());
+    const auto from_gui = migrated.connect_sender(latest, "192.168.1.39");
+    CHECK(from_gui.sender_ip == "192.168.1.39" && from_gui.pi_port == 12501);
+    CHECK(from_gui.omni_device == "cuda:0" && from_gui.model == latest.model);
+    setup["sender_ip"] = "192.168.1.39";
+    CHECK(read_json_file(migrated.setup_path()) == setup);
+    rejects([&] { migrated.connect_sender(latest, "192.168.1.999"); });
+    CHECK(read_json_file(migrated.setup_path()) == setup);
+    setup["pi_port"] = 12500;
+    write_json_atomic(setup, migrated.setup_path());
+    migrated.reload_setup(latest);
+
     // Bad files produce an error, retain the last good setup, and are never repaired silently.
     for (auto bad : {nlohmann::json{{"frame_port", 0}}, nlohmann::json{{"pi_port", 65536}},
                      nlohmann::json{{"omni_device", "invalid"}}, nlohmann::json{{"omni_python", ""}},

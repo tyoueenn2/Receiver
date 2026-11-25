@@ -5,6 +5,7 @@
 #include "receiver/preferences.hpp"
 #include "receiver/assist.hpp"
 #include "receiver/discovery.hpp"
+#include "receiver/video_preview.hpp"
 #include "preview_window.hpp"
 #include <algorithm>
 #include <cctype>
@@ -58,8 +59,8 @@ struct PageInfo {
 };
 constexpr PageInfo settings_pages[] = {
     {Page::connections, "connections", "Connections", "GET STARTED",
-     "Choose the video source and where mouse commands are sent.",
-     "setup file json reload python practice demo network ip address ports raspberry pi mouse backend "
+     "Check the incoming video before choosing any device or model.",
+     "preview only live stale waiting raw sender setup file json reload python practice demo network ip address ports raspberry pi mouse backend "
      "local windows capture udp display desktop makcu serial com usb discover find connect auto connector"},
     {Page::models, "models", "Model", "GET STARTED",
      "Load a detection model and choose its speed and input size.",
@@ -227,6 +228,8 @@ const char* mouse_buttons[] = {"Left mouse button",
 int run_gui(const std::string& options) {
     bool smoke = options.find("--smoke-test") != std::string::npos;
     bool demo = options.find("--demo") != std::string::npos;
+    const bool passive_smoke = smoke && options.find("--test-passive-preview") != std::string::npos;
+    bool passive_selected = passive_smoke || (!smoke && !demo);
     const bool compact = smoke && options.find("--compact") != std::string::npos;
     GuiBackend gui;
     gui.open(compact, smoke);
@@ -298,6 +301,7 @@ int run_gui(const std::string& options) {
     style.Colors[ImGuiCol_NavCursor] = accent;
     gui.initialize_imgui();
     receiver::App app;
+    receiver::VideoPreview video_preview;
     receiver::TestHub test_hub;
     receiver::TestOptions test_options;
     test_options.python = receiver::TestHub::find_python();
@@ -313,8 +317,6 @@ int run_gui(const std::string& options) {
     simulate = true;
 #endif
     std::vector<std::string> names;
-    uint64_t previous_frames = 0;
-    int64_t last_frame = 0;
     std::string notice;
 
     Page page = Page::connections;
@@ -387,6 +389,7 @@ int run_gui(const std::string& options) {
     std::future<std::vector<lan_discovery::Endpoint>> pi_search;
     std::vector<lan_discovery::Endpoint> found_pis;
     model_draft = settings.model;
+    std::string sender_draft = settings.sender_ip;
     auto mark_preferences = [&] {
         preferences_dirty = true;
         preferences_changed = receiver::now_ns();
@@ -396,6 +399,15 @@ int run_gui(const std::string& options) {
         if (simulate)
             cfg.sender_ip = cfg.pi_ip = "127.0.0.1";
         return cfg;
+    };
+    auto start_passive = [&] {
+        try {
+            auto cfg = preferences.apply_setup(settings);
+            video_preview.start_udp(cfg.bind_ip, cfg.frame_port, cfg.sender_ip);
+            error.clear();
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
     };
     auto connect_pi = [&](const lan_discovery::Endpoint& endpoint) {
         try {
@@ -435,7 +447,8 @@ int run_gui(const std::string& options) {
     auto open_profile = [&](const std::string& path) {
         try {
             auto loaded = preferences.load_profile(path);
-            app.arm(false);
+            if (app.stats().running)
+                app.arm(false);
             if (app.stats().running)
                 app.configure(session_settings(loaded));
             settings = loaded;
@@ -469,6 +482,7 @@ int run_gui(const std::string& options) {
     };
     std::future<void> operation;
     Texture texture;
+    Texture inline_texture;
     receiver::gui::PreviewWindow separate_preview;
     bool pending_preview_close = false;
     std::array<float, 180> latency{};
@@ -476,7 +490,11 @@ int run_gui(const std::string& options) {
     auto smoke_started = receiver::now_ns();
     int smoke_exit = 0;
     ImVec2 last_display_size(compact ? 1060.f : 1280.f, compact ? 740.f : 900.f);
-    if (smoke || demo) {
+    bool saw_waiting = false, saw_live = false, saw_stale = false, drew_passive_frame = false;
+    bool saw_sender_mismatch = false;
+    if (passive_smoke) {
+        start_passive();
+    } else if (smoke || demo) {
         simulate = true;
         names = {"Example object"};
         settings.preview = true;
@@ -508,6 +526,14 @@ int run_gui(const std::string& options) {
             }
         }
         auto stats = app.stats();
+        auto video = video_preview.snapshot();
+        auto video_state = video.state();
+        if (passive_smoke) {
+            saw_waiting |= video_state == receiver::VideoState::waiting;
+            saw_live |= video_state == receiver::VideoState::live;
+            saw_stale |= video_state == receiver::VideoState::stale;
+            saw_sender_mismatch |= video.recent_sender_mismatch();
+        }
         if (pi_search.valid() && pi_search.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
             try {
                 found_pis = pi_search.get();
@@ -589,12 +615,12 @@ int run_gui(const std::string& options) {
             settings.preview = true;
             changed = true;
         }
-        if (stats.inferred != previous_frames) {
-            last_frame = receiver::now_ns();
-            previous_frames = stats.inferred;
-        }
-        const bool receiving =
-            stats.running && stats.inferred && receiver::now_ns() - last_frame < 500'000'000;
+        const auto current_ns = receiver::now_ns();
+        const bool receiving = stats.running && stats.video_complete_ns &&
+                               current_ns - stats.video_complete_ns < 500'000'000;
+        const char* advanced_video = !stats.running ? "Off"
+                                     : receiving ? "Live"
+                                     : stats.video_complete_ns ? "Stale" : "Waiting";
         ImGui::PushFont(title_font);
         ImGui::TextUnformatted("VISION");
         ImGui::SameLine();
@@ -602,12 +628,14 @@ int run_gui(const std::string& options) {
         ImGui::PopFont();
         ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 230);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(simulate ? muted : accent, "%s",
-                           settings.color.mode == 1 ? "HSV COLOR"
+        ImGui::TextColored(simulate && !passive_selected ? muted : accent, "%s",
+                           passive_selected ? "PREVIEW ONLY"
+                           : settings.color.mode == 1 ? "HSV COLOR"
                            : simulate               ? "PRACTICE MODE"
                            : settings.model.empty() ? "NO MODEL SELECTED"
                                                     : "MODEL SELECTED");
-        hint("DEVICE SETUP  /  TARGETING  /  ASSISTANCE");
+        hint(passive_selected ? "RECEIVE-ONLY VIDEO  /  NO MODEL  /  OUTPUT OFF"
+                              : "DEVICE SETUP  /  TARGETING  /  ASSISTANCE");
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Separator, accent);
         ImGui::Separator();
@@ -624,7 +652,7 @@ int run_gui(const std::string& options) {
             pressed[key] = down && !previous_keys[key];
             previous_keys[key] = down;
         }
-        if (!smoke && gui.focused() && pressed[0x2E])
+        if (!smoke && stats.running && gui.focused() && pressed[0x2E])
             app.arm(false);
         if (!smoke && gui.focused() && !ImGui::GetIO().WantTextInput) {
             if (capture_model_key) {
@@ -647,7 +675,8 @@ int run_gui(const std::string& options) {
                                    ->page;
                         break;
                     }
-            } else if (settings.ui.model_switch && pressed[settings.ui.model_switch_key] && !busy() &&
+            } else if (!passive_selected && settings.ui.model_switch &&
+                       pressed[settings.ui.model_switch_key] && !busy() &&
                        !stats.model_loading && !stats.benchmarking) {
                 std::vector<std::string> models;
                 for (const auto& entry : library)
@@ -664,7 +693,8 @@ int run_gui(const std::string& options) {
             }
         }
         const char* next_step =
-            !stats.error.empty() ? "Something needs attention. Stop, check the details below, then try again."
+            passive_selected ? "See the raw UDP picture in Connections. No model or mouse device is used."
+            : !stats.error.empty() ? "Something needs attention. Stop, check the details below, then try again."
             : stats.model_loading || stats.benchmarking || busy()
                 ? "Getting ready. Loading a new model can take a few minutes."
             : !stats.running
@@ -696,15 +726,29 @@ int run_gui(const std::string& options) {
                 : "Mouse control is enabled. Movement requires a fresh picture and a matching detection.";
         ImGui::BeginDisabled(busy() || test_hub.running() || !setup_ready || pi_search.valid());
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(.13f, .46f, .80f, 1));
-        if (!stats.running) {
+        if (passive_selected) {
+            if (ImGui::Button(video.running ? "Stop preview" : "Start preview only", ImVec2(170, 34))) {
+                if (video.running) {
+                    video_preview.stop();
+                    inline_texture.clear();
+                } else {
+                    inline_texture.clear();
+                    start_passive();
+                }
+                video = video_preview.snapshot();
+                video_state = video.state();
+                go_to(Page::connections);
+            }
+            ImGui::SameLine(0, 20);
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("Video: %s | Mouse output: Off", receiver::video_state_label(video_state));
+        } else if (!stats.running) {
             if (ImGui::Button(simulate ? "Start practice" : "Start session", ImVec2(150, 34))) {
                 auto cfg = session_settings(settings);
                 const bool use_simulation = simulate;
                 names =
                     use_simulation ? std::vector<std::string>{"Example object"} : std::vector<std::string>{};
                 model_revision = 0;
-                last_frame = 0;
-                previous_frames = 0;
                 operation = std::async(std::launch::async,
                                        [&, cfg, use_simulation] { app.start(cfg, use_simulation); });
             }
@@ -715,7 +759,7 @@ int run_gui(const std::string& options) {
             }
         }
         ImGui::PopStyleColor();
-        if (stats.running) {
+        if (!passive_selected && stats.running) {
             ImGui::SameLine(0, 20);
             bool armed = stats.armed;
             ImGui::BeginDisabled(stats.calibration_only || calibration_status.running ||
@@ -729,20 +773,22 @@ int run_gui(const std::string& options) {
             ImGui::EndDisabled();
         }
         ImGui::EndDisabled();
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 220);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(.22f, .11f, .15f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.40f, .15f, .20f, 1));
-        if (ImGui::Button("Disarm  [Delete]", ImVec2(220, 34)))
-            app.arm(false);
-        ImGui::PopStyleColor(2);
+        if (!passive_selected) {
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 220);
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(.22f, .11f, .15f, 1));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.40f, .15f, .20f, 1));
+            if (ImGui::Button("Disarm  [Delete]", ImVec2(220, 34)))
+                app.arm(false);
+            ImGui::PopStyleColor(2);
+        }
         hint(next_step);
-        if (!stats.error.empty() || !error.empty()) {
+        if ((!passive_selected && !stats.error.empty()) || !error.empty()) {
             ImGui::TextColored(ImVec4(1, .65f, .5f, 1), "Unable to finish that step");
             ImGui::TextWrapped("%s", error.empty() ? stats.error.c_str() : error.c_str());
         }
-        if (!stats.model_error.empty())
+        if (!passive_selected && !stats.model_error.empty())
             ImGui::TextColored(ImVec4(1, .65f, .5f, 1), "%s", stats.model_error.c_str());
-        if (!stats.model_message.empty())
+        if (!passive_selected && !stats.model_message.empty())
             hint(stats.model_message.c_str());
         if (!notice.empty())
             ImGui::TextWrapped("%s", notice.c_str());
@@ -812,6 +858,65 @@ int run_gui(const std::string& options) {
                 break;
             }
         if (rendered_page == Page::connections) {
+            section("Session type", "Preview only is the default and never connects to a mouse device.");
+            ImGui::BeginDisabled(stats.running || video.running || busy() || test_hub.running() ||
+                                 pi_search.valid() || smoke || demo);
+            if (ImGui::RadioButton("Preview only (UDP video)", passive_selected)) {
+                passive_selected = true;
+                sender_draft = preferences.apply_setup(settings).sender_ip;
+            }
+            if (ImGui::RadioButton("Advanced device session", !passive_selected))
+                passive_selected = false;
+            ImGui::EndDisabled();
+            if (stats.running || video.running)
+                hint("Stop the current session to switch.");
+        }
+
+        if (rendered_page == Page::connections && passive_selected) {
+            section("UDP video", "Start FrameSender on the other computer. No model or mouse settings are needed.");
+            const auto configured = preferences.apply_setup(settings);
+            ImGui::TextWrapped("Listening address: %s:%d  |  Sender IP: %s", configured.bind_ip.c_str(),
+                               configured.frame_port, configured.sender_ip.c_str());
+            ImGui::BeginDisabled(video.running || busy() || !setup_ready || smoke || demo);
+            input_string("Sender IPv4 address", sender_draft);
+            if (ImGui::Button("Save Sender IP")) {
+                try {
+                    settings = preferences.connect_sender(settings, sender_draft);
+                    mark_preferences();
+                    error.clear();
+                    notice = "Sender IP saved. Start preview only to listen for that sender.";
+                } catch (const std::exception& e) { error = e.what(); }
+            }
+            ImGui::EndDisabled();
+            if (video.running)
+                hint("Stop preview before changing the sender address.");
+            ImGui::Text("Video: %s   |   Mouse output: Off", receiver::video_state_label(video_state));
+            if (video_state == receiver::VideoState::waiting)
+                hint("Waiting for a complete frame from the configured Sender IPv4 address.");
+            if (video.recent_sender_mismatch() && video_state != receiver::VideoState::live)
+                ImGui::TextWrapped("Sender IP doesn't match. Check the sender's IPv4 address, stop preview, "
+                                   "then save the correct address.");
+            if (video_state == receiver::VideoState::stale)
+                hint("No fresh complete frame. Showing the last received image.");
+            if (!video.error.empty())
+                ImGui::TextWrapped("Video error: %s", video.error.c_str());
+            if (video.frame) {
+                ImGui::Text("%u x %u  |  %llu complete frames",
+                            unsigned(video.frame->header.width), unsigned(video.frame->header.height),
+                            static_cast<unsigned long long>(video.completed));
+                inline_texture.update(*video.frame);
+                if (inline_texture.id()) {
+                    const float width = std::max(1.f, ImGui::GetContentRegionAvail().x);
+                    const float scale = std::min({2.f, width / inline_texture.w, 360.f / inline_texture.h});
+                    ImGui::Image(inline_texture.id(), ImVec2(inline_texture.w * scale, inline_texture.h * scale));
+                    drew_passive_frame = true;
+                }
+            } else if (inline_texture.id())
+                inline_texture.clear();
+            hint("Automatic Sender crop uses 320 x 320 for preview. Sender's manual crop stays under its control.");
+        }
+
+        if (rendered_page == Page::connections && !passive_selected) {
 
             const bool columns = setting_columns("Connections groups");
             section("Session mode", "Practice with simulated devices, or connect a live video feed.");
@@ -1373,7 +1478,7 @@ int run_gui(const std::string& options) {
             if (!calibration_status.error.empty())
                 hint(calibration_status.error.c_str());
             static int calibration_context = 0, calibration_method = 0;
-            ImGui::BeginDisabled(settings.mouse_backend != 0 || stats.model_loading || stats.benchmarking ||
+            ImGui::BeginDisabled(passive_selected || settings.mouse_backend != 0 || stats.model_loading || stats.benchmarking ||
                                  calibration_status.operation_active);
             if (ImGui::Button("Calibrate...")) {
                 calibration_context = settings.calibration.context;
@@ -1390,7 +1495,7 @@ int run_gui(const std::string& options) {
             if (ImGui::BeginPopupModal("Calibrate mouse", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 ImGui::TextWrapped("Leave the mouse still during measurement. For a rotating view, use a "
                                    "stationary textured scene.");
-                ImGui::BeginDisabled(calibration_status.running);
+                ImGui::BeginDisabled(passive_selected || calibration_status.running);
                 combo("Calibration context", &calibration_context,
                       "Desktop cursor\0Fixed crosshair / rotating view\0");
                 ImGui::RadioButton("Automatic", &calibration_method, 0);
@@ -1673,6 +1778,12 @@ int run_gui(const std::string& options) {
                 ImGui::TableNextColumn();
             }
             section("Preview window", "View the video and overlays in a separate, resizable window.");
+            if (passive_selected) {
+                hint("Preview only displays raw video in Connections. The separate overlay window is off.");
+                if (ImGui::Button("View raw video in Connections"))
+                    go_to(Page::connections);
+            }
+            ImGui::BeginDisabled(passive_selected);
             changed |= ImGui::Checkbox("Enable preview window", &settings.preview);
             hint("The preview stays open while you browse settings. Move it to another monitor or "
                  "resize it as needed. Closing it turns this option off.");
@@ -1708,6 +1819,7 @@ int run_gui(const std::string& options) {
                 ImGui::ColorEdit3("Search-area color", v.fov_color.data(), ImGuiColorEditFlags_NoInputs);
             if (ImGui::Button("Change search radius"))
                 go_to(Page::targeting);
+            ImGui::EndDisabled();
             if (columns)
                 ImGui::EndTable();
         }
@@ -1858,7 +1970,7 @@ int run_gui(const std::string& options) {
                             test_hub.start(chosen, opts);
                         });
                     };
-                    ImGui::BeginDisabled(busy() || test_hub.running());
+                    ImGui::BeginDisabled(passive_selected || busy() || test_hub.running());
                     if (ImGui::Button("Run selected checks", ImVec2(180, 36)))
                         launch(test_selection);
                     ImGui::SameLine();
@@ -2081,13 +2193,13 @@ int run_gui(const std::string& options) {
         ImGui::PushFont(detail_font);
         ImGui::Separator();
         if (ImGui::BeginTable("Connection overview", 3, ImGuiTableFlags_SizingStretchSame)) {
-            for (auto item : {std::pair{"VIDEO", receiving ? "Receiving" : "Waiting"},
+            for (auto item : {std::pair{"VIDEO", passive_selected ? receiver::video_state_label(video_state) : advanced_video},
                               {settings.mouse_backend == 1   ? "WINDOWS MOUSE"
                                : settings.mouse_backend == 2 ? "MAKCU"
                                : simulate                    ? "SIMULATOR"
                                                              : "MOUSE DEVICE",
-                               stats.pi_ready ? "Connected" : "Waiting"},
-                              {"ASSISTANCE", stats.active  ? "Active"
+                               passive_selected ? "Off" : stats.pi_ready ? "Connected" : "Waiting"},
+                              {"OUTPUT", passive_selected ? "Off" : stats.active  ? "Active"
                                              : stats.armed ? "Armed"
                                                            : "Disarmed"}}) {
                 ImGui::TableNextColumn();
@@ -2111,7 +2223,7 @@ int run_gui(const std::string& options) {
                 settings = stats.running ? app.settings() : previous_settings;
             }
         }
-        if (settings.preview) {
+        if (!passive_selected && settings.preview) {
             try {
                 gui.open_preview(separate_preview, smoke);
                 if (!separate_preview.update_options(settings.ui))
@@ -2138,8 +2250,12 @@ int run_gui(const std::string& options) {
                 preferences_changed = receiver::now_ns();
             }
         }
-        if (discovery_beacon)
-            discovery_beacon->configure(preferences.apply_setup(settings));
+        if (discovery_beacon) {
+            auto discovery_settings = preferences.apply_setup(settings);
+            if (passive_selected)
+                discovery_settings.frame_source = "udp";
+            discovery_beacon->configure(discovery_settings);
+        }
         ImGui::End();
         file_dialog.render();
         ImGui::Render();
@@ -2163,7 +2279,9 @@ int run_gui(const std::string& options) {
                     if (separate_preview.handle())
                         gui.save_frame("gui-smoke-preview.bmp", &separate_preview);
                     auto result = app.stats();
-                    if (!result.inferred || !result.pi_ready || !result.synchronized)
+                    if (passive_smoke ? !(saw_waiting && saw_live && saw_stale && drew_passive_frame &&
+                                          !result.running && !result.inferred && !result.sent && !result.pi_ready)
+                                      : (!result.inferred || !result.pi_ready || !result.synchronized))
                         smoke_exit = 2;
                     app.export_metrics("gui-smoke-metrics.csv");
                     std::vector<std::string> visible;
@@ -2188,6 +2306,17 @@ int run_gui(const std::string& options) {
                                                     {"main_context_restored",
                                                      ImGui::GetCurrentContext() == main_gui},
                                                     {"gui_error", error},
+                                                    {"passive_only", passive_selected},
+                                                    {"passive_waiting", saw_waiting},
+                                                    {"passive_live", saw_live},
+                                                    {"passive_stale", saw_stale},
+                                                    {"passive_inline", drew_passive_frame},
+                                                    {"passive_sender_mismatch", saw_sender_mismatch},
+                                                    {"passive_complete_frames", video.completed},
+                                                    {"passive_error", video.error},
+                                                    {"active_app_running", result.running},
+                                                    {"active_app_inferred", result.inferred},
+                                                    {"active_app_sent", result.sent},
                                                     {"width", ImGui::GetIO().DisplaySize.x},
                                                     {"navigation_overflow", navigation_overflow}}
                                          .dump(2);
@@ -2224,9 +2353,11 @@ int run_gui(const std::string& options) {
         } catch (...) {
         }
     }
+    video_preview.stop();
     app.stop();
     separate_preview.close();
     texture.clear();
+    inline_texture.clear();
     gui.close();
     return smoke_exit;
 }

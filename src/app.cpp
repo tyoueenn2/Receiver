@@ -142,6 +142,7 @@ void App::stop() {
         pending_benchmark_.reset();
         latest_.reset();
         preview_ = {};
+        stats_.video_complete_ns = 0;
         if (stats_.error.empty())
             stats_.status = "Stopped";
     }
@@ -364,6 +365,7 @@ void App::receive_loop() {
                         latest_.reset();
                         result_.reset();
                         preview_ = {};
+                        stats_.video_complete_ns = 0;
                         ++epoch_;
                         if (restarted)
                             injected_.release_all(ReleaseReason::sender_restart, true);
@@ -408,6 +410,7 @@ void App::receive_loop() {
                         latest_ = std::move(frame);
                         stats_.width = latest_->header.width;
                         stats_.height = latest_->header.height;
+                        stats_.video_complete_ns = latest_->complete_ns;
                         stats_.reassembly.add(double(latest_->complete_ns - latest_->first_ns) / 1e6);
                         cv_.notify_one();
                     }
@@ -628,6 +631,7 @@ void App::inference_loop() {
                 continue;
             stats_.width = picture->header.width;
             stats_.height = picture->header.height;
+            stats_.video_complete_ns = picture->complete_ns;
             calibration_frame_ = picture;
             latest_ = std::move(picture);
         }
