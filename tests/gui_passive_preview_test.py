@@ -52,6 +52,13 @@ def run(executable, compact=False):
                         break
                     except TimeoutError:
                         continue
+                    except ConnectionResetError as error:
+                        # Winsock reports ICMP Port Unreachable if our hello reaches the
+                        # UDP port before Receiver binds it. Keep the existing startup
+                        # deadline and retry only that Windows error.
+                        if getattr(error, "winerror", None) != 10054:
+                            raise
+                        continue
                 expected = struct.pack("!4sBBHQHHI", b"UVN1", 1, 2, 0, SESSION, 320, 320, 0)
                 assert packet == expected and from_address == receiver, (packet, from_address)
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as other_ip:
