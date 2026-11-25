@@ -135,7 +135,7 @@ struct GuiBackend {
     ~GuiBackend() {
         close();
     }
-    void open(bool compact, bool smoke) {
+    void open(bool compact, bool smoke, bool /*exact_hidden_size*/) {
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0)
             throw std::runtime_error(SDL_GetError());
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);

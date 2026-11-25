@@ -22,7 +22,17 @@ the matching category. Q/E moves between categories when you are not typing.
 | App preferences | Window behavior, theme color and keyboard shortcuts |
 | Diagnostics | Setup checks and live connection/performance details |
 
-Choose **Connections**, select a **Model** for live detection, and start the
+To check ordinary UDP video, open **Connections**, save the sending computer's
+**Sender IPv4 address**, then choose **Start preview only**. Start FrameSender
+with this Receiver as its destination. The picture appears directly on
+Connections: **Waiting** means no complete frame has arrived, **Live** means
+complete frames are arriving, and **Stale** marks a frozen last frame. Preview
+only is the default. It opens no model or mouse device, and output stays off.
+With FrameSender's automatic crop, preview requests a fixed 320 × 320 picture;
+manual crop still follows the sender's setting.
+
+For the existing model/setup workflow, choose **Connections > Advanced device
+session** while stopped, select a **Model** for live detection, and start the
 session. Turn on **Preview → Enable preview window** to inspect the video before arming assistance. The
 global **Arm assistance** control permits output; **Activation** determines when
 that output runs. **Disarm** or **Delete** stops it. Accepted settings restore
@@ -63,11 +73,10 @@ From a terminal, the same demo is `py tools/ui_demo.py`; use `--exe path/to/rece
 
 ## Local mouse and automated checks
 
-For video from another PC, set `sender_ip` in `user-settings/setup.json` to that
-PC's IPv4 address and reload the file in **Connections**. Select the UDP picture
-source and start the session. Run
+For video from another PC, save its IPv4 address in **Connections > Sender IPv4
+address** while stopped. Run
 `frame_sender.exe --host RECEIVER_IPV4 --output 0` on the sending PC. FrameSender
-automatically follows the loaded model's input size, including live model changes.
+automatically follows the preview size or the advanced session's loaded model size.
 See [sender setup and compatibility](technical/SENDER.md).
 
 With FrameSender's GUI, **Find Receiver** fills this Receiver's address and video

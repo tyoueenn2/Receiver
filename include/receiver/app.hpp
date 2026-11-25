@@ -28,6 +28,7 @@ struct Stats {
     bool running = false, armed = false, active = false, synchronized = false, pi_ready = false,
          calibration_only = false;
     int width = 0, height = 0;
+    int64_t video_complete_ns = 0;
     uint8_t physical = 0;
     double clock_uncertainty_ms = 0, frame_age_ms = 0;
     double gpu_free_mib = 0, gpu_total_mib = 0;

@@ -29,6 +29,7 @@ class Preferences {
     Settings apply_setup(const Settings& settings) const;
     Settings reload_setup(const Settings& settings);
     Settings connect_pi(const Settings& settings, const std::string& ip, uint16_t port);
+    Settings connect_sender(const Settings& settings, const std::string& ip);
     Settings load_profile(const std::string& path) const;
     void save(const Settings& settings, const std::string& profile_path,
               const std::vector<std::string>& names = {});

@@ -66,6 +66,16 @@ Settings Preferences::connect_pi(const Settings& settings, const std::string& ip
     setup_ = std::move(next.setup_);
     return result;
 }
+Settings Preferences::connect_sender(const Settings& settings, const std::string& ip) {
+    address(ip, 0);
+    auto next = *this;
+    next.setup_ = read_setup(setup_path());
+    next.setup_["sender_ip"] = ip;
+    auto result = next.apply_setup(settings);
+    write_json_atomic(next.setup_, setup_path());
+    setup_ = std::move(next.setup_);
+    return result;
+}
 std::string Preferences::key(const std::string& model) {
     if (model.empty())
         return {};
