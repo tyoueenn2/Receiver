@@ -23,7 +23,7 @@ def fragment(seq, i):
     return header + frame[offset:offset + stride]
 
 
-def run(executable):
+def run(executable, compact=False):
     with tempfile.TemporaryDirectory(prefix="receiver-passive-") as temporary, \
             socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender, \
             socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as forbidden_output:
@@ -37,6 +37,8 @@ def run(executable):
         command = [str(Path(executable).resolve()), "--smoke-test", "--test-passive-preview",
                    "--test-frame-port=" + str(port),
                    "--test-pi-port=" + str(forbidden_output.getsockname()[1])]
+        if compact:
+            command.append("--compact")
         wrong_ip_supported = False
         with subprocess.Popen(command, cwd=temporary) as process:
             try:
@@ -89,6 +91,7 @@ def run(executable):
             assert state[flag], state
         assert state["page"] == "connections" and not state["passive_error"] and not state["gui_error"], state
         assert state["passive_complete_frames"] == 1, state
+        assert state["passive_wide_layout"] == (not compact), state
         if wrong_ip_supported:
             assert state["passive_sender_mismatch"], state
         assert not any(state[k] for k in ("active_app_running", "active_app_inferred", "active_app_sent")), state
@@ -110,8 +113,9 @@ def run(executable):
         image = (Path(temporary) / "gui-smoke.bmp").read_bytes()
         assert image.startswith(b"BM") and len(image) > 10000, "Missing rendered GUI frame"
         assert image.count(PIXEL[:3]) > 200, "Raw test frame color was not visible"
-        print("Preview waited for a complete frame, displayed its pixels, became stale, and never ran output.")
+        print(f"{int(state['width'])} px: preview waited, displayed the complete frame, became stale, and never ran output.")
 
 
 if __name__ == "__main__":
     run(sys.argv[1])
+    run(sys.argv[1], compact=True)

@@ -129,6 +129,33 @@ void section(const char* title, const char* description) {
     ImGui::PopFont();
     hint(description);
 }
+ImVec4 video_status_color(receiver::VideoState state) {
+    using receiver::VideoState;
+    switch (state) {
+    case VideoState::live:    return ImVec4(.40f, .89f, .70f, 1.f);
+    case VideoState::waiting:
+    case VideoState::stale:   return ImVec4(1.f, .78f, .42f, 1.f);
+    case VideoState::error:   return ImVec4(1.f, .59f, .54f, 1.f);
+    default:                 return muted;
+    }
+}
+
+void video_badge(receiver::VideoState state) {
+    const ImVec4 color = video_status_color(state);
+    ImGui::PushFont(label_font);
+    ImGui::PushStyleColor(ImGuiCol_Text, color);
+    const auto p = ImGui::GetCursorScreenPos();
+    const float radius = 3.5f;
+    ImGui::GetWindowDrawList()->AddCircleFilled(
+        ImVec2(p.x + radius, p.y + ImGui::GetTextLineHeight() * .5f), radius,
+        ImGui::GetColorU32(color));
+    ImGui::Dummy(ImVec2(radius * 2, ImGui::GetTextLineHeight()));
+    ImGui::SameLine(0, 7);
+    ImGui::TextUnformatted(receiver::video_state_label(state));
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+}
+
 void field_label(const char* label, const char* value = nullptr) {
     const float right = ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x -
                         (value ? ImGui::CalcTextSize(value).x : 0);
@@ -390,6 +417,8 @@ int run_gui(const std::string& options) {
     std::vector<lan_discovery::Endpoint> found_pis;
     model_draft = settings.model;
     std::string sender_draft = settings.sender_ip;
+    std::string sender_feedback;
+    bool sender_feedback_error = false;
     auto mark_preferences = [&] {
         preferences_dirty = true;
         preferences_changed = receiver::now_ns();
@@ -626,16 +655,18 @@ int run_gui(const std::string& options) {
         ImGui::SameLine();
         ImGui::TextColored(accent, "RECEIVER");
         ImGui::PopFont();
-        ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 230);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(simulate && !passive_selected ? muted : accent, "%s",
-                           passive_selected ? "PREVIEW ONLY"
-                           : settings.color.mode == 1 ? "HSV COLOR"
-                           : simulate               ? "PRACTICE MODE"
-                           : settings.model.empty() ? "NO MODEL SELECTED"
-                                                    : "MODEL SELECTED");
-        hint(passive_selected ? "RECEIVE-ONLY VIDEO  /  NO MODEL  /  OUTPUT OFF"
-                              : "DEVICE SETUP  /  TARGETING  /  ASSISTANCE");
+        if (passive_selected) {
+            hint("VIDEO WORKSPACE");
+        } else {
+            ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - 230);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(simulate ? muted : accent, "%s",
+                               settings.color.mode == 1 ? "HSV COLOR"
+                               : simulate               ? "PRACTICE MODE"
+                               : settings.model.empty() ? "NO MODEL SELECTED"
+                                                        : "MODEL SELECTED");
+            hint("DEVICE SETUP  /  TARGETING  /  ASSISTANCE");
+        }
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Separator, accent);
         ImGui::Separator();
@@ -693,7 +724,7 @@ int run_gui(const std::string& options) {
             }
         }
         const char* next_step =
-            passive_selected ? "See the raw UDP picture in Connections. No model or mouse device is used."
+            passive_selected ? "Open Connections to see the incoming video."
             : !stats.error.empty() ? "Something needs attention. Stop, check the details below, then try again."
             : stats.model_loading || stats.benchmarking || busy()
                 ? "Getting ready. Loading a new model can take a few minutes."
@@ -727,7 +758,8 @@ int run_gui(const std::string& options) {
         ImGui::BeginDisabled(busy() || test_hub.running() || !setup_ready || pi_search.valid());
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(.13f, .46f, .80f, 1));
         if (passive_selected) {
-            if (ImGui::Button(video.running ? "Stop preview" : "Start preview only", ImVec2(170, 34))) {
+            if (ImGui::Button(video.running ? "Stop preview###video-toggle" : "Start preview###video-toggle",
+                              ImVec2(150, 34))) {
                 if (video.running) {
                     video_preview.stop();
                     inline_texture.clear();
@@ -739,9 +771,12 @@ int run_gui(const std::string& options) {
                 video_state = video.state();
                 go_to(Page::connections);
             }
-            ImGui::SameLine(0, 20);
+            ImGui::SameLine(0, 16);
             ImGui::AlignTextToFramePadding();
-            ImGui::Text("Video: %s | Mouse output: Off", receiver::video_state_label(video_state));
+            ImGui::TextUnformatted("Preview only");
+            ImGui::SameLine(0, 10);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("/  Mouse output off");
         } else if (!stats.running) {
             if (ImGui::Button(simulate ? "Start practice" : "Start session", ImVec2(150, 34))) {
                 auto cfg = session_settings(settings);
@@ -781,7 +816,8 @@ int run_gui(const std::string& options) {
                 app.arm(false);
             ImGui::PopStyleColor(2);
         }
-        hint(next_step);
+        if (!passive_selected || page != Page::connections)
+            hint(next_step);
         if ((!passive_selected && !stats.error.empty()) || !error.empty()) {
             ImGui::TextColored(ImVec4(1, .65f, .5f, 1), "Unable to finish that step");
             ImGui::TextWrapped("%s", error.empty() ? stats.error.c_str() : error.c_str());
@@ -844,6 +880,7 @@ int run_gui(const std::string& options) {
         ImGui::PopStyleVar(2);
         ImGui::SameLine();
         const Page rendered_page = page;
+        bool passive_wide_layout = false;
         const std::string controls_id = "Settings content##" + std::to_string(static_cast<int>(page));
         ImGui::BeginChild(controls_id.c_str(), ImVec2(0, body_height), ImGuiChildFlags_Borders);
         ImGui::PushItemWidth(-1);
@@ -857,63 +894,163 @@ int run_gui(const std::string& options) {
                 ImGui::Separator();
                 break;
             }
-        if (rendered_page == Page::connections) {
-            section("Session type", "Preview only is the default and never connects to a mouse device.");
+        if (rendered_page == Page::connections && passive_selected) {
+            const auto configured = preferences.apply_setup(settings);
+            const bool wide = passive_wide_layout = ImGui::GetContentRegionAvail().x >= 820.f;
+            using receiver::VideoState;
+            const bool mismatch = video.recent_sender_mismatch() && video_state == VideoState::waiting;
+            const bool running_or_busy = stats.running || video.running || busy() || test_hub.running() ||
+                                         pi_search.valid() || smoke || demo;
+            const auto render_preview = [&] {
+                ImGui::PushFont(label_font);
+                ImGui::TextUnformatted("Incoming video");
+                ImGui::PopFont();
+                ImGui::SameLine(0, 16);
+                video_badge(video_state);
+                ImGui::Spacing();
+
+                // Keep the same viewport while waiting, playing and showing the last image.
+                const float height = wide ? 310.f :
+                    std::clamp(ImGui::GetIO().DisplaySize.y - 580.f, 125.f, 180.f);
+                const ImVec2 size{std::max(24.f, ImGui::GetContentRegionAvail().x), height};
+                const ImVec2 a = ImGui::GetCursorScreenPos();
+                const ImVec2 b{a.x + size.x, a.y + size.y};
+                auto* draw = ImGui::GetWindowDrawList();
+                draw->AddRectFilled(a, b, IM_COL32(6, 11, 19, 255), 8.f);
+                if (video.frame)
+                    inline_texture.update(*video.frame);
+                else if (inline_texture.id())
+                    inline_texture.clear();
+
+                if (video.frame && inline_texture.id()) {
+                    const float scale = std::min({2.f, (size.x - 16) / inline_texture.w,
+                                                  (size.y - 16) / inline_texture.h});
+                    const ImVec2 image_size{inline_texture.w * scale, inline_texture.h * scale};
+                    const ImVec2 pos{a.x + (size.x - image_size.x) * .5f,
+                                     a.y + (size.y - image_size.y) * .5f};
+                    draw->AddImage(inline_texture.id(), pos, ImVec2(pos.x + image_size.x, pos.y + image_size.y));
+                    drew_passive_frame = true;
+                } else {
+                    const char* placeholder = video_state == VideoState::error ? "Preview unavailable"
+                                              : mismatch ? "Sender address mismatch"
+                                              : video_state == VideoState::waiting ? "Waiting for video"
+                                                                                   : "Preview is off";
+                    const ImVec2 center{a.x + size.x * .5f, a.y + size.y * .5f - 12.f};
+                    const auto icon = IM_COL32(105, 147, 184, 255);
+                    draw->AddCircleFilled(center, 21.f, IM_COL32(16, 29, 45, 255));
+                    draw->AddRect(ImVec2(center.x - 10.f, center.y - 7.f),
+                                  ImVec2(center.x + 10.f, center.y + 5.f), icon, 2.f,
+                                  ImDrawFlags_None, 1.5f);
+                    draw->AddLine(ImVec2(center.x - 4.f, center.y + 8.f),
+                                  ImVec2(center.x + 4.f, center.y + 8.f), icon, 1.5f);
+                    ImGui::PushFont(label_font);
+                    const auto label_size = ImGui::CalcTextSize(placeholder);
+                    draw->AddText(ImVec2(center.x - label_size.x * .5f, center.y + 29.f),
+                                  ImGui::GetColorU32(ImGuiCol_Text), placeholder);
+                    ImGui::PopFont();
+                }
+                draw->AddRect(a, b, ImGui::GetColorU32(ImGuiCol_Border), 8.f);
+                ImGui::Dummy(size);
+                if (video.frame)
+                    hint((std::to_string(video.frame->header.width) + " x " +
+                          std::to_string(video.frame->header.height) + "  /  " +
+                          std::to_string(video.completed) +
+                          (video.completed == 1 ? " complete frame" : " complete frames")).c_str());
+                if (mismatch)
+                    ImGui::TextWrapped("A Sender announced itself from a different IP. Stop preview, correct "
+                                       "the Sender IPv4 address, then start again.");
+                else if (video_state == VideoState::waiting)
+                    hint("Start FrameSender and wait for the first complete frame.");
+                else if (video_state == VideoState::stale)
+                    hint("Showing the last frame. If the sending screen is still, change it to check for fresh video.");
+                else if (!video.error.empty())
+                    ImGui::TextWrapped("Video error: %s", video.error.c_str());
+                else if (video_state == VideoState::off)
+                    hint("Set the Sender IPv4 address, then select Start preview.");
+            };
+            const auto render_setup = [&] {
+                ImGui::PushFont(label_font);
+                ImGui::TextUnformatted("Sender setup");
+                ImGui::PopFont();
+                hint("Enter the IPv4 address of the computer running FrameSender.");
+                ImGui::Spacing();
+                ImGui::BeginDisabled(video.running || busy() || !setup_ready || smoke || demo);
+                if (input_string("Sender IPv4 address", sender_draft))
+                    sender_feedback.clear();
+                ImGui::BeginDisabled(sender_draft == configured.sender_ip);
+                if (ImGui::Button("Save address")) {
+                    try {
+                        settings = preferences.connect_sender(settings, sender_draft);
+                        sender_draft = settings.sender_ip;
+                        mark_preferences();
+                        error.clear();
+                        sender_feedback = "Sender address saved.";
+                        sender_feedback_error = false;
+                    } catch (const std::exception& e) {
+                        sender_feedback = e.what();
+                        sender_feedback_error = true;
+                    }
+                }
+                ImGui::EndDisabled();
+                ImGui::EndDisabled();
+                if (video.running)
+                    hint("Stop preview to change this address.");
+                else if (!sender_feedback.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, video_status_color(
+                        sender_feedback_error ? VideoState::error : VideoState::live));
+                    ImGui::TextWrapped("%s", sender_feedback.c_str());
+                    ImGui::PopStyleColor();
+                } else if (sender_draft != configured.sender_ip)
+                    hint("Save to use this address next time.");
+                ImGui::Spacing();
+                if (ImGui::TreeNode("Connection details")) {
+                    ImGui::TextWrapped("Allowed Sender: %s", configured.sender_ip.c_str());
+                    ImGui::TextWrapped("Listen: %s:%d", configured.bind_ip.c_str(), configured.frame_port);
+                    hint("The automatic preview crop is 320 x 320. Manual crop stays under Sender's control.");
+                    ImGui::TreePop();
+                }
+                if (ImGui::TreeNode("Session settings")) {
+                    hint("Preview only does not use a model or a mouse device.");
+                    ImGui::BeginDisabled(running_or_busy);
+                    if (ImGui::Button("Switch to advanced session"))
+                        passive_selected = false;
+                    ImGui::EndDisabled();
+                    if (video.running)
+                        hint("Stop preview to switch sessions.");
+                    ImGui::TreePop();
+                }
+            };
+
+            if (wide) {
+                if (ImGui::BeginTable("Video workspace", 2, ImGuiTableFlags_SizingStretchProp |
+                                                               ImGuiTableFlags_BordersInnerV)) {
+                    ImGui::TableSetupColumn("Preview", ImGuiTableColumnFlags_WidthStretch, 2.f);
+                    ImGui::TableSetupColumn("Setup", ImGuiTableColumnFlags_WidthStretch, 1.f);
+                    ImGui::TableNextColumn();
+                    render_preview();
+                    ImGui::TableNextColumn();
+                    render_setup();
+                    ImGui::EndTable();
+                }
+            } else {
+                render_preview();
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                render_setup();
+            }
+        } else if (rendered_page == Page::connections) {
+            section("Session type", "Advanced device session");
             ImGui::BeginDisabled(stats.running || video.running || busy() || test_hub.running() ||
                                  pi_search.valid() || smoke || demo);
-            if (ImGui::RadioButton("Preview only (UDP video)", passive_selected)) {
+            if (ImGui::Button("Switch to preview only")) {
                 passive_selected = true;
                 sender_draft = preferences.apply_setup(settings).sender_ip;
-            }
-            if (ImGui::RadioButton("Advanced device session", !passive_selected))
-                passive_selected = false;
-            ImGui::EndDisabled();
-            if (stats.running || video.running)
-                hint("Stop the current session to switch.");
-        }
-
-        if (rendered_page == Page::connections && passive_selected) {
-            section("UDP video", "Start FrameSender on the other computer. No model or mouse settings are needed.");
-            const auto configured = preferences.apply_setup(settings);
-            ImGui::TextWrapped("Listening address: %s:%d  |  Sender IP: %s", configured.bind_ip.c_str(),
-                               configured.frame_port, configured.sender_ip.c_str());
-            ImGui::BeginDisabled(video.running || busy() || !setup_ready || smoke || demo);
-            input_string("Sender IPv4 address", sender_draft);
-            if (ImGui::Button("Save Sender IP")) {
-                try {
-                    settings = preferences.connect_sender(settings, sender_draft);
-                    mark_preferences();
-                    error.clear();
-                    notice = "Sender IP saved. Start preview only to listen for that sender.";
-                } catch (const std::exception& e) { error = e.what(); }
+                sender_feedback.clear();
             }
             ImGui::EndDisabled();
-            if (video.running)
-                hint("Stop preview before changing the sender address.");
-            ImGui::Text("Video: %s   |   Mouse output: Off", receiver::video_state_label(video_state));
-            if (video_state == receiver::VideoState::waiting)
-                hint("Waiting for a complete frame from the configured Sender IPv4 address.");
-            if (video.recent_sender_mismatch() && video_state != receiver::VideoState::live)
-                ImGui::TextWrapped("Sender IP doesn't match. Check the sender's IPv4 address, stop preview, "
-                                   "then save the correct address.");
-            if (video_state == receiver::VideoState::stale)
-                hint("No fresh complete frame. Showing the last received image.");
-            if (!video.error.empty())
-                ImGui::TextWrapped("Video error: %s", video.error.c_str());
-            if (video.frame) {
-                ImGui::Text("%u x %u  |  %llu complete frames",
-                            unsigned(video.frame->header.width), unsigned(video.frame->header.height),
-                            static_cast<unsigned long long>(video.completed));
-                inline_texture.update(*video.frame);
-                if (inline_texture.id()) {
-                    const float width = std::max(1.f, ImGui::GetContentRegionAvail().x);
-                    const float scale = std::min({2.f, width / inline_texture.w, 360.f / inline_texture.h});
-                    ImGui::Image(inline_texture.id(), ImVec2(inline_texture.w * scale, inline_texture.h * scale));
-                    drew_passive_frame = true;
-                }
-            } else if (inline_texture.id())
-                inline_texture.clear();
-            hint("Automatic Sender crop uses 320 x 320 for preview. Sender's manual crop stays under its control.");
+            if (stats.running)
+                hint("End the session to switch.");
         }
 
         if (rendered_page == Page::connections && !passive_selected) {
@@ -2192,16 +2329,20 @@ int run_gui(const std::string& options) {
         ImGui::EndChild();
         ImGui::PushFont(detail_font);
         ImGui::Separator();
-        if (ImGui::BeginTable("Connection overview", 3, ImGuiTableFlags_SizingStretchSame)) {
-            for (auto item : {std::pair{"VIDEO", passive_selected ? receiver::video_state_label(video_state) : advanced_video},
+        if (passive_selected) {
+            ImGui::TextDisabled("UDP VIDEO");
+            if (rendered_page != Page::connections) {
+                ImGui::SameLine();
+                ImGui::TextUnformatted(receiver::video_state_label(video_state));
+            }
+        } else if (ImGui::BeginTable("Connection overview", 3, ImGuiTableFlags_SizingStretchSame)) {
+            for (auto item : {std::pair{"VIDEO", advanced_video},
                               {settings.mouse_backend == 1   ? "WINDOWS MOUSE"
                                : settings.mouse_backend == 2 ? "MAKCU"
                                : simulate                    ? "SIMULATOR"
                                                              : "MOUSE DEVICE",
-                               passive_selected ? "Off" : stats.pi_ready ? "Connected" : "Waiting"},
-                              {"OUTPUT", passive_selected ? "Off" : stats.active  ? "Active"
-                                             : stats.armed ? "Armed"
-                                                           : "Disarmed"}}) {
+                               stats.pi_ready ? "Connected" : "Waiting"},
+                              {"OUTPUT", stats.active ? "Active" : stats.armed ? "Armed" : "Disarmed"}}) {
                 ImGui::TableNextColumn();
                 ImGui::TextDisabled("%s", item.first);
                 ImGui::SameLine();
@@ -2307,6 +2448,7 @@ int run_gui(const std::string& options) {
                                                      ImGui::GetCurrentContext() == main_gui},
                                                     {"gui_error", error},
                                                     {"passive_only", passive_selected},
+                                                    {"passive_wide_layout", passive_wide_layout},
                                                     {"passive_waiting", saw_waiting},
                                                     {"passive_live", saw_live},
                                                     {"passive_stale", saw_stale},
