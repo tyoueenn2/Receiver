@@ -330,4 +330,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" packages/* --verify-tag --generate-notes --title "Receiver $RELEASE_TAG (hardware-free build)"
+        run: |
+          set -euo pipefail
+          existing_assets() {
+            gh release view "$RELEASE_TAG" --json assets,isDraft \
+              --jq 'select(.isDraft == false) | .assets[].name'
+          }
+          # A release created in the GitHub UI can trigger this same tag workflow.
+          # Only no-op if all exact-commit packages and checksums are already present.
+          if assets=$(existing_assets 2>/dev/null); then
+            for package in packages/*; do
+              name=${package##*/}
+              if ! grep -Fxq -- "$name" <<< "$assets"; then
+                echo "::error::Existing release $RELEASE_TAG is missing $name; no assets were changed."
+                exit 1
+              fi
+            done
+            echo "Release $RELEASE_TAG already has all tested package names and checksums."
+          else
+            gh release create "$RELEASE_TAG" packages/* --verify-tag --generate-notes \
+              --title "Receiver $RELEASE_TAG (hardware-free build)"
+          fi
