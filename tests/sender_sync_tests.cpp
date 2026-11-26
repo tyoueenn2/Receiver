@@ -5,11 +5,15 @@
 
 using namespace receiver;
 namespace {
-template <class F> void until(F predicate) {
+template <class F> void until(const App& app, const std::string& waiting_for, F predicate) {
     const auto deadline = now_ns() + 3'000'000'000ll;
     while (!predicate()) {
-        if (now_ns() > deadline)
-            throw std::runtime_error("Sender synchronization timed out");
+        if (now_ns() > deadline) {
+            const auto error = app.stats().error;
+            if (!error.empty())
+                throw std::runtime_error("Receiver failed while waiting for " + waiting_for + ": " + error);
+            throw std::runtime_error("Sender synchronization timed out waiting for " + waiting_for);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 }
@@ -108,8 +112,8 @@ class Peer {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
     }
-    void expect(uint16_t size) {
-        until([&] {
+    void expect(const App& app, uint16_t size, const std::string& phase) {
+        until(app, std::to_string(size) + "px resolution " + phase, [&] {
             poll();
             return !requests.empty() && requests.back() == size;
         });
@@ -127,6 +131,28 @@ void protocol_vectors() {
 }
 
 void synchronization() {
+    Settings s;
+    s.model = "initial.pt";
+    s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
+    // Keep Receiver and Pi ports below the ephemeral range and absorb Pi datagrams
+    // so Windows does not report asynchronous errors from an unopened UDP port.
+    std::unique_ptr<UdpSocket> pi_sink;
+    for (int attempt = 0; attempt < 100 && !pi_sink; ++attempt) {
+        const int port = 12000 + int(random_id() % 18000);
+        try {
+            UdpSocket receiver_probe(s.bind_ip, port);
+            pi_sink = std::make_unique<UdpSocket>(s.pi_ip, port + 1);
+            s.frame_port = port;
+            s.pi_port = port + 1;
+        } catch (const std::runtime_error&) {
+            // Probe another pair if either port is occupied or reserved.
+        }
+    }
+    if (!pi_sink)
+        throw std::runtime_error("No available loopback ports for sender synchronization");
+    s.preview = true;
+    s.max_age_ms = 250;
+    Peer peer(s.frame_port);
     std::atomic<bool> initial_allowed{false}, replacement_allowed{false};
     App app([&](const Settings& s, const BackendProgress&, const BackendCancel& cancel) {
         while ((s.model == "initial.pt" && !initial_allowed) ||
@@ -139,23 +165,18 @@ void synchronization() {
             throw std::runtime_error("Bad checkpoint");
         return std::make_unique<FakeBackend>(s.model == "replacement.pt" ? 320 : 160);
     });
-    Settings s;
-    s.model = "initial.pt";
-    s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
-    s.frame_port = 30000 + int(random_id() % 20000);
-    s.pi_port = s.frame_port + 1;
-    s.preview = true;
-    s.max_age_ms = 250;
     app.start(s);
-    Peer peer(s.frame_port);
     peer.pump_for(100);
     CHECK(peer.requests.empty()); // Model loading must not publish a guessed profile size.
     initial_allowed = true;
-    peer.expect(160);
-    until([&] { peer.poll(); return peer.requests.size() >= 2; }); // First request can be lost.
+    peer.expect(app, 160, "after initial load");
+    until(app, "a repeated initial resolution request", [&] {
+        peer.poll();
+        return peer.requests.size() >= 2;
+    }); // First request can be lost.
     CHECK(std::all_of(peer.requests.begin(), peer.requests.end(), [](auto size) { return size == 160; }));
     peer.frames = true;
-    until([&] {
+    until(app, "a synchronized 160px preview", [&] {
         peer.poll();
         auto preview = app.preview();
         return app.stats().synchronized && app.stats().inferred && preview.frame &&
@@ -171,8 +192,8 @@ void synchronization() {
     CHECK(!peer.requests.empty());
     CHECK(std::all_of(peer.requests.begin(), peer.requests.end(), [](auto size) { return size == 160; }));
     replacement_allowed = true;
-    peer.expect(320); // The loaded backend's size wins over the requested 512.
-    until([&] {
+    peer.expect(app, 320, "after replacement"); // The loaded backend's size wins over the requested 512.
+    until(app, "a 320px preview", [&] {
         peer.poll();
         auto preview = app.preview();
         return preview.frame && preview.frame->header.width == 320;
@@ -182,9 +203,9 @@ void synchronization() {
     s.model = "broken.pt";
     s.input_size = 960;
     app.configure(s);
-    until([&] { peer.poll(); return !app.stats().model_error.empty(); });
+    until(app, "the replacement error", [&] { peer.poll(); return !app.stats().model_error.empty(); });
     peer.requests.clear();
-    peer.expect(320);
+    peer.expect(app, 320, "after rollback");
     CHECK(app.settings().input_size == 320 && !app.stats().armed);
 
     peer.frames = false;
@@ -192,21 +213,21 @@ void synchronization() {
     peer.requests.clear();
     peer.pump_for(300, false);
     CHECK(peer.requests.empty()); // Stop negotiating with an expired sender lease.
-    peer.expect(320);
+    peer.expect(app, 320, "after renewing the sender lease");
     ++peer.session;
     peer.requests.clear();
-    peer.expect(320); // Same endpoint, fresh sender session.
+    peer.expect(app, 320, "for the new sender session"); // Same endpoint, fresh sender session.
 
     app.stop();
     s = app.settings();
     app.start(s);
     peer.requests.clear();
-    peer.expect(320); // Receiver restart with the sender still running.
+    peer.expect(app, 320, "after restarting Receiver"); // The sender is still running.
     s = app.settings();
     s.color.mode = 1;
     s.input_size = 64;
     app.configure(s);
-    peer.expect(64);
+    peer.expect(app, 64, "in HSV-only mode");
     CHECK(app.stats().error.empty() && !app.stats().armed);
     app.stop();
 }
