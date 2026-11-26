@@ -11,45 +11,49 @@ from abcurves_worker import Movement
 
 class AbcurvesWorkerTests(unittest.TestCase):
     def make_movement(self):
-        planner = Mock()
-        load = Mock(return_value=planner)
-        module = SimpleNamespace(__version__='2.0.0', load=load)
-        with patch.dict(sys.modules, abcurves=module):
+        pipeline = Mock()
+        module = SimpleNamespace(__version__='2.0.0')
+        with patch.dict(sys.modules, abcurves=module), patch('abcurves_worker.load_pipeline', return_value=pipeline):
             movement = Movement()
-        load.assert_called_once_with(prewarm=True)
-        return movement, planner
+        return movement, pipeline
 
-    def test_continuous_clock_and_coordinate_conversion(self):
-        movement, planner = self.make_movement()
-        planner.advance.side_effect = [
-            {'xy': [(1, -2), (6.5, -7.25)]},
-            {'xy': [(9, -12)]},
+    def test_preserves_native_reports_and_target_clock(self):
+        movement, pipeline = self.make_movement()
+        pipeline.advance.side_effect = [
+            {'reports': [(1, 2), (0, 0), (-2, 1)]},
+            {'reports': [(3, -2), (1, 5)]},
         ]
-        first = movement.advance(dict(generation=1, step_ms=8, target=(20, 12), executed=(3, 4)))
-        second = movement.advance(dict(generation=1, step_ms=12, target=(-3, 6), executed=(6, 7)))
+        first = movement.advance(dict(generation=1, step_ms=3, target=(20, 12), executed=(3, 4)))
+        second = movement.advance(dict(generation=1, step_ms=2, target=(-3, 6), executed=(6, 7)))
 
-        planner.reset.assert_called_once_with()
-        self.assertEqual(planner.update_target.call_args_list, [
+        pipeline.reset.assert_called_once_with()
+        self.assertEqual(pipeline.update_target.call_args_list, [
             call((23, -16), timestamp_us=0),
-            call((3, -13), timestamp_us=8000),
+            call((3, -13), timestamp_us=3000),
         ])
-        self.assertEqual(planner.advance.call_args_list, [call(8000), call(20000)])
-        self.assertEqual(first, dict(status='result', dx=3.5, dy=3.25))
-        self.assertEqual(second, dict(status='result', dx=3, dy=5))
+        self.assertEqual(pipeline.advance.call_args_list, [call(3000), call(5000)])
+        self.assertEqual(first, dict(status='result', reports=[[1, 2], [0, 0], [-2, 1]]))
+        self.assertEqual(second, dict(status='result', reports=[[3, -2], [1, 5]]))
 
-    def test_new_generation_restarts_planner_clock(self):
-        movement, planner = self.make_movement()
-        planner.advance.return_value = {'xy': [(2, 3)]}
+    def test_new_generation_restarts_planner_and_renderer_clock(self):
+        movement, pipeline = self.make_movement()
+        pipeline.advance.side_effect = [{'reports': [(2, 3)] * 32}, {'reports': [(-4, 2)]}]
         movement.advance(dict(generation=4, step_ms=32, target=(10, 2), executed=(0, 0)))
         result = movement.advance(dict(generation=5, step_ms=1, target=(-10, -2), executed=(0, 0)))
 
-        self.assertEqual(planner.reset.call_args_list, [call(), call()])
-        self.assertEqual(planner.update_target.call_args_list, [
+        self.assertEqual(pipeline.reset.call_args_list, [call(), call()])
+        self.assertEqual(pipeline.update_target.call_args_list, [
             call((10, -2), timestamp_us=0),
             call((-10, 2), timestamp_us=0),
         ])
-        self.assertEqual(planner.advance.call_args_list, [call(32000), call(1000)])
-        self.assertEqual(result, dict(status='result', dx=2, dy=-3))
+        self.assertEqual(pipeline.advance.call_args_list, [call(32000), call(1000)])
+        self.assertEqual(result, dict(status='result', reports=[[-4, 2]]))
+
+    def test_invalid_output_length(self):
+        movement, pipeline = self.make_movement()
+        pipeline.advance.return_value = {'reports': [(0, 0)]}
+        with self.assertRaisesRegex(RuntimeError, 'output length'):
+            movement.advance(dict(generation=4, step_ms=8, target=(10, 2), executed=(0, 0)))
 
     def test_invalid_requests_leave_planner_untouched(self):
         movement, planner = self.make_movement()
@@ -68,8 +72,8 @@ class AbcurvesWorkerTests(unittest.TestCase):
         with patch.dict(sys.modules, abcurves=None):
             with self.assertRaisesRegex(RuntimeError, 'Install ABCurves 2'):
                 Movement()
-        load = Mock()
-        with patch.dict(sys.modules, abcurves=SimpleNamespace(__version__='1.9.0', load=load)):
+        with patch.dict(sys.modules, abcurves=SimpleNamespace(__version__='1.9.0')), \
+                patch('abcurves_worker.load_pipeline') as load:
             with self.assertRaisesRegex(RuntimeError, 'requires ABCurves 2'):
                 Movement()
         load.assert_not_called()

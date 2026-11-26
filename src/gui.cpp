@@ -1802,7 +1802,7 @@ int run_gui(const std::string& options) {
                 changed |= slider_float("Smooth variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
             }
             if (h.path == receiver::HumanizationSettings::abcurves_path) {
-                hint("Install ABCurves 2 in the configured Python environment to use the Continuous Planner.");
+                hint("Install ABCurves 2 from its checkout in the configured Python environment to use its planner and renderer.");
                 if (!stats.movement_status.empty())
                     ImGui::TextWrapped("%s", stats.movement_status.c_str());
             } else if (ImGui::CollapsingHeader("Random jitter")) {

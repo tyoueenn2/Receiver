@@ -790,9 +790,19 @@ void App::pi_loop() {
         int64_t observed, deadline, first_ns;
         double x, y;
     };
+    struct CurvePlayback {
+        CurveFrame frame;
+        AbcurvesWorker::Reply rendered;
+        int64_t due;
+        size_t offset = 0;
+        int dx = 0, dy = 0;
+    };
     std::optional<CurveFrame> curve_next, curve_pending;
+    std::optional<CurvePlayback> curve_playback;
+    std::optional<std::pair<int64_t, int64_t>> curve_physical;
     uint64_t curve_generation = 1;
-    int64_t curve_last_observed = 0;
+    constexpr int64_t curve_physical_quiet_ns = 20'000'000;
+    int64_t curve_last_observed = 0, curve_report_after = 0, curve_yield_until = 0;
     double curve_executed_x = 0, curve_executed_y = 0;
     auto reset_curve = [&] {
         if (curve_last_observed)
@@ -801,6 +811,7 @@ void App::pi_loop() {
         curve_executed_x = curve_executed_y = 0;
         curve_next.reset();
         curve_pending.reset();
+        curve_playback.reset();
     };
     auto reset_controller = [&] {
         controller.reset();
@@ -843,7 +854,10 @@ void App::pi_loop() {
             shutdown_deadline = loop_start + 100'000'000;
         if (shutdown_deadline && loop_start >= shutdown_deadline)
             break;
-        control_wake_.wait(pi_udp ? &socket : nullptr, bool(local_mouse));
+        const auto curve_due = curve_playback && !shutdown_deadline
+                                   ? std::min(curve_playback->due, curve_playback->frame.deadline)
+                                   : 0;
+        control_wake_.wait(pi_udp ? &socket : nullptr, bool(local_mouse), curve_due);
         auto now = now_ns();
 #ifdef _WIN32
         if (GetAsyncKeyState(VK_DELETE) & 0x8000)
@@ -1250,6 +1264,17 @@ void App::pi_loop() {
             calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status));
         const bool use_curve = !calibration_only_ && !settings_.return_action.enabled &&
                                settings_.humanization.uses_abcurves();
+        if (use_curve && gate.state.has_motion) {
+            const auto physical = std::pair{gate.state.total_x, gate.state.total_y};
+            if (curve_physical && *curve_physical != physical) {
+                reset_curve();
+                curve_yield_until = now + curve_physical_quiet_ns;
+            }
+            curve_physical = physical;
+        } else {
+            curve_physical.reset();
+            curve_yield_until = 0;
+        }
         if (use_curve && !curve_worker)
             curve_worker = std::make_unique<AbcurvesWorker>([this] { control_wake_.notify(); });
         AbcurvesWorker::State curve_state;
@@ -1345,43 +1370,71 @@ void App::pi_loop() {
             return true;
         };
         auto service_curve = [&] {
-            if (!curve_state.ready || (curve_pending && now > curve_pending->deadline)) {
+            const auto at = now_ns();
+            if (!curve_state.ready || (curve_pending && at >= curve_pending->deadline) ||
+                (curve_playback && at >= curve_playback->frame.deadline)) {
                 reset_curve();
                 return;
             }
-            // A reply can only use movement from this active stream and a still-fresh observation.
             const auto& reply = curve_state.reply;
             if (curve_pending && reply && reply->id == curve_pending->id) {
-                const auto frame = *curve_pending;
+                curve_playback = CurvePlayback{*curve_pending, *reply, std::max(at, curve_report_after)};
                 curve_pending.reset();
-                const int minx = std::max(-settings_.max_step, gate.state.xmin);
-                const int maxx = std::min(settings_.max_step, gate.state.xmax);
-                const int miny = std::max(-settings_.max_step, gate.state.ymin);
-                const int maxy = std::min(settings_.max_step, gate.state.ymax);
-                const double x = std::round(reply->dx), y = std::round(reply->dy);
-                const int dx = settings_.gain_x > 0 ? int(std::clamp(x, double(minx), double(maxx))) : 0;
-                const int dy = settings_.gain_y > 0 ? int(std::clamp(y, double(miny), double(maxy))) : 0;
-                if (!submit_correction(dx, dy, frame.deadline, frame.first_ns))
+            }
+            if (curve_playback && at >= curve_playback->due) {
+                auto& playing = *curve_playback;
+                // A slower HID endpoint cannot play every millisecond. Sum only the
+                // adjacent samples it covers, keeping the same displacement.
+                const auto period_us = std::max<uint32_t>(1000, gate.state.endpoint_poll_us);
+                const auto count = std::min((uint64_t(period_us) + 999) / 1000,
+                                            uint64_t(playing.rendered.count - playing.offset));
+                int x = 0, y = 0;
+                for (size_t i = 0; i < count; ++i) {
+                    const auto& report = playing.rendered.reports[playing.offset++];
+                    x += report[0];
+                    y += report[1];
+                }
+                const auto step = settings_.max_step;
+                const int dx = settings_.gain_x > 0
+                                   ? std::clamp(x, std::max(-step - playing.dx, gate.state.xmin),
+                                                std::min(step - playing.dx, gate.state.xmax))
+                                   : 0;
+                const int dy = settings_.gain_y > 0
+                                   ? std::clamp(y, std::max(-step - playing.dy, gate.state.ymin),
+                                                std::min(step - playing.dy, gate.state.ymax))
+                                   : 0;
+                if (!submit_correction(dx, dy, playing.frame.deadline, playing.frame.first_ns))
                     return;
-                if ((settings_.gain_x > 0 && dx != x) || (settings_.gain_y > 0 && dy != y)) {
-                    // A capped command leaves the planner ahead of the movement actually submitted.
+                curve_report_after = now_ns() + int64_t(period_us) * 1000;
+                if (dx != x || dy != y) {
+                    // The renderer has advanced beyond the movement we could submit.
                     reset_curve();
                     return;
                 }
+                playing.dx += dx;
+                playing.dy += dy;
                 curve_executed_x += dx;
                 curve_executed_y += dy;
+                if (playing.offset == playing.rendered.count)
+                    curve_playback.reset();
+                else
+                    playing.due = curve_report_after;
             }
-            if (!curve_pending && curve_next && now <= curve_next->deadline) {
+            if (!curve_pending && !curve_playback && curve_next && at < curve_next->deadline) {
                 const auto frame = *curve_next;
-                const int step_ms = curve_last_observed
-                                        ? int(std::clamp<int64_t>(
-                                              (frame.observed - curve_last_observed) / 1'000'000, 1, 32))
-                                        : 8;
+                const int elapsed_ms = curve_last_observed
+                                           ? int(std::clamp<int64_t>(
+                                                 (frame.observed - curve_last_observed) / 1'000'000, 1, 32))
+                                           : 8;
+                const auto remaining_ms = (frame.deadline - std::max(at, curve_report_after)) / 1'000'000;
+                const int step_ms = int(std::min<int64_t>(elapsed_ms, remaining_ms));
+                curve_next.reset();
+                if (step_ms <= 0)
+                    return;
                 curve_worker->submit({frame.id, curve_generation, step_ms, frame.x, frame.y,
                                       curve_executed_x, curve_executed_y});
                 curve_last_observed = frame.observed;
                 curve_pending = frame;
-                curve_next.reset();
             }
         };
         if (result_->id == last_result) {
@@ -1485,7 +1538,7 @@ void App::pi_loop() {
         } else
             cancel_auto_trigger();
         if (use_curve) {
-            if (!correction.curve_target) {
+            if (!correction.curve_target || now < curve_yield_until) {
                 reset_curve();
                 continue;
             }

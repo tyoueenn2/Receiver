@@ -1,5 +1,7 @@
 #pragma once
+#include <array>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -18,7 +20,8 @@ class AbcurvesWorker {
     };
     struct Reply {
         uint64_t id;
-        double dx, dy;
+        std::array<std::array<int, 2>, 32> reports{};
+        size_t count = 0;
     };
     struct State {
         bool ready = false;

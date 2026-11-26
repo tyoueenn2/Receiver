@@ -1,4 +1,5 @@
 #include "receiver/network.hpp"
+#include <algorithm>
 #include <stdexcept>
 #ifdef _WIN32
 #include <winsock2.h>
@@ -153,6 +154,8 @@ ControlWake::ControlWake() {
 }
 ControlWake::~ControlWake() {
 #ifdef _WIN32
+    if (timer_)
+        CloseHandle(timer_);
     if (event_)
         CloseHandle(event_);
 #else
@@ -168,9 +171,12 @@ void ControlWake::notify() noexcept {
     (void)write(event_, &value, sizeof(value));
 #endif
 }
-void ControlWake::wait(UdpSocket* socket, bool mouse_messages) {
+void ControlWake::wait(UdpSocket* socket, bool mouse_messages, int64_t deadline_ns) {
+    auto wait_ns = [&] {
+        return deadline_ns ? std::clamp<int64_t>(deadline_ns - now_ns(), 0, 10'000'000) : 10'000'000;
+    };
 #ifdef _WIN32
-    HANDLE events[2] = {event_, nullptr};
+    HANDLE events[3] = {event_, nullptr, nullptr};
     DWORD count = 1;
     if (socket) {
         if (!socket->readable_) {
@@ -180,10 +186,22 @@ void ControlWake::wait(UdpSocket* socket, bool mouse_messages) {
         }
         events[count++] = socket->readable_;
     }
-    // Timeout is housekeeping only. Inference, telemetry and mouse messages wake immediately.
+    DWORD timeout = 10;
+    if (deadline_ns) {
+        const auto remaining = wait_ns();
+        if (remaining && !timer_)
+            timer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                            TIMER_MODIFY_STATE | SYNCHRONIZE);
+        LARGE_INTEGER due;
+        due.QuadPart = -((remaining + 99) / 100);
+        if (remaining && timer_ && SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE))
+            events[count++] = timer_;
+        else
+            timeout = DWORD((remaining + 999'999) / 1'000'000);
+    }
     DWORD result = mouse_messages
-                       ? MsgWaitForMultipleObjectsEx(count, events, 10, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
-                       : WaitForMultipleObjects(count, events, FALSE, 10);
+                       ? MsgWaitForMultipleObjectsEx(count, events, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
+                       : WaitForMultipleObjects(count, events, FALSE, timeout);
     if (result == WAIT_FAILED)
         throw std::runtime_error("Control event wait failed");
     if (socket && result == WAIT_OBJECT_0 + 1) {
@@ -203,7 +221,12 @@ void ControlWake::wait(UdpSocket* socket, bool mouse_messages) {
     }
     int result;
     do {
-        result = poll(events, count, 10);
+        if (deadline_ns) {
+            const timespec remaining{0, long(wait_ns())};
+            result = ppoll(events, count, &remaining, nullptr);
+        } else {
+            result = poll(events, count, 10);
+        }
     } while (result < 0 && errno == EINTR);
     if (result < 0)
         throw std::runtime_error("Control event wait failed");

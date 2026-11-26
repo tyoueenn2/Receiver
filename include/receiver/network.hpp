@@ -25,6 +25,7 @@ class UdpSocket {
 class ControlWake {
 #ifdef _WIN32
     void* event_ = nullptr;
+    void* timer_ = nullptr;
 #else
     int event_ = -1;
 #endif
@@ -35,7 +36,7 @@ class ControlWake {
     ControlWake(const ControlWake&) = delete;
     ControlWake& operator=(const ControlWake&) = delete;
     void notify() noexcept;
-    void wait(UdpSocket* socket, bool mouse_messages);
+    void wait(UdpSocket* socket, bool mouse_messages, int64_t deadline_ns = 0);
 };
 uint64_t random_id();
 } // namespace receiver
