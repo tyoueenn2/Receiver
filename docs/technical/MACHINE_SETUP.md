@@ -34,7 +34,7 @@ invalid values display an error; a failed reload retains the last accepted setup
 | `frame_port` | Video UDP port, 1–65535; match the sender |
 | `pi_port` | Mouse-proxy UDP port, 1–65535; match the Pi |
 | `makcu_port` | MAKCU control port, such as `COM3`; configure before selecting MAKCU output |
-| `omni_python` | Python executable or interpreter path, such as `C:/Models/env/Scripts/python.exe` |
+| `omni_python` | Python executable for YOLO-Omni and ABCurves, such as `C:/Models/env/Scripts/python.exe` |
 | `omni_source` | YOLO-Omni checkout root, or empty if installed in the Python environment |
 | `omni_device` | `cuda:0` for the NVIDIA GPU, or `cpu` for testing |
 | `omni_worker` | Worker script path; defaults to the bundled worker |

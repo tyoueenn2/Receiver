@@ -275,10 +275,14 @@ int main(int argc, char** argv) {
              application_stopped = false;
         bool last_running = false, last_armed = false, last_active = false, last_pi_ready = false,
              last_synchronized = false;
-        std::string last_backend;
+        std::string last_backend, last_movement_status;
         while (!interrupted &&
                (!seconds || receiver::now_ns() - start < int64_t(seconds) * 1'000'000'000)) {
             auto s = app.stats();
+            if (s.movement_status != last_movement_status) {
+                log.write(LogLevel::info, s.movement_status.empty() ? "ABCurves disabled" : s.movement_status);
+                last_movement_status = s.movement_status;
+            }
             if (!observed_state || s.running != last_running || s.armed != last_armed ||
                 s.active != last_active || s.pi_ready != last_pi_ready ||
                 s.synchronized != last_synchronized || s.backend != last_backend) {

@@ -41,7 +41,7 @@ def main():
     cases=[(page,None,None,None) for page in (pages if args.all_pages else [args.page])]
     if args.search_checks:
         cases += [('connections',query,target,None) for query,target in
-                  [('prediction','targeting'),('smoothing','movement'),('spray','auto-click'),
+                  [('prediction','targeting'),('smoothing','movement'),('abcurves','movement'),('spray','auto-click'),
                    ('dataset','data-capture'),('mouse sensitivity','movement'),
                    ('maximum frame age','activation'),('class preference','targeting'),
                    ('proximity','targeting'),('hsv','targeting'),('separate window','preview'),

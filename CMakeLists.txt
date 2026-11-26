@@ -23,7 +23,8 @@ FetchContent_Declare(json GIT_REPOSITORY https://github.com/nlohmann/json.git GI
 FetchContent_MakeAvailable(json)
 find_package(Threads REQUIRED)
 add_library(receiver_core src/protocol.cpp src/control.cpp src/config.cpp src/network.cpp src/injection.cpp src/app.cpp src/prediction.cpp src/local_mouse.cpp src/makcu.cpp src/backend.cpp src/yolo_omni.cpp src/engine.cpp src/model.cpp src/preferences.cpp src/performance.cpp src/assist.cpp)
-target_sources(receiver_core PRIVATE src/capture.cpp src/color.cpp src/calibration.cpp src/calibration_view.cpp src/calibration_app.cpp src/discovery.cpp src/video_preview.cpp)
+target_sources(receiver_core PRIVATE src/capture.cpp src/color.cpp src/calibration.cpp src/calibration_view.cpp
+  src/calibration_app.cpp src/discovery.cpp src/video_preview.cpp src/python_worker.cpp src/abcurves_worker.cpp)
 target_include_directories(receiver_core PUBLIC include)
 target_link_libraries(receiver_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
 if(WIN32)
@@ -167,7 +168,12 @@ if(Python3_Interpreter_FOUND)
            "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/omni_fixture.py")
   set_tests_properties(receiver_omni_worker PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" TIMEOUT 30)
   add_test(NAME receiver_omni_protocol COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/omni_worker_test.py")
+  add_test(NAME receiver_abcurves_worker COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/abcurves_worker_test.py")
   if(RECEIVER_INTEGRATION_TESTS)
+    add_test(NAME receiver_abcurves_pipeline COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/abcurves_integration_test.py" $<TARGET_FILE:receiver_headless>)
+    set_tests_properties(receiver_abcurves_pipeline PROPERTIES TIMEOUT 30 RESOURCE_LOCK receiver_loopback LABELS integration)
     add_test(NAME receiver_calibration_pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/calibration_integration_test.py" $<TARGET_FILE:receiver_calibration_runner>)
     set_tests_properties(receiver_calibration_pipeline PROPERTIES TIMEOUT 160 RESOURCE_LOCK receiver_loopback LABELS integration)
     add_test(NAME receiver_color_pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/color_integration_test.py" $<TARGET_FILE:receiver_scenario_runner>)

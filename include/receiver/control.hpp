@@ -15,12 +15,16 @@ struct ColorSettings {
     bool preview = true;
 };
 struct HumanizationSettings {
+    static constexpr int abcurves_path = 5;
     bool enabled = false;
     int path = 0;
     float curve = .2f, duration_ms = 150, exponent = 2, adaptive_distance = 100;
     float jitter = 0, jitter_interval_ms = 30, noise = 1, noise_period_ms = 100;
     bool ema_enabled = false;
     float ema_alpha = .5f;
+    bool uses_abcurves() const {
+        return enabled && path == abcurves_path;
+    }
 };
 struct TrackingSettings {
     bool prediction = false, dynamic_fov = false;
@@ -142,11 +146,16 @@ Letterbox letterbox(int width, int height, int input);
 std::vector<Detection> decode_yolo(std::span<const float> output, int candidates, int classes, int width,
                                    int height, int input, const Settings& settings);
 float iou(const Detection& a, const Detection& b);
+struct CurveTarget {
+    double x, y;
+    bool new_target;
+};
 struct Correction {
     int dx = 0, dy = 0;
     std::optional<Detection> target;
     float aim_x = 0, aim_y = 0;
     double strength = 0;
+    std::optional<CurveTarget> curve_target = {};
 };
 class Controller {
     std::optional<Detection> previous_;

@@ -38,10 +38,35 @@ With the Pi connection, production physical mouse data comes from cumulative **U
 | Ease in | Builds from zero to normal strength over the selected time using an adjustable exponent. |
 | Adaptive | Reduces strength near the aim point, reaching full strength at the chosen approach distance. |
 | Smooth noise | Adds smoothly interpolated random variation perpendicular to the correction. |
+| ABCurves | Uses the external ABCurves 2 Continuous Planner for movement. |
 
 **Small random variations** adds bounded jitter in mouse units at a configurable interval. Both jitter and smooth noise fade within 20 picture pixels of the aim point and are disabled inside the dead zone. No variation occurs without a current eligible target. Smoothing is time-based exponential averaging. Shaping state resets on target change, deactivation, stale input, and configuration changes; no future path points are queued. Direction strength is applied after shaping/smoothing and before the existing device/per-update caps. Zero strength clears fractional and smoothed leftovers.
 
 Aimmy's [movement settings](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/Class/Dictionary.cs) and [movement implementation](https://github.com/Babyhamsta/Aimmy/blob/Aimmy-V2/Aimmy2/InputLogic/MouseManager.cs) informed the selection of sensitivity, jitter, smoothing, sticky targeting, and movement-style controls. This is an independent implementation; its numerical behavior is not a port of Aimmy. Smooth noise uses interpolated random values rather than a Perlin routine. The humanization controller does not trigger clicks automatically; automatic clicks are configured separately in **Auto click** and require Pi output.
+
+### ABCurves setup
+
+Clone the ABCurves repository and install it from that checkout into the Python 3.11+
+environment configured as `omni_python` in Receiver's `user-settings/setup.json`.
+
+```sh
+git clone https://github.com/optima-manent/ABCurves.git
+cd ABCurves
+python -m pip install -e .
+```
+
+In Receiver, open **Movement**, enable **Customize movement path**, and select
+**ABCurves**. A headless profile uses `"humanization": {"enabled": true, "path": 5}`.
+Wait for **ABCurves ready** before testing movement. The first load can take longer
+while Python warms the model. Startup and runtime errors appear in Movement and
+the headless log, with worker details in `cache/abcurves-worker-*.log`.
+
+Receiver feeds gain-scaled target offsets to the Continuous Planner, treating one
+configured output count as one common angular count. Each eligible capture can
+produce one combined correction under the configured movement and device limits.
+The planner resets on target changes, disarm, and stale input. It uses Receiver's
+integer output and applies to ordinary tracking. Random jitter and the ABCurves
+report renderer are outside this movement style.
 
 ## Practice and checks
 

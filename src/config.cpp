@@ -139,7 +139,8 @@ void validate(const Settings& s) {
             throw std::runtime_error(
                 "MAKCU does not report physical motion totals; turn direction assistance off");
     }
-    if (h.path < 0 || h.path > 4 || !range(h.curve, 0, 1) || !range(h.duration_ms, 10, 1000) ||
+    if (h.path < 0 || h.path > HumanizationSettings::abcurves_path || !range(h.curve, 0, 1) ||
+        !range(h.duration_ms, 10, 1000) ||
         !range(h.exponent, 1, 5) || !range(h.adaptive_distance, 1, 1024) || !range(h.jitter, 0, 20) ||
         !range(h.jitter_interval_ms, 8, 250) || !range(h.noise, 0, 20) || !range(h.noise_period_ms, 10, 1000))
         throw std::runtime_error("Humanization settings are outside their allowed range");
