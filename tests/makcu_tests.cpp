@@ -175,11 +175,17 @@ void serial_tests() {
         CHECK(probe.ends_with("\r\n"));
         rejects([&] { MakcuMouse duplicate(terminal.name); });
         terminal.send(">>> " + probe + ">>> ");
-        terminal.send(std::string(1, '\x02'));
         Telemetry state;
         until([&] {
             state = mouse.poll();
             return state.ready;
+        });
+        CHECK(state.physical == 0);
+        // The version reply can make the link ready in an earlier read than the button event.
+        terminal.send(std::string(1, '\x02'));
+        until([&] {
+            state = mouse.poll();
+            return state.physical == 2;
         });
         CHECK(state.physical == 2 && !state.has_motion && mouse.fresh(now_ns()));
         termios config{};
