@@ -94,10 +94,16 @@ def main():
             sender.stop()
             sender = Sender(port=frame_port, width=160, height=160, fps=90).start()
             wait_for(lambda: len(advice()) >= (1 if args.real_python else 5), 'No near-target steering advice')
-            assert all(e['angle'] == 500 and 0 < e['expires'] - e['sample'] <= 20 for e in advice())
+            assert all(e['angle'] == 3000 and 0 < e['expires'] - e['sample'] <= 20 for e in advice())
             assert all(e['aim'][0] > 0 and abs(e['aim'][1]) <= 1 for e in advice())
 
+            pi.motion_x = 4000
             pi.motion_y = 1000
+            time.sleep(.18)
+            count = len(advice())
+            wait_for(lambda: len(advice()) > count, 'ABCurves did not steer a gesture inside the 30 degree cone')
+
+            pi.motion_y = 3000
             time.sleep(.08)
             count = len(advice())
             time.sleep(.08)

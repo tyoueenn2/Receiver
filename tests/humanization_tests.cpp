@@ -198,7 +198,7 @@ int main() {
         CHECK(!c.update(centered, 320, 320, s, limits, 331'000'000).curve_target);
         auto file = std::filesystem::temp_directory_path() / "receiver-humanization-test.json";
         s.direction = d;
-        CHECK(s.humanization.abcurves_range_px == 50 && s.humanization.abcurves_angle_deg == 5);
+        CHECK(s.humanization.abcurves_range_px == 50 && s.humanization.abcurves_angle_deg == 30);
         s.humanization.abcurves_range_px = 42;
         s.humanization.abcurves_angle_deg = 3.5;
         save_settings(s, file.string());
@@ -211,7 +211,7 @@ int main() {
         }
         loaded = load_settings(file.string());
         CHECK(!loaded.direction.enabled && !loaded.humanization.enabled && loaded.gain_x == .3f);
-        CHECK(loaded.humanization.abcurves_range_px == 50 && loaded.humanization.abcurves_angle_deg == 5);
+        CHECK(loaded.humanization.abcurves_range_px == 50 && loaded.humanization.abcurves_angle_deg == 30);
         std::filesystem::remove(file);
         s.direction.slow_speed = 0;
         bool invalid = false;

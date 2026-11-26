@@ -64,13 +64,13 @@ In Receiver, open **Movement**, enable **Customize movement path**, and select
 
 - **ABCurves target range** limits steering to targets within 50 capture pixels of
   the aim reference by default.
-- **ABCurves steering angle** defaults to 5 degrees. When your hand leaves that
+- **ABCurves steering angle** defaults to 30 degrees. When your hand leaves that
   angle from the target bearing, the Pi passes the same report through. A
   slightly narrower angle is required to engage. The setting also caps the
   change in direction per report, before HID integer rounding.
 
 Wait for **ABCurves ready** before testing. The headless equivalent is
-`"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_angle_deg": 5}`.
+`"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_angle_deg": 30}`.
 The existing activation conditions still apply.
 
 The Continuous Planner forecasts a tangent from your actual hand history.
