@@ -1015,8 +1015,11 @@ void App::pi_loop() {
                     const bool same_source = curve_history && history.epoch == curve_history->epoch &&
                                              history.generation == curve_history->generation;
                     if (!same_source || history.end_ms > curve_history->end_ms) {
-                        if (!same_source)
+                        if (!same_source) {
+                            if (curve_history)
+                                reset_curve();
                             last_curve_end = 0;
+                        }
                         curve_history = history;
                         history_received = now;
                     }
