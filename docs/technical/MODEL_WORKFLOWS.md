@@ -86,21 +86,22 @@ bounded; opening a file performs validation rather than trusting its extension.
 
 ## Performance helper
 
-Start a real model, receive a picture with preview enabled, choose **Fastest**,
+Start a real model, receive a picture with preview enabled, choose **Lowest latency**,
 **Balanced** or **Lower GPU load**, and press **Measure model performance**.
-Movement stays off throughout. Supported dynamic model sizes are tested at
+Movement stays off throughout. **Lowest latency** measures the active input size.
+The other goals test supported dynamic model sizes at
 160, 256, 320, 416, 512 and 640 pixels; a fixed model uses only its required size
 and a serialized engine uses only sizes inside its actual optimization profile.
 Each candidate warms for 0.5 seconds and samples for 1.5 seconds after loading.
 
 The table reports completed frames per second and average/95th-percentile
 processing time, including preprocessing, inference and detection decoding.
-Failed candidates display their reason. Fastest chooses maximum throughput;
-Balanced prefers more detail within 70% of peak throughput and the timing budget;
-Lower GPU load selects the smallest successful size and limits the recommendation
-to at most 60 FPS. Recommended caps reserve approximately 20% headroom, with a
-240 FPS maximum. **Apply recommendation** sets size and the processing FPS cap,
-uses the normal reload path and remembers the choice for that model.
+Failed candidates display their reason. **Lowest latency** recommends removing
+the processing FPS cap at the current resolution. **Balanced**
+prefers more detail within 70% of peak throughput and the timing budget.
+**Lower GPU load** selects the smallest successful size and caps the recommendation
+at 60 FPS. Recommended caps reserve approximately 20% headroom, with a 240 FPS maximum.
+**Apply recommendation** saves the FPS cap and applies any size selected by the benchmark.
 
 The FPS cap consumes the latest available frame instead of queuing old pictures.
 Cancel keeps the active model and settings. This helper measures a repeated

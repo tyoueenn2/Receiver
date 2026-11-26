@@ -1,7 +1,9 @@
 #include "receiver/control.hpp"
 #include "receiver/color.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 namespace receiver {
 void MotionTracker::reset() {
@@ -88,45 +90,93 @@ float iou(const Detection& a, const Detection& b) {
 }
 std::vector<Detection> decode_yolo(std::span<const float> out, int count, int nc, int width, int height,
                                    int input, const Settings& s) {
-    if (count <= 0 || nc <= 0 || out.size() != size_t(count) * size_t(nc + 4))
+    if (count <= 0 || nc <= 0 || out.size() != size_t(count) * (size_t(nc) + 4))
         throw std::runtime_error("YOLO output must be [1,4+classes,candidates]");
     auto box = letterbox(width, height, input);
-    std::vector<Detection> candidates;
-    candidates.reserve(size_t(count));
-    for (int i = 0; i < count; ++i) {
-        float score = -1;
-        int cls = -1;
-        for (int c = 0; c < nc; ++c) {
-            if (!s.classes.empty() && std::find(s.classes.begin(), s.classes.end(), c) == s.classes.end() &&
-                c != s.class_preference.class_id)
-                continue;
-            float v = out[size_t(4 + c) * count + i];
-            if (std::isfinite(v) && v > score) {
-                score = v;
-                cls = c;
-            }
-        }
-        if (score < s.confidence || score > 1 || cls < 0)
-            continue;
-        float cx = out[i], cy = out[count + i], w = out[2 * count + i], h = out[3 * count + i];
-        if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(w) || !std::isfinite(h) || w <= 0 ||
-            h <= 0)
-            continue;
-        float x1 = std::clamp((cx - w * .5f - box.left) / box.scale, 0.f, float(width)),
-              y1 = std::clamp((cy - h * .5f - box.top) / box.scale, 0.f, float(height));
-        float x2 = std::clamp((cx + w * .5f - box.left) / box.scale, 0.f, float(width)),
-              y2 = std::clamp((cy + h * .5f - box.top) / box.scale, 0.f, float(height));
-        if (x2 > x1 && y2 > y1)
-            candidates.push_back({x1, y1, x2 - x1, y2 - y1, score, cls});
+    std::vector<int> selected;
+    if (!s.classes.empty()) {
+        auto add = [&](int cls) {
+            if (cls >= 0 && cls < nc)
+                selected.push_back(cls);
+        };
+        for (int cls : s.classes)
+            add(cls);
+        add(s.class_preference.class_id);
+        if (selected.empty())
+            return {};
+        std::sort(selected.begin(), selected.end());
+        selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
     }
-    std::stable_sort(candidates.begin(), candidates.end(),
-                     [](auto& a, auto& b) { return a.score > b.score; });
-    // Bound worst-case NMS time on dense/noisy model output.
-    if (candidates.size() > 1000)
-        candidates.resize(1000);
+    struct Candidate {
+        Detection detection;
+        int index;
+    };
+    std::vector<Candidate> candidates;
+    constexpr int block_size = 256;
+    constexpr int nms_limit = 1000;
+    candidates.reserve(size_t(std::min(count, nms_limit)));
+    struct ClassScore {
+        float score;
+        int cls;
+    };
+    std::array<ClassScore, block_size> best;
+    // Use a strict comparison to keep the first class on ties while admitting
+    // scores exactly at the confidence threshold.
+    const float minimum = std::max(-1.f, std::nextafter(s.confidence, -std::numeric_limits<float>::infinity()));
+    for (int offset = 0; offset < count;) {
+        const int length = std::min(block_size, count - offset);
+        std::fill_n(best.begin(), length, ClassScore{minimum, -1});
+        // Each class row is contiguous in the raw tensor. Process a tile of
+        // candidates at a time so their best scores stay hot in cache.
+        auto scan = [&](int cls) {
+            const float* row = out.data() + (size_t(cls) + 4) * count + offset;
+            for (int i = 0; i < length; ++i) {
+                const float score = row[i];
+                if (score > best[i].score && std::isfinite(score))
+                    best[i] = {score, cls};
+            }
+        };
+        if (s.classes.empty()) {
+            for (int cls = 0; cls < nc; ++cls)
+                scan(cls);
+        } else {
+            for (int cls : selected)
+                scan(cls);
+        }
+        for (int j = 0; j < length; ++j) {
+            auto [score, cls] = best[j];
+            if (cls < 0 || score > 1)
+                continue;
+            const size_t i = size_t(offset + j);
+            const float cx = out[i], cy = out[count + i], w = out[2ull * count + i], h = out[3ull * count + i];
+            if (!std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(w) || !std::isfinite(h) ||
+                w <= 0 || h <= 0)
+                continue;
+            const float x1 = std::clamp((cx - w * .5f - box.left) / box.scale, 0.f, float(width));
+            const float y1 = std::clamp((cy - h * .5f - box.top) / box.scale, 0.f, float(height));
+            const float x2 = std::clamp((cx + w * .5f - box.left) / box.scale, 0.f, float(width));
+            const float y2 = std::clamp((cy + h * .5f - box.top) / box.scale, 0.f, float(height));
+            if (x2 > x1 && y2 > y1)
+                candidates.push_back({{x1, y1, x2 - x1, y2 - y1, score, cls}, int(i)});
+        }
+        offset += length;
+    }
+    // Preserve model order for equal scores in both the cap and NMS.
+    auto better = [](const Candidate& a, const Candidate& b) {
+        if (a.detection.score != b.detection.score)
+            return a.detection.score > b.detection.score;
+        return a.index < b.index;
+    };
+    if (candidates.size() > nms_limit) {
+        std::nth_element(candidates.begin(), candidates.begin() + nms_limit, candidates.end(), better);
+        candidates.resize(nms_limit);
+    }
+    std::sort(candidates.begin(), candidates.end(), better);
     std::vector<Detection> kept;
-    kept.reserve(300);
-    for (auto& d : candidates) {
+    constexpr size_t detection_limit = 300;
+    kept.reserve(std::min(candidates.size(), detection_limit));
+    for (const auto& candidate : candidates) {
+        const auto& d = candidate.detection;
         bool suppressed = false;
         for (auto& k : kept)
             if (k.cls == d.cls && iou(k, d) > s.nms_iou) {
@@ -135,7 +185,7 @@ std::vector<Detection> decode_yolo(std::span<const float> out, int count, int nc
             }
         if (!suppressed)
             kept.push_back(d);
-        if (kept.size() == 300)
+        if (kept.size() == detection_limit)
             break;
     }
     return kept;

@@ -8,6 +8,7 @@
 #include "receiver/model.hpp"
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <iostream>
 #ifdef _WIN32
 #include <windows.h>
@@ -326,7 +327,7 @@ void App::receive_loop() {
     auto allowed = address(cfg.sender_ip, 0);
     Address peer{};
     uint64_t session = 0;
-    int64_t last_hello = 0, last_ping = 0, pending_ping = 0, last_resolution = 0;
+    int64_t last_hello = 0, last_ping = 0, pending_ping = 0, last_resolution = 0, next_network_update = 0;
     int requested_size = 0;
     int64_t last_cursor_request = 0;
     uint64_t cursor_token = random_id();
@@ -341,6 +342,7 @@ void App::receive_loop() {
         Address from;
         int n = socket.receive(data, from, 2);
         auto now = now_ns();
+        bool video_packet = false;
         if (n > 0 && from.ip == allowed.ip) {
             Bytes p(data.data(), size_t(n));
             if (n == 16 && !std::memcmp(data.data(), "UVH1", 4) && be32(data.data() + 4) == 0) {
@@ -358,6 +360,7 @@ void App::receive_loop() {
                         pending_ping = last_ping = 0;
                         last_resolution = 0;
                         requested_size = 0;
+                        next_network_update = now;
                         std::lock_guard lock(mutex_);
                         clock_.reset();
                         cursor_received_ = 0;
@@ -402,6 +405,7 @@ void App::receive_loop() {
                             }
                     }
                 } else if (n >= 48 && !std::memcmp(data.data(), "UVF1", 4)) {
+                    video_packet = true;
                     auto frame = reassembly.accept(p, now);
                     if (frame) {
                         std::lock_guard lock(mutex_);
@@ -418,7 +422,9 @@ void App::receive_loop() {
                 }
             }
         }
-        reassembly.expire(now);
+        // accept() already expires stale frames when a video packet arrives.
+        if (!video_packet)
+            reassembly.expire(now);
         auto seen = sender_seen_.load();
         if (seen && now >= seen && now - seen > 100'000'000 && !sender_lost) {
             sender_seen_ = 0;
@@ -445,17 +451,21 @@ void App::receive_loop() {
                 pending_ping = last_ping = now;
             }
         }
-        if (session && !sender_lost) {
-            int size;
-            bool ready;
+        // Keep packet counters and resolution negotiation off the per-fragment lock path.
+        if (now >= next_network_update) {
+            next_network_update = now + 1'000'000;
+            int size = 0;
             {
                 std::lock_guard lock(mutex_);
+                stats_.network = reassembly.stats;
+                stats_.synchronized = clock_.synchronized(now);
+                stats_.clock_uncertainty_ms = clock_.uncertainty_ms();
                 // Publish only the active model's validated size. A pending or failed
                 // replacement must not change the sender's capture dimensions.
-                ready = calibration_only_ || stats_.model_revision != 0;
-                size = settings_.input_size;
+                if (session && !sender_lost && (calibration_only_ || stats_.model_revision != 0))
+                    size = settings_.input_size;
             }
-            if (ready && (size != requested_size || now - last_resolution >= 250'000'000)) {
+            if (size && (size != requested_size || now - last_resolution >= 250'000'000)) {
                 auto request = encode_resolution_request(session, uint16_t(size), uint16_t(size));
                 if (socket.send(request, peer)) {
                     requested_size = size;
@@ -463,13 +473,9 @@ void App::receive_loop() {
                 }
             }
         }
-        {
-            std::lock_guard lock(mutex_);
-            stats_.network = reassembly.stats;
-            stats_.synchronized = clock_.synchronized(now);
-            stats_.clock_uncertainty_ms = clock_.uncertainty_ms();
-        }
     }
+    std::lock_guard lock(mutex_);
+    stats_.network = reassembly.stats;
 }
 void App::inference_loop() {
     Settings initial;
@@ -532,6 +538,10 @@ void App::inference_loop() {
     if (initial.frame_source == "local")
         capture = std::make_unique<LocalCapture>(initial.capture_output);
     const auto collection_session = std::to_string(random_id());
+    // The async task joins before its reusable buffer is destroyed. A slow writer
+    // can occupy this one slot without holding any of the live capture buffers.
+    std::optional<Frame> collection_frame;
+    std::future<void> collection_write;
     while (!stop_) {
         std::optional<Settings> requested;
         std::optional<PerformanceGoal> goal;
@@ -697,22 +707,12 @@ void App::inference_loop() {
                                      frame->header.height, cfg.input_size, cfg);
         }
         auto colors = cfg.color.mode ? color_matcher.build(*frame, cfg.color) : nullptr;
-        if (cfg.collection.enabled &&
-            now_ns() - last_collection >= int64_t(cfg.collection.interval_ms) * 1'000'000) {
-            last_collection = now_ns();
-            try {
-                collect_sample(*frame, detections, cfg.collection,
-                               collection_session + "-" + std::to_string(frame->header.session) + "-" +
-                                   std::to_string(frame->header.sequence));
-                std::lock_guard lock(mutex_);
-                ++stats_.collected_frames;
-                stats_.collection_error.clear();
-            } catch (const std::exception& e) {
-                std::lock_guard lock(mutex_);
-                stats_.collection_error = e.what();
-            }
-        }
         auto done = now_ns();
+        const bool collect = cfg.collection.enabled &&
+                             done - last_collection >= int64_t(cfg.collection.interval_ms) * 1'000'000 &&
+                             (!collection_write.valid() ||
+                              collection_write.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+        auto labels = collect && cfg.collection.auto_label ? detections : std::vector<Detection>{};
         {
             std::lock_guard lock(mutex_);
             ++stats_.inferred;
@@ -726,6 +726,33 @@ void App::inference_loop() {
                     preview_ = {frame, result_->detections, {}, colors};
                     last_preview = done;
                 }
+            }
+        }
+        if (collect) {
+            last_collection = done;
+            try {
+                auto& sample = collection_frame ? *collection_frame : collection_frame.emplace();
+                sample.header = frame->header;
+                std::copy_n(frame->pixels.data(), frame->header.bytes, sample.pixels.data());
+                collection_write = std::async(
+                    std::launch::async,
+                    [this, sample = &sample, &collection_session, labels = std::move(labels),
+                     settings = std::move(cfg.collection)] {
+                        try {
+                            collect_sample(*sample, labels, settings,
+                                           collection_session + "-" + std::to_string(sample->header.session) +
+                                               "-" + std::to_string(sample->header.sequence));
+                            std::lock_guard lock(mutex_);
+                            ++stats_.collected_frames;
+                            stats_.collection_error.clear();
+                        } catch (const std::exception& e) {
+                            std::lock_guard lock(mutex_);
+                            stats_.collection_error = e.what();
+                        }
+                    });
+            } catch (const std::exception& e) {
+                std::lock_guard lock(mutex_);
+                stats_.collection_error = e.what();
             }
         }
     }

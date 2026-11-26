@@ -19,6 +19,7 @@ os.environ["ORT_DISABLE_TELEMETRY"] = "1"
 import numpy as np
 from PIL import Image
 import torch
+from ultralytics import YOLO
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'tools'))
@@ -81,6 +82,11 @@ def main():
                 assert reply['classes'] == nc and reply['candidates'] == candidates
                 raw = np.frombuffer(payload, '<f4').reshape(1, 4 + nc, candidates)
                 assert np.isfinite(raw).all()
+                unfused = YOLO(str(copy)).model.float().eval()
+                select_raw_detection(unfused)
+                with torch.inference_mode():
+                    reference_raw = worker.raw_output(unfused(torch.from_numpy(tensor))).numpy()
+                np.testing.assert_allclose(raw, reference_raw, atol=.003, rtol=.0002)
                 for invalid in (torch.zeros(1, 300, 6), torch.zeros(1, nc + 5, candidates)):
                     try:
                         worker.raw_output(invalid)
@@ -95,7 +101,7 @@ def main():
                     with torch.inference_mode():
                         selected = worker.raw_output(worker.network(torch.from_numpy(tensor))).numpy()
                     np.testing.assert_allclose(selected, raw, atol=.003, rtol=.0002)
-                    fused = deepcopy(worker.network)
+                    fused = deepcopy(unfused)
                     fused.end2end = True
                     fused.fuse(verbose=False)
                     try:

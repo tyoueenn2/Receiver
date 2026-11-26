@@ -18,6 +18,13 @@ struct ColorMask {
 };
 class ColorMatcher {
     std::array<std::shared_ptr<ColorMask>, 4> pool_{};
+    std::optional<std::array<float, 2>> hue_thresholds_;
+    std::optional<std::array<float, 4>> saturation_value_thresholds_;
+    std::array<std::pair<int, int>, 256> saturation_ranges_{};
+    // Indexed by maximum channel, RGB delta, then signed hue numerator plus 255.
+    std::array<std::array<std::array<uint64_t, 8>, 256>, 3> hue_bits_{};
+
+    void update_thresholds(const ColorSettings& settings);
 
   public:
     std::shared_ptr<const ColorMask> build(const Frame& frame, const ColorSettings& settings);

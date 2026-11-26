@@ -6,6 +6,51 @@
 #include <stdexcept>
 
 namespace receiver {
+void ColorMatcher::update_thresholds(const ColorSettings& s) {
+    const std::array hue_thresholds{s.min_h, s.max_h};
+    if (hue_thresholds != hue_thresholds_) {
+        auto matches = [&](float hue) {
+            return (hue == 0 && s.max_h == 360) ||
+                   (s.min_h <= s.max_h ? hue >= s.min_h && hue <= s.max_h : hue >= s.min_h || hue <= s.max_h);
+        };
+        for (int channel = 0; channel < 3; ++channel) {
+            for (int delta = 0; delta < 256; ++delta) {
+                auto& bits = hue_bits_[channel][delta];
+                bits.fill(0);
+                for (int n = -delta; n <= delta; ++n) {
+                    float hue = delta ? float(n) / float(delta) + float(channel * 2) : 0;
+                    hue *= 60;
+                    if (hue < 0)
+                        hue += 360;
+                    if (matches(hue)) {
+                        const int index = n + 255;
+                        bits[index / 64] |= uint64_t(1) << (index % 64);
+                    }
+                }
+            }
+        }
+        hue_thresholds_ = hue_thresholds;
+    }
+    const std::array saturation_value_thresholds{s.min_s, s.max_s, s.min_v, s.max_v};
+    if (saturation_value_thresholds == saturation_value_thresholds_)
+        return;
+    for (int hi = 0; hi < 256; ++hi) {
+        auto& range = saturation_ranges_[hi];
+        range = {256, -1};
+        const float value = float(hi) * (100.f / 255.f);
+        if (value < s.min_v || value > s.max_v)
+            continue;
+        for (int delta = 0; delta <= hi; ++delta) {
+            const float saturation = hi ? float(100 * delta) / float(hi) : 0;
+            if (saturation < s.min_s || saturation > s.max_s)
+                continue;
+            range.first = std::min(range.first, delta);
+            range.second = delta;
+        }
+    }
+    saturation_value_thresholds_ = saturation_value_thresholds;
+}
+
 std::shared_ptr<const ColorMask> ColorMatcher::build(const Frame& frame, const ColorSettings& s) {
     const auto& h = frame.header;
     const size_t channels = h.format == 1 ? 3 : 4;
@@ -13,6 +58,7 @@ std::shared_ptr<const ColorMask> ColorMatcher::build(const Frame& frame, const C
     if (!h.width || !h.height || h.width > 1024 || h.height > 1024 || (h.format != 1 && h.format != 2) ||
         h.bytes != pixels * channels || frame.pixels.size() < h.bytes)
         throw std::runtime_error("HSV targeting requires a complete RGB or BGRA frame");
+    update_thresholds(s);
     std::shared_ptr<ColorMask> mask;
     for (auto& slot : pool_)
         if (!slot || slot.use_count() == 1) {
@@ -27,28 +73,27 @@ std::shared_ptr<const ColorMask> ColorMatcher::build(const Frame& frame, const C
     mask->height = h.height;
     mask->count = 0;
     const size_t stride = (h.width + 63) / 64;
-    mask->bits.assign(stride * h.height, 0);
-    for (size_t i = 0; i < pixels; ++i) {
-        const auto* p = frame.pixels.data() + i * channels;
-        const float r = p[h.format == 1 ? 0 : 2], g = p[1], b = p[h.format == 1 ? 2 : 0];
-        const float hi = std::max({r, g, b}), lo = std::min({r, g, b}), delta = hi - lo;
-        const float value = hi * (100.f / 255.f), saturation = hi ? 100 * delta / hi : 0;
-        if (value < s.min_v || value > s.max_v || saturation < s.min_s || saturation > s.max_s)
-            continue;
-        float hue = 0;
-        if (delta) {
-            hue = hi == r ? (g - b) / delta : hi == g ? 2 + (b - r) / delta : 4 + (r - g) / delta;
-            hue *= 60;
-            if (hue < 0)
-                hue += 360;
-        }
-        const bool matches =
-            (hue == 0 && s.max_h == 360) ||
-            (s.min_h <= s.max_h ? hue >= s.min_h && hue <= s.max_h : hue >= s.min_h || hue <= s.max_h);
-        if (matches) {
-            const auto x = i % h.width, y = i / h.width;
-            mask->bits[y * stride + x / 64] |= uint64_t(1) << (x % 64);
-            ++mask->count;
+    mask->bits.resize(stride * h.height);
+    const int red = h.format == 1 ? 0 : 2, blue = 2 - red;
+    const auto* p = frame.pixels.data();
+    auto out = mask->bits.begin();
+    for (int y = 0; y < h.height; ++y) {
+        for (int x = 0; x < h.width; x += 64) {
+            uint64_t bits = 0;
+            const int extent = std::min(64, h.width - x);
+            for (int bit = 0; bit < extent; ++bit, p += channels) {
+                const int r = p[red], g = p[1], b = p[blue];
+                const int hi = std::max({r, g, b}), delta = hi - std::min({r, g, b});
+                const auto [min_delta, max_delta] = saturation_ranges_[hi];
+                if (delta < min_delta || delta > max_delta)
+                    continue;
+                const int channel = hi == r ? 0 : hi == g ? 1 : 2;
+                const int index = 255 + (hi == r ? g - b : hi == g ? b - r : r - g);
+                const auto& hue = hue_bits_[channel][delta];
+                bits |= ((hue[index / 64] >> (index % 64)) & 1) << bit;
+            }
+            *out++ = bits;
+            mask->count += std::popcount(bits);
         }
     }
     return mask;

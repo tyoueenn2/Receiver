@@ -23,8 +23,7 @@
 #error This backend targets TensorRT 10.x. Use the documented SDK; TensorRT 11 requires a separate strongly typed model conversion.
 #endif
 namespace receiver {
-void launch_preprocess(const uint8_t*, float*, int, int, int, int, int, int, int, int, cudaStream_t);
-void launch_float_to_half(const float*, void*, size_t, cudaStream_t);
+void launch_preprocess(const uint8_t*, void*, bool, int, int, int, int, int, int, int, int, cudaStream_t);
 void launch_half_to_float(const void*, float*, size_t, cudaStream_t);
 static void checked(cudaError_t e) {
     if (e != cudaSuccess)
@@ -116,13 +115,14 @@ class TrtBackend final : public Backend {
     std::unique_ptr<nvinfer1::ICudaEngine> engine_;
     std::unique_ptr<nvinfer1::IExecutionContext> context_;
     cudaStream_t stream_ = nullptr;
+    cudaGraphExec_t inference_graph_ = nullptr;
     cudaEvent_t begin_ = nullptr, prepared_ = nullptr, inferred_ = nullptr, done_ = nullptr;
     uint8_t* pinned_ = nullptr;
     uint8_t* raw_ = nullptr;
-    float* input_ = nullptr;
+    void* input_ = nullptr;
     float* output_ = nullptr;
     float* host_output_ = nullptr;
-    void* half_input_ = nullptr;
+    bool half_input_ = false;
     void* half_output_ = nullptr;
     int size_ = 0, classes_ = 0, count_ = 0;
     size_t output_count_ = 0;
@@ -131,14 +131,14 @@ class TrtBackend final : public Backend {
     void cleanup() {
         if (stream_)
             cudaStreamSynchronize(stream_);
+        if (inference_graph_)
+            cudaGraphExecDestroy(inference_graph_);
         if (raw_)
             cudaFree(raw_);
         if (input_)
             cudaFree(input_);
         if (output_)
             cudaFree(output_);
-        if (half_input_)
-            cudaFree(half_input_);
         if (half_output_)
             cudaFree(half_output_);
         if (pinned_)
@@ -150,6 +150,34 @@ class TrtBackend final : public Backend {
                 cudaEventDestroy(e);
         if (stream_)
             cudaStreamDestroy(stream_);
+    }
+
+    void prepare_inference_graph() {
+        // The context, its device buffers and its batch-one input shape stay
+        // fixed for this backend's lifetime. Capture only the inference so
+        // incoming frame sizes and pixel formats can still vary.
+        if (cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal) == cudaSuccess) {
+            const bool enqueued = context_->enqueueV3(stream_);
+            cudaGraph_t graph = nullptr;
+            const auto captured = cudaStreamEndCapture(stream_, &graph);
+            cudaGraphExec_t executable = nullptr;
+            if (enqueued && captured == cudaSuccess && graph &&
+                cudaGraphInstantiateWithFlags(&executable, graph, 0) == cudaSuccess &&
+                cudaGraphLaunch(executable, stream_) == cudaSuccess)
+                inference_graph_ = executable;
+            else if (executable)
+                cudaGraphExecDestroy(executable);
+            if (graph)
+                cudaGraphDestroy(graph);
+        }
+        if (!inference_graph_) {
+            // Some layers need CPU interaction during enqueue. Verify that
+            // eager inference still works after a rejected capture.
+            (void)cudaGetLastError();
+            if (!context_->enqueueV3(stream_))
+                throw std::runtime_error("TensorRT warmup failed after graph capture: " + log_.message());
+        }
+        checked(cudaStreamSynchronize(stream_));
     }
 
   public:
@@ -403,26 +431,27 @@ class TrtBackend final : public Backend {
             checked(cudaEventCreate(e));
         checked(cudaMallocHost(reinterpret_cast<void**>(&pinned_), max_frame_bytes));
         checked(cudaMalloc(reinterpret_cast<void**>(&raw_), max_frame_bytes));
-        checked(cudaMalloc(reinterpret_cast<void**>(&input_), size_t(3) * size_ * size_ * sizeof(float)));
+        half_input_ = engine_->getTensorDataType(input_name_.c_str()) == nvinfer1::DataType::kHALF;
+        const size_t input_bytes = size_t(3) * size_ * size_ * (half_input_ ? sizeof(uint16_t) : sizeof(float));
+        checked(cudaMalloc(&input_, input_bytes));
         checked(cudaMalloc(reinterpret_cast<void**>(&output_), output_count_ * sizeof(float)));
-        if (engine_->getTensorDataType(input_name_.c_str()) == nvinfer1::DataType::kHALF)
-            checked(cudaMalloc(&half_input_, size_t(3) * size_ * size_ * 2));
         if (engine_->getTensorDataType(output_name_.c_str()) == nvinfer1::DataType::kHALF)
             checked(cudaMalloc(&half_output_, output_count_ * 2));
         checked(cudaMallocHost(reinterpret_cast<void**>(&host_output_), output_count_ * sizeof(float)));
-        if (!context_->setTensorAddress(input_name_.c_str(), half_input_ ? half_input_ : input_) ||
+        if (!context_->setTensorAddress(input_name_.c_str(), input_) ||
             !context_->setTensorAddress(output_name_.c_str(), half_output_ ? half_output_ : output_))
             throw std::runtime_error("Cannot bind TensorRT tensors");
         description_ = std::string(direct_engine ? "TensorRT engine" : "TensorRT FP16") + " / " +
                        std::string(props.name) + " / " + std::to_string(size_) + "x" + std::to_string(size_);
         report("TensorRT: warming engine");
-        checked(cudaMemsetAsync(input_, 0, size_t(3) * size_ * size_ * sizeof(float), stream_));
-        if (half_input_)
-            checked(cudaMemsetAsync(half_input_, 0, size_t(3) * size_ * size_ * 2, stream_));
+        checked(cudaMemsetAsync(input_, 0, input_bytes, stream_));
         for (int i = 0; i < 10; ++i)
             if (!context_->enqueueV3(stream_))
                 throw std::runtime_error("TensorRT warmup failed");
         checked(cudaStreamSynchronize(stream_));
+        prepare_inference_graph();
+        if (inference_graph_)
+            description_ += " / CUDA Graph";
     }
     Inference run(const Frame& frame) override {
         const auto& h = frame.header;
@@ -432,13 +461,13 @@ class TrtBackend final : public Backend {
         double host_copy_ms = double(now_ns() - copy_start) / 1e6;
         checked(cudaEventRecord(begin_, stream_));
         checked(cudaMemcpyAsync(raw_, pinned_, h.bytes, cudaMemcpyHostToDevice, stream_));
-        launch_preprocess(raw_, input_, h.width, h.height, h.format == 1 ? 3 : 4, size_, b.resized_w,
-                          b.resized_h, b.left, b.top, stream_);
-        if (half_input_)
-            launch_float_to_half(input_, half_input_, size_t(3) * size_ * size_, stream_);
+        launch_preprocess(raw_, input_, half_input_, h.width, h.height, h.format == 1 ? 3 : 4, size_,
+                          b.resized_w, b.resized_h, b.left, b.top, stream_);
         checked(cudaGetLastError());
         checked(cudaEventRecord(prepared_, stream_));
-        if (!context_->enqueueV3(stream_))
+        if (inference_graph_)
+            checked(cudaGraphLaunch(inference_graph_, stream_));
+        else if (!context_->enqueueV3(stream_))
             throw std::runtime_error("TensorRT inference failed: " + log_.message());
         checked(cudaEventRecord(inferred_, stream_));
         if (half_output_) {

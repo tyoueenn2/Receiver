@@ -130,6 +130,21 @@ void protocol_vectors() {
     test::rejects([] { encode_resolution_request(1, 320, 1025); });
 }
 
+void receive_datagrams(UdpSocket& receive_socket, const Address& target) {
+    UdpSocket transmit_socket("127.0.0.1", 0);
+    const std::array<uint8_t, 8> oversized{};
+    const std::array<uint8_t, 4> valid{3, 1, 4, 2};
+    std::array<uint8_t, 4> buffer{};
+    Address from{};
+    CHECK(receive_socket.receive(buffer, from, 0) == 0 && from == Address{});
+    CHECK(transmit_socket.send(oversized, target));
+    CHECK(transmit_socket.send(valid, target));
+    CHECK(receive_socket.receive(buffer, from, 100) == 0 && from == Address{});
+    CHECK(receive_socket.receive(buffer, from, 100) == int(valid.size()) && buffer == valid);
+    CHECK(from.ip == target.ip && from.port != 0);
+    CHECK(receive_socket.receive(buffer, from, 0) == 0);
+}
+
 void synchronization() {
     Settings s;
     s.model = "initial.pt";
@@ -150,6 +165,7 @@ void synchronization() {
     }
     if (!pi_sink)
         throw std::runtime_error("No available loopback ports for sender synchronization");
+    receive_datagrams(*pi_sink, address(s.pi_ip, s.pi_port));
     s.preview = true;
     s.max_age_ms = 250;
     Peer peer(s.frame_port);

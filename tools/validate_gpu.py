@@ -1,4 +1,4 @@
-"""Compare a raw RGB image through CUDA/TensorRT against ONNX Runtime FP32."""
+"""Compare TensorRT detections for an RGB capture against ONNX Runtime or a baseline build."""
 import argparse
 import json
 import subprocess
@@ -26,23 +26,44 @@ def preprocess(raw, width, height, size):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--verify-exe', required=True); p.add_argument('--profile', required=True)
-    p.add_argument('--raw', required=True); p.add_argument('--width', type=int, required=True)
+    p.add_argument('--verify-exe', required=True)
+    p.add_argument('--baseline-verify-exe', help='Require identical raw output and detections from both builds')
+    p.add_argument('--profile', required=True)
+    p.add_argument('--raw', required=True)
+    p.add_argument('--width', type=int, required=True)
     p.add_argument('--height', type=int, required=True)
     a = p.parse_args()
     import numpy as np
+
+    def verify(executable, output):
+        subprocess.run([executable, a.profile, a.raw, str(a.width), str(a.height), str(output)], check=True)
+        result = json.loads(output.read_text())
+        tensor = np.array(result['raw'], dtype=np.float32).reshape(result['shape'])
+        if not np.isfinite(tensor).all():
+            raise AssertionError(f'Nonfinite model output from {executable}')
+        return result, tensor
+
+    with tempfile.TemporaryDirectory() as temp:
+        output = Path(temp) / 'gpu.json'
+        if a.baseline_verify_exe:
+            baseline, previous = verify(a.baseline_verify_exe, Path(temp) / 'baseline.json')
+        result, actual = verify(a.verify_exe, output)
+    if a.baseline_verify_exe:
+        if not np.array_equal(actual.view(np.uint32), previous.view(np.uint32)):
+            raise AssertionError('Raw TensorRT outputs differ between builds')
+        if result['detections'] != baseline['detections']:
+            raise AssertionError('Decoded detections differ between builds')
+        print(f'Raw TensorRT output and {len(result["detections"])} decoded detections match the baseline build.')
+        return
+
     import onnxruntime as ort
-    config = json.loads(Path(a.profile).read_text()); size = config.get('input_size', 320)
+    config = json.loads(Path(a.profile).read_text())
+    size = config.get('input_size', 320)
     tensor = preprocess(Path(a.raw).read_bytes(), a.width, a.height, size)
     session = ort.InferenceSession(config['model'], providers=['CPUExecutionProvider'])
     expected = session.run(None, {session.get_inputs()[0].name: tensor})[0]
-    with tempfile.TemporaryDirectory() as temp:
-        output = Path(temp) / 'gpu.json'
-        subprocess.run([a.verify_exe, a.profile, a.raw, str(a.width), str(a.height), str(output)], check=True)
-        result = json.loads(output.read_text())
-    actual = np.array(result['raw'], dtype=np.float32).reshape(result['shape'])
-    if expected.shape != actual.shape or not np.isfinite(actual).all():
-        raise AssertionError('Output shape/nonfinite failure')
+    if expected.shape != actual.shape:
+        raise AssertionError('Output shape mismatch')
     delta = np.abs(actual - expected)
     print(json.dumps(dict(coordinate_max_abs=float(delta[:, :4].max()), score_max_abs=float(delta[:, 4:].max()),
                           mean_abs=float(delta.mean()), gpu_detections=result['detections']), indent=2))

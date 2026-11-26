@@ -1,6 +1,8 @@
 # Reproducible performance checks
 
-Do not use the included simulation timings as RTX 3060 Ti inference estimates. Simulation bypasses the model. No real capture-to-USB latency figure has been measured in this workspace.
+The included simulation timings cover the local frame and output pipeline with
+model inference bypassed. GPU inference and capture-to-USB latency require
+measurements on deployment hardware.
 
 ## Functional checks before timing
 
@@ -35,6 +37,22 @@ The profile must contain the real sender and Pi addresses. Movement still requir
 Also record expired/evicted incomplete frames, invalid/duplicate packets, replaced pending frames, stale results, pool drops, and GPU free/total memory at initialization. The host frame pool is fixed at 28 MiB; CUDA staging, input/output, TensorRT workspace, and optional preview add memory on top.
 
 For actual capture-to-USB or capture-to-visible-motion latency, instrument the capture sender and Pi or use an external high-speed camera/logic analyzer. UPX1 does not acknowledge USB delivery. UPC1 “Accepted” stops at idempotent Pi storage and UPA1 “Completed” reports successful final-release completion in the USB writer; neither establishes physical-link delivery or destination-application consumption. A local timing result cannot establish that latency.
+
+TensorRT attempts CUDA Graph capture once after warming each model and input shape.
+If it succeeds, Receiver adds **CUDA Graph** to the backend description and
+replays the model with a single launch. Engines that cannot be captured use
+regular TensorRT execution. For a before-and-after comparison on your GPU, keep
+the same engine and settings, and compare the warmed **Inference** and
+**Receiver-to-submission** percentiles. [NVIDIA TensorRT optimization guide](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/performance/optimization.html)
+
+CUDA preprocessing reads unscaled RGB and BGRA crops directly. For engines
+that already accept FP16 input, the preprocessing kernel writes the normalized
+values with the engine's existing FP16 rounding in the same launch.
+
+Use `tools/validate_gpu.py --baseline-verify-exe <previous receiver_verify>`
+with its usual profile and RGB capture arguments to compare builds on the same
+GPU. Use the same serialized engine for both runs. This check requires
+bit-for-bit matching raw predictions and identical decoded detections.
 
 ## Regression expectations
 

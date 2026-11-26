@@ -4,17 +4,18 @@
 #include "engine_precision_kernel.cuh"
 #include "preprocess_kernel.cuh"
 namespace receiver {
-void launch_float_to_half(const float* source, void* target, size_t count, cudaStream_t stream) {
-    float_to_half<<<unsigned((count + 255) / 256), 256, 0, stream>>>(source, static_cast<__half*>(target),
-                                                                     count);
-}
 void launch_half_to_float(const void* source, float* target, size_t count, cudaStream_t stream) {
     half_to_float<<<unsigned((count + 255) / 256), 256, 0, stream>>>(static_cast<const __half*>(source),
                                                                      target, count);
 }
-void launch_preprocess(const uint8_t* raw, float* tensor, int w, int h, int channels, int size, int rw,
-                       int rh, int left, int top, cudaStream_t stream) {
-    preprocess_kernel<<<dim3((size + 15) / 16, (size + 15) / 16), dim3(16, 16), 0, stream>>>(
-        raw, tensor, w, h, channels, size, rw, rh, left, top);
+void launch_preprocess(const uint8_t* raw, void* tensor, bool half, int w, int h, int channels, int size,
+                       int rw, int rh, int left, int top, cudaStream_t stream) {
+    const dim3 grid((size + 15) / 16, (size + 15) / 16), block(16, 16);
+    if (half)
+        preprocess_half_kernel<<<grid, block, 0, stream>>>(
+            raw, static_cast<__half*>(tensor), w, h, channels, size, rw, rh, left, top);
+    else
+        preprocess_kernel<<<grid, block, 0, stream>>>(
+            raw, static_cast<float*>(tensor), w, h, channels, size, rw, rh, left, top);
 }
 } // namespace receiver

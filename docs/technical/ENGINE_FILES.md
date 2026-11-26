@@ -73,5 +73,5 @@ this host. Validate your actual engine on the deployment PC with the preview or:
 ```
 
 Use the model's actual processing size and a profile pointing to your engine.
-Compare representative captures before measuring latency. Conversion tests do
-not establish end-to-end model accuracy or RTX 3060 Ti performance.
+Compare representative captures before measuring latency and detection accuracy
+on your deployment GPU.

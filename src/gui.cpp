@@ -1259,9 +1259,9 @@ int run_gui(const std::string& options) {
             if (columns)
                 ImGui::TableNextColumn();
             section("Performance benchmark",
-                    "Measures this model on a received picture at supported sizes. Mouse control stays "
-                    "off. This measures speed, not detection accuracy or network delay.");
-            combo("Optimization goal", &performance_goal, "Fastest\0Balanced\0Lower GPU load\0");
+                    "Measures processing time on a received picture. Lowest latency uses the current "
+                    "input size. Mouse control stays off.");
+            combo("Optimization goal", &performance_goal, "Lowest latency\0Balanced\0Lower GPU load\0");
             ImGui::BeginDisabled(settings.color.mode == 1 || !stats.running || simulate ||
                                  stats.model_loading || stats.benchmarking || busy());
             if (ImGui::Button("Measure model performance")) {
@@ -1299,13 +1299,18 @@ int run_gui(const std::string& options) {
                 ImGui::EndTable();
             }
             if (stats.benchmark.recommended_size) {
-                ImGui::Text("Suggested: %d pixels, %d FPS", stats.benchmark.recommended_size,
-                            stats.benchmark.recommended_fps);
+                if (stats.benchmark.recommended_fps)
+                    ImGui::Text("Suggested %d pixels at %d FPS", stats.benchmark.recommended_size,
+                                stats.benchmark.recommended_fps);
+                else
+                    ImGui::Text("Suggested %d pixels with no FPS cap", stats.benchmark.recommended_size);
                 ImGui::BeginDisabled(stats.model_loading || stats.benchmarking || busy());
                 if (ImGui::Button("Apply recommendation")) {
-                    settings.input_size = stats.benchmark.recommended_size;
                     settings.inference_fps = stats.benchmark.recommended_fps;
-                    settings.auto_size = false;
+                    if (stats.benchmark.recommended_fps) {
+                        settings.input_size = stats.benchmark.recommended_size;
+                        settings.auto_size = false;
+                    }
                     changed = true;
                 }
                 ImGui::EndDisabled();
