@@ -1,4 +1,5 @@
 #include "receiver/control.hpp"
+#include "../src/abcurves_assist.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -16,6 +17,18 @@ bool close(double a, double b) {
 }
 int main() {
     try {
+        mouse_history::Trace hand{};
+        const std::array<int, 2> stopped{}, nudge{4, 0};
+        CHECK(abcurves_assist(hand, 4, {20, 0}, 100, 0, 8) == stopped);
+        std::fill(hand.end() - 4, hand.end(), std::array<int, 2>{2, 0});
+        CHECK(abcurves_assist(hand, 4, {20, 30}, 100, 0, 8) == nudge);
+        CHECK(abcurves_assist(hand, 4, {8, 30}, 100, 0, 8) == stopped);
+        CHECK(abcurves_assist(hand, 4, {20, 0}, 8, 0, 8) == stopped);
+        CHECK(abcurves_assist(hand, 17, {20, 0}, 100, 0, 8) == stopped);
+        hand.back() = {-2, 0};
+        CHECK(abcurves_assist(hand, 4, {20, 0}, 100, 0, 8) == stopped);
+        hand[hand.size() - 2] = hand.back() = {};
+        CHECK(abcurves_assist(hand, 4, {20, 0}, 100, 0, 8) == stopped);
         DirectionSettings d;
         CHECK(direction_multiplier(30, 0, {}, d) == 1);
         d.enabled = true;

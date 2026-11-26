@@ -1,25 +1,10 @@
-"""Run the ABCurves 2 Continuous Planner and native Renderer."""
+"""Forecast a short continuation from the user's real mouse movement."""
 import math
-from pathlib import Path
 
 from worker_protocol import read_json, run_worker, send_json
 
-
-def load_pipeline(abcurves):
-    import numpy as np
-    from abcurves.continuous import COMMON_RADIANS_PER_COUNT
-
-    profile = Path(abcurves.__file__).resolve().parent.parent / 'examples' / 'data' / 'human_start.npz'
-    if not profile.is_file():
-        raise RuntimeError('Install ABCurves 2 from its checkout to use the bundled movement profile')
-    with np.load(profile, allow_pickle=False) as data:
-        # Preserve the existing mapping from one configured output count to
-        # one common count. The pipeline converts native Y-down reports.
-        return abcurves.ContinuousPipeline(
-            data['profile_hardware'],
-            transform=abcurves.CountTransform(COMMON_RADIANS_PER_COUNT, y_down=True),
-            prewarm=True,
-        )
+HISTORY_LENGTH = 164
+HORIZON_MS = 16
 
 
 class Movement:
@@ -30,33 +15,33 @@ class Movement:
             raise RuntimeError('Install ABCurves 2 in the Python environment selected in Receiver') from exc
         if not abcurves.__version__.startswith('2.'):
             raise RuntimeError('Receiver requires ABCurves 2')
-        self.pipeline = load_pipeline(abcurves)
-        self.generation = None
-        self.time_us = 0
+        self.prepare_history = abcurves.prepare_history
+        self.planner = abcurves.load(prewarm=True)
 
     def advance(self, request):
-        generation, step_ms = request['generation'], request['step_ms']
-        if type(step_ms) is not int or not 1 <= step_ms <= 32:
-            raise ValueError('Invalid ABCurves step duration')
         x, y = request['target']
-        actual_x, actual_y = request['executed']
-        if not all(math.isfinite(v) for v in (x, y, actual_x, actual_y)):
-            raise ValueError('Non-finite ABCurves input')
-        if generation != self.generation:
-            self.pipeline.reset()
-            self.generation = generation
-            self.time_us = 0
-        self.pipeline.update_target((actual_x + x, -(actual_y + y)), timestamp_us=self.time_us)
-        self.time_us += step_ms * 1000
-        rendered = self.pipeline.advance(self.time_us)['reports']
-        if len(rendered) != step_ms:
-            raise RuntimeError('Unexpected ABCurves output length')
-        return {'status': 'result', 'reports': [[int(dx), int(dy)] for dx, dy in rendered]}
+        raw = request['history']
+        if len(raw) != HISTORY_LENGTH or not all(
+            len(delta) == 2 and all(type(v) is int and -32768 <= v <= 32767 for v in delta)
+            for delta in raw
+        ):
+            raise ValueError('Invalid physical mouse history')
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError('Non-finite ABCurves target')
+        # Reset at the actual endpoint of the history. Each request forecasts
+        # from a new observation, including the user's unassisted movement.
+        start = self.prepare_history([(dx, -dy) for dx, dy in raw], current_xy=(0, 0))
+        self.planner.reset(initial_xy=start.observed_xy, history=start.history)
+        self.planner.update_target((x, -y), timestamp_us=0)
+        positions = self.planner.advance(HORIZON_MS * 1000)['xy']
+        if len(positions) != HORIZON_MS:
+            raise RuntimeError('Unexpected ABCurves forecast length')
+        return {'status': 'result', 'positions': [[float(dx), -float(dy)] for dx, dy in positions]}
 
 
 def serve(stream):
     motion = Movement()
-    send_json(stream, {'status': 'ready', 'version': 2})
+    send_json(stream, {'status': 'ready', 'version': 3})
     while True:
         send_json(stream, motion.advance(read_json(stream)))
 

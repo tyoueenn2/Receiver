@@ -21,6 +21,7 @@ class MockPi:
         self.motion_enabled = True
         self.upt3_enabled = True
         self.endpoint_poll_us = 1000
+        self.history_enabled = False
         self.motion_x = self.motion_y = 0.0
         self.motion_generation = 1
         self.commands, self.transitions = [], []
@@ -79,6 +80,15 @@ class MockPi:
                 if self.transactions.handle(data,source,self.session,self.motion_generation,self.physical,persistent,self.ready):
                     if data[:4] == b'UPM1':
                         owner,lease=source,now
+                elif len(data) == SUBSCRIBE.size and data[:8] == b'UPS3HIS1':
+                    _, _, candidate, candidate_token = SUBSCRIBE.unpack(data)
+                    if (self.history_enabled and self.ready and self.endpoint_poll_us <= 1000 and
+                            subscriber == source and client == candidate and telemetry_version == 3):
+                        end_ms = time.perf_counter_ns() // 1000000
+                        dx, dy = round(self.motion_x / 1000), round(self.motion_y / 1000)
+                        packet = struct.pack('!4s4xQQQQQ', b'UPH1', client, candidate_token,
+                                             self.session, self.motion_generation, end_ms)
+                        self.sock.sendto(packet + struct.pack('!hh', dx, dy) * 164, source)
                 elif len(data) == SUBSCRIBE.size and data[:4] in (b'UPS1', b'UPS2', b'UPS3'):
                     _, reserved, candidate, candidate_token = SUBSCRIBE.unpack(data)
                     self.subscription_versions.append(data[:4])
@@ -108,7 +118,9 @@ class MockPi:
                         self.sock.sendto(b'busy', source)
                     elif not self.ready:
                         self.sock.sendto(b'error not50', source)
-                    elif not reserved and (move_seq is None or newer(move_sequence, move_seq)):
+                    elif ((not reserved or (reserved == 1 and self.history_enabled and
+                                             dx * self.motion_x + dy * self.motion_y > 0)) and
+                          (move_seq is None or newer(move_sequence, move_seq))):
                         owner, lease, move_seq = source, now, move_sequence
                         if persistent != buttons:
                             self.transitions.append(dict(time=now, persistent=buttons,

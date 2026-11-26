@@ -17,45 +17,35 @@ from process_capture import collect_logged_output, stop_logged_process
 PLANNER_FIXTURE = '''
 from pathlib import Path
 import time
+from types import SimpleNamespace
 
 __version__ = "2.0.0"
 
-def CountTransform(scale, *, y_down):
-    assert scale > 0 and y_down
-    return scale
+def prepare_history(history, *, current_xy):
+    assert len(history) == 164 and current_xy == (0, 0)
+    return SimpleNamespace(observed_xy=current_xy, history=history[-160:])
 
-class ContinuousPipeline:
-    def __init__(self, profile, *, transform, prewarm):
-        assert transform > 0 and prewarm and len(profile) == 256
-        self.reset()
-
-    def reset(self):
-        self.time = 0
+class Planner:
+    def reset(self, *, initial_xy, history):
+        assert initial_xy == (0, 0) and len(history) == 160
+        self.vx, self.vy = history[-1]
 
     def update_target(self, target, timestamp_us):
-        assert self.time == timestamp_us
+        assert timestamp_us == 0
 
     def advance(self, timestamp_us):
-        count = (timestamp_us - self.time) // 1000
-        assert 1 <= count <= 32
+        assert timestamp_us == 16000
         if Path("fail").exists():
             raise RuntimeError("fixture planner failure")
         if Path("stall").exists():
             Path("entered").touch()
             while Path("stall").exists():
                 time.sleep(.005)
-        self.time = timestamp_us
-        sample = [(2, 1), (0, 0), (1, -1)]
-        return {"reports": [sample[i] if i < len(sample) else (0, 0) for i in range(count)]}
-'''
+        return {"xy": [(i * 2 * self.vx, i * 2 * self.vy) for i in range(1, 17)]}
 
-NUMPY_FIXTURE = '''
-from contextlib import contextmanager
-
-@contextmanager
-def load(path, *, allow_pickle):
-    assert path.is_file() and not allow_pickle
-    yield {"profile_hardware": [(0, 0)] * 256}
+def load(*, prewarm):
+    assert prewarm
+    return Planner()
 '''
 
 
@@ -72,14 +62,7 @@ def main():
             shutil.copyfile(source_tools / file, root / 'tools' / file)
         env = os.environ.copy()
         if not args.real_python:
-            package = root / 'abcurves'
-            package.mkdir()
-            (package / '__init__.py').write_text(PLANNER_FIXTURE)
-            (package / 'continuous.py').write_text('COMMON_RADIANS_PER_COUNT = 0.001')
-            (root / 'numpy.py').write_text(NUMPY_FIXTURE)
-            data = root / 'examples' / 'data'
-            data.mkdir(parents=True)
-            (data / 'human_start.npz').touch()
+            (root / 'abcurves.py').write_text(PLANNER_FIXTURE)
             env['PYTHONPATH'] = str(root)
         frame_port, pi_port = free_port(), free_port()
         while frame_port == pi_port:
@@ -89,7 +72,9 @@ def main():
         profile.write_text(json.dumps(dict(frame_port=frame_port, pi_port=pi_port,
             gain_x=2, gain_y=2, max_step=max_step, offset_y=25, max_age_ms=100,
             omni_python=args.real_python or sys.executable, humanization=dict(enabled=True, path=5))))
-        pi = MockPi(pi_port).start()
+        pi = MockPi(pi_port)
+        pi.history_enabled = True
+        pi.start()
         sender = Sender(port=frame_port, fps=90).start()
         log = root / 'receiver.log'
         with log.open('wb') as output:
@@ -100,31 +85,29 @@ def main():
             return [c for c in pi.commands.copy() if c['dx'] or c['dy']]
 
         try:
-            wait_for(lambda: len(motions()) >= 5, 'No ABCurves movement', timeout=120 if args.real_python else 8)
-            assert 'ABCurves ready' in log.read_text(), log.read_text()
-            assert all(abs(c['dx']) <= max_step and abs(c['dy']) <= max_step for c in motions())
-            assert any(c['dx'] > 0 for c in motions()) and any(c['dy'] > 0 for c in motions())
+            wait_for(lambda: 'ABCurves ready' in log.read_text(), 'Hand history did not become ready',
+                     timeout=120 if args.real_python else 8)
+            time.sleep(.12)
+            assert not motions(), 'ABCurves moved a stationary mouse'
+            pi.motion_x = 1000 if args.real_python else 2000
+            wait_for(lambda: len(motions()) >= (1 if args.real_python else 5), 'No hand-following correction')
+            assert all(0 < c['dx'] <= max_step and c['dy'] == 0 for c in motions())
+
+            pi.motion_x = -2000
+            time.sleep(.08)
+            count = len(motions())
+            time.sleep(.08)
+            assert len(motions()) == count, 'ABCurves pushed against a reversed gesture'
+            pi.motion_x = 0
+            time.sleep(.08)
+            assert len(motions()) == count, 'ABCurves moved after a stop'
             if not args.real_python:
-                pair = [(c['dx'], c['dy']) for c in motions()[:2]]
-                assert pair == [(2, 1), (1, -1)], pair
-                # The mock timestamps before recvfrom, which can group arrivals
-                # when the receiving thread is descheduled. Sample several blocks.
-                wait_for(lambda: len(motions()) >= 12, 'Too few rendered blocks to check pacing')
-                commands = motions()
-                gaps = [right['time'] - left['time'] for left, right in zip(commands, commands[1:])
-                        if (left['dx'], left['dy'], right['dx'], right['dy']) == (2, 1, 1, -1)]
-                assert any(gap >= .001 for gap in gaps), gaps
-                pi.endpoint_poll_us = 4000
-                wait_for(lambda: any((c['dx'], c['dy']) == (3, 0) for c in motions()),
-                         'Slower endpoint did not receive the sum of adjacent reports')
-                pi.endpoint_poll_us = 1000
-                pi.motion_x = 1500
-                time.sleep(.08)
-                during_motion = len(motions())
-                time.sleep(.06)
-                assert len(motions()) == during_motion, 'Renderer continued while physical motion was active'
-                pi.motion_x = 0
-                wait_for(lambda: len(motions()) > during_motion + 2, 'Movement did not resume after physical input')
+                pi.history_enabled = False
+                pi.motion_x = 2000
+                time.sleep(.15)
+                assert len(motions()) == count, 'ABCurves used unavailable physical history'
+                pi.history_enabled = True
+                wait_for(lambda: len(motions()) > count + 5, 'Movement did not resume with physical history')
                 (root / 'stall').touch()
                 wait_for((root / 'entered').exists, 'No outstanding planner request')
                 pi.physical = 0

@@ -38,7 +38,7 @@ With the Pi connection, production physical mouse data comes from cumulative **U
 | Ease in | Builds from zero to normal strength over the selected time using an adjustable exponent. |
 | Adaptive | Reduces strength near the aim point, reaching full strength at the chosen approach distance. |
 | Smooth noise | Adds smoothly interpolated random variation perpendicular to the correction. |
-| ABCurves | Plays movement from the external ABCurves 2 Continuous Planner and native Renderer. |
+| ABCurves | Forecasts from your live mouse movement and adds a small correction along its current direction. |
 
 **Small random variations** adds bounded jitter in mouse units at a configurable interval. Both jitter and smooth noise fade within 20 picture pixels of the aim point and are disabled inside the dead zone. No variation occurs without a current eligible target. Smoothing is time-based exponential averaging. Shaping state resets on target change, deactivation, stale input, and configuration changes; no future path points are queued. Direction strength is applied after shaping/smoothing and before the existing device/per-update caps. Zero strength clears fractional and smoothed leftovers.
 
@@ -55,14 +55,9 @@ cd ABCurves
 python -m pip install -e .
 ```
 
-The checkout supplies the bundled reference mouse profile. Windows includes the
-native Renderer. On Linux, build it from the ABCurves checkout before starting
-Receiver.
-
-```sh
-cmake -S runtime/c -B runtime/c/build -DCMAKE_BUILD_TYPE=Release
-cmake --build runtime/c/build --config Release
-```
+ABCurves hand assistance uses the Pi UDP output and a proxy that supports live
+physical report history. Use a USB mouse with a polling interval of 1 ms or faster.
+The proxy keeps a rolling history of 164 complete millisecond intervals in memory.
 
 In Receiver, open **Movement**, enable **Customize movement path**, and select
 **ABCurves**. A headless profile uses `"humanization": {"enabled": true, "path": 5}`.
@@ -70,20 +65,17 @@ Wait for **ABCurves ready** before testing movement. The first load can take lon
 while Python warms the model. Startup and runtime errors appear in Movement and
 the headless log, with worker details in `cache/abcurves-worker-*.log`.
 
-Receiver feeds gain-scaled target offsets to the Continuous Planner, treating one
-configured output count as one common angular count. The native Renderer uses the
-bundled reference mouse profile and produces one integer XY report per millisecond.
-Receiver preserves report order and the timing of zero-motion samples in each bounded block. It groups adjacent
-reports when Pi telemetry advertises a slower USB endpoint and retains the per-frame
-movement cap. On the Pi, actual USB cadence depends on the existing UDP movement
-path and the endpoint.
+The Continuous Planner starts each forecast from the actual hand history. Receiver
+only requests a forecast while the hand is already moving toward a fresh target.
+When the next physical sample arrives, Receiver compares the corresponding point
+in the forecast with the movement the hand actually made in that same interval.
 
-Disarming, a target change, a stale capture, or a capped correction discards pending
-reports and resets the planner. Where physical motion counters are available,
-Receiver also drops pending reports on detected hand motion and waits for 20 ms of
-quiet before resuming with a fresh target. The reference profile comes from the
-ABCurves checkout. Ordinary desktop tracking uses the planner and Renderer, with
-the existing activation and movement limits.
+Any added movement follows the most recent hand direction. It is limited by the
+remaining target distance, half the measured forward movement, and the configured
+step and device limits. A stop, reversal, passed target, stale input, or missing
+history suppresses assistance. Existing activation gates apply. Before writing a
+correction, the Pi checks that it still follows recent physical movement. It
+retains normal physical-button ownership, mouse movement, and watchdog behavior.
 
 ## Practice and checks
 
