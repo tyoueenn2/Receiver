@@ -19,6 +19,7 @@ def main():
                      'receiver_class_preference_tests' + suffix,
                      'receiver_color_tests' + suffix, 'docs/technical/COLOR_TARGETING.md',
                      'receiver_scenario_runner' + suffix, 'tools/yolo_omni_worker.py',
+                     'tools/abcurves_worker.py', 'tools/worker_protocol.py',
                      'tools/omni_support.py', 'tools/mock_pi.py', 'tools/test_sender.py',
                      'README.md', 'docs/README.md', 'docs/GETTING_STARTED.md',
                      'docs/technical/MODEL_WORKFLOWS.md', 'docs/technical/AIMMY_FEATURES.md',

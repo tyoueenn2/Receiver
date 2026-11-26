@@ -172,12 +172,23 @@ int main() {
         CHECK(c.update(targets, 320, 320, s, limits, 201'000'000).dx == 6);
         c.reset();
         CHECK(c.update(targets, 320, 320, s, limits, 301'000'000).dx == 0);
+        s.humanization.path = HumanizationSettings::abcurves_path;
+        s.humanization.jitter = 20;
+        r = c.update(targets, 320, 320, s, limits, 311'000'000);
+        CHECK(r.dx == 0 && r.dy == 0 && r.curve_target);
+        CHECK(std::abs(r.curve_target->x - 6) < 1e-6 && r.curve_target->y == 0);
+        CHECK(!r.curve_target->new_target);
+        c.reset();
+        r = c.update(targets, 320, 320, s, limits, 321'000'000);
+        CHECK(r.curve_target && r.curve_target->new_target);
+        auto centered = targets;
+        centered[0].x = 150;
+        CHECK(!c.update(centered, 320, 320, s, limits, 331'000'000).curve_target);
         auto file = std::filesystem::temp_directory_path() / "receiver-humanization-test.json";
         s.direction = d;
-        s.humanization.path = 4;
         save_settings(s, file.string());
         auto loaded = load_settings(file.string());
-        CHECK(loaded.direction.mode == 2 && loaded.humanization.path == 4);
+        CHECK(loaded.direction.mode == 2 && loaded.humanization.uses_abcurves());
         {
             std::ofstream f(file);
             f << "{\"version\":1,\"gain_x\":0.3}";

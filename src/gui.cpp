@@ -76,7 +76,7 @@ constexpr PageInfo settings_pages[] = {
      "crosshair"},
     {Page::movement, "movement", "Movement", "ASSISTANCE",
      "Adjust sensitivity, smoothing, and the path of each mouse correction.",
-     "motion humanization ema gain speed deadzone curve bezier jitter noise direction strength maximum "
+     "motion humanization ema gain speed deadzone curve bezier abcurves jitter noise direction strength maximum "
      "correction limits response units counts"},
     {Page::auto_click, "auto-click", "Auto click", "ASSISTANCE",
      "Click automatically when a selected target stays under the crosshair.",
@@ -1783,7 +1783,7 @@ int run_gui(const std::string& options) {
             ImGui::BeginDisabled(!h.enabled);
             changed |= combo("Path style", &h.path,
                              "Straight\0Curved (Bezier)\0Gradual acceleration\0Slower near the "
-                             "target\0Smooth random variation\0");
+                             "target\0Smooth random variation\0ABCurves\0");
             if (h.path == 1)
                 changed |= percent_slider("Curve strength", h.curve);
             if (h.path == 1 || h.path == 2)
@@ -1796,7 +1796,11 @@ int run_gui(const std::string& options) {
                 changed |= slider_float("Smooth variation strength", &h.noise, 0, 20, "%.1f counts");
                 changed |= slider_float("Smooth variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
             }
-            if (ImGui::CollapsingHeader("Random jitter")) {
+            if (h.path == receiver::HumanizationSettings::abcurves_path) {
+                hint("Install ABCurves 2 in the configured Python environment to use the Continuous Planner.");
+                if (!stats.movement_status.empty())
+                    ImGui::TextWrapped("%s", stats.movement_status.c_str());
+            } else if (ImGui::CollapsingHeader("Random jitter")) {
                 changed |= slider_float("Jitter amount", &h.jitter, 0, 20, "%.1f counts");
                 changed |= slider_float("Jitter interval", &h.jitter_interval_ms, 8, 250, "%.0f ms");
                 hint("0 removes jitter. Extra variation can reduce accuracy.");

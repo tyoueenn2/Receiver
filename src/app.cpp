@@ -1,4 +1,5 @@
 #include "receiver/app.hpp"
+#include "abcurves_worker.hpp"
 #include "receiver/color.hpp"
 #include "receiver/capture.hpp"
 #include "receiver/assist.hpp"
@@ -756,6 +757,28 @@ void App::pi_loop() {
         return local_mouse ? local_mouse->fresh(at) : makcu_mouse ? makcu_mouse->fresh(at) : gate.fresh(at);
     };
     Controller controller;
+    std::unique_ptr<AbcurvesWorker> curve_worker;
+    struct CurveFrame {
+        uint64_t id;
+        int64_t observed, deadline, first_ns;
+        double x, y;
+    };
+    std::optional<CurveFrame> curve_next, curve_pending;
+    uint64_t curve_generation = 1;
+    int64_t curve_last_observed = 0;
+    double curve_executed_x = 0, curve_executed_y = 0;
+    auto reset_curve = [&] {
+        if (curve_last_observed)
+            ++curve_generation;
+        curve_last_observed = 0;
+        curve_executed_x = curve_executed_y = 0;
+        curve_next.reset();
+        curve_pending.reset();
+    };
+    auto reset_controller = [&] {
+        controller.reset();
+        reset_curve();
+    };
     AutoTrigger trigger;
     uint64_t auto_command = 0;
     auto cancel_auto_trigger = [&](bool forget_target = true) {
@@ -1198,6 +1221,20 @@ void App::pi_loop() {
 #endif
         const bool exclusive =
             calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status));
+        const bool use_curve = !calibration_only_ && !settings_.return_action.enabled &&
+                               settings_.humanization.uses_abcurves();
+        if (use_curve && !curve_worker)
+            curve_worker = std::make_unique<AbcurvesWorker>([this] { control_wake_.notify(); });
+        AbcurvesWorker::State curve_state;
+        if (curve_worker) {
+            curve_worker->configure(use_curve ? std::string_view(settings_.omni_python) : std::string_view{});
+            if (use_curve)
+                curve_state = curve_worker->poll();
+        }
+        stats_.movement_status = !use_curve                   ? ""
+                                 : !curve_state.error.empty() ? curve_state.error
+                                 : curve_state.ready          ? "ABCurves ready"
+                                                              : "Loading ABCurves";
         bool active = !exclusive && !calibration_only_ && stats_.armed && !stats_.model_loading &&
                       !stats_.benchmarking && !proxy_error && sender_ok && input_ok && motion_ok &&
                       cursor_ok && activation_held(gate.state.physical, settings_);
@@ -1207,13 +1244,13 @@ void App::pi_loop() {
             stats_.active = false;
             stats_.status = calibration_state_.running ? calibration_state_.message
                                                        : "Move and return: " + calibration_state_.operation;
-            controller.reset();
+            reset_controller();
             continue;
         }
         if (active != was_active) {
             ++epoch_;
             result_.reset();
-            controller.reset();
+            reset_controller();
             was_active = active;
             if (!active && settings_.trigger.enabled)
                 injected_.release_all(ReleaseReason::manual, true);
@@ -1231,24 +1268,105 @@ void App::pi_loop() {
                                         : "Active - waiting for fresh detection";
         if (!active || epoch_ != last_epoch) {
             stats_.assist_strength = 0;
-            controller.reset();
+            reset_controller();
             cancel_auto_trigger(!stats_.armed ||
                                 (input_ok && !activation_held(gate.state.physical, settings_)));
             last_epoch = epoch_;
         }
         if (active && result_ && (!result_->deadline || now > result_->deadline)) {
             stats_.assist_strength = 0;
-            controller.reset();
+            reset_controller();
             cancel_auto_trigger(false);
             stats_.status = "Active - waiting for fresh capture";
         }
-        if (!active || !result_ || result_->id == last_result)
+        if (!active || !result_)
             continue;
+
+        auto submit_correction = [&](int dx, int dy, int64_t deadline, int64_t first_ns) {
+            if (!dx && !dy)
+                return true;
+            // Serialize final gating and send against disarm and configuration changes.
+            auto send_at = now_ns();
+            if (send_at > deadline || !input_fresh(send_at)) {
+                reset_controller();
+                ++stats_.stale;
+                return false;
+            }
+            auto state = injected_.snapshot();
+            auto packet = movement(sequence++, dx, dy, 0, 0, state.wire_mask());
+            const bool submitted = local_mouse   ? local_mouse->send(dx, dy)
+                                   : makcu_mouse ? makcu_mouse->send(dx, dy)
+                                                 : socket.send(packet, pi);
+            if (!submitted) {
+                stats_.armed = false;
+                stats_.error = local_mouse   ? "Windows blocked local mouse output. Use a normal desktop "
+                                               "window at the same privilege level."
+                               : makcu_mouse ? "MAKCU serial movement failed. Stop and reconnect the device."
+                                             : "Pi command send failed";
+                ++epoch_;
+                reset_controller();
+                injected_.release_all(local_mouse ? ReleaseReason::gpu_error : ReleaseReason::pi_error, true);
+                return false;
+            }
+            auto sent = now_ns();
+            ++stats_.sent;
+            stats_.submit.add(double(sent - send_at) / 1e6);
+            stats_.receiver_total.add(double(sent - first_ns) / 1e6);
+            stats_.capture_age.add(double(int64_t(settings_.max_age_ms) * 1'000'000 - (deadline - sent)) /
+                                   1e6);
+            stats_.status = "Active - correction submitted";
+            return true;
+        };
+        auto service_curve = [&] {
+            if (!curve_state.ready || (curve_pending && now > curve_pending->deadline)) {
+                reset_curve();
+                return;
+            }
+            // A reply can only use movement from this active stream and a still-fresh observation.
+            const auto& reply = curve_state.reply;
+            if (curve_pending && reply && reply->id == curve_pending->id) {
+                const auto frame = *curve_pending;
+                curve_pending.reset();
+                const int minx = std::max(-settings_.max_step, gate.state.xmin);
+                const int maxx = std::min(settings_.max_step, gate.state.xmax);
+                const int miny = std::max(-settings_.max_step, gate.state.ymin);
+                const int maxy = std::min(settings_.max_step, gate.state.ymax);
+                const double x = std::round(reply->dx), y = std::round(reply->dy);
+                const int dx = settings_.gain_x > 0 ? int(std::clamp(x, double(minx), double(maxx))) : 0;
+                const int dy = settings_.gain_y > 0 ? int(std::clamp(y, double(miny), double(maxy))) : 0;
+                if (!submit_correction(dx, dy, frame.deadline, frame.first_ns))
+                    return;
+                if ((settings_.gain_x > 0 && dx != x) || (settings_.gain_y > 0 && dy != y)) {
+                    // A capped command leaves the planner ahead of the movement actually submitted.
+                    reset_curve();
+                    return;
+                }
+                curve_executed_x += dx;
+                curve_executed_y += dy;
+            }
+            if (!curve_pending && curve_next && now <= curve_next->deadline) {
+                const auto frame = *curve_next;
+                const int step_ms = curve_last_observed
+                                        ? int(std::clamp<int64_t>(
+                                              (frame.observed - curve_last_observed) / 1'000'000, 1, 32))
+                                        : 8;
+                curve_worker->submit({frame.id, curve_generation, step_ms, frame.x, frame.y,
+                                      curve_executed_x, curve_executed_y});
+                curve_last_observed = frame.observed;
+                curve_pending = frame;
+                curve_next.reset();
+            }
+        };
+        if (result_->id == last_result) {
+            if (use_curve)
+                service_curve();
+            continue;
+        }
         auto& r = *result_;
         last_result = r.id;
         if (r.epoch != epoch_ || !r.deadline || now > r.deadline ||
             now - r.frame->first_ns > int64_t(settings_.max_age_ms) * 1'000'000) {
-            controller.reset();
+            reset_controller();
             cancel_auto_trigger(false);
             ++stats_.stale;
             continue;
@@ -1261,6 +1379,7 @@ void App::pi_loop() {
         if (preview_.frame && preview_.frame->header.sequence == r.frame->header.sequence)
             preview_.correction = correction;
         if (!correction.target) {
+            reset_curve();
             cancel_auto_trigger();
             stats_.status = "Active - no target";
             continue;
@@ -1338,38 +1457,20 @@ void App::pi_loop() {
                 stats_.trigger_status = "Waiting for button or pending click";
         } else
             cancel_auto_trigger();
-        if (correction.dx || correction.dy) {
-            // Serialize final gating, current complete synthetic snapshot and send against disarm/config
-            // changes.
-            auto send_at = now_ns();
-            if (send_at > r.deadline || !input_fresh(send_at)) {
-                controller.reset();
-                ++stats_.stale;
+        if (use_curve) {
+            if (!correction.curve_target) {
+                reset_curve();
                 continue;
             }
-            auto state = injected_.snapshot();
-            auto packet = movement(sequence++, correction.dx, correction.dy, 0, 0, state.wire_mask());
-            const bool submitted = local_mouse   ? local_mouse->send(correction.dx, correction.dy)
-                                   : makcu_mouse ? makcu_mouse->send(correction.dx, correction.dy)
-                                                 : socket.send(packet, pi);
-            if (!submitted) {
-                stats_.armed = false;
-                stats_.error = local_mouse   ? "Windows blocked local mouse output. Use a normal desktop "
-                                               "window at the same privilege level."
-                               : makcu_mouse ? "MAKCU serial movement failed. Stop and reconnect the device."
-                                             : "Pi command send failed";
-                ++epoch_;
-                controller.reset();
-                injected_.release_all(local_mouse ? ReleaseReason::gpu_error : ReleaseReason::pi_error, true);
-                continue;
-            }
-            auto sent = now_ns();
-            ++stats_.sent;
-            stats_.submit.add(double(sent - send_at) / 1e6);
-            stats_.receiver_total.add(double(sent - r.frame->first_ns) / 1e6);
-            stats_.capture_age.add(double(int64_t(settings_.max_age_ms) * 1'000'000 - (r.deadline - sent)) /
-                                   1e6);
-            stats_.status = "Active - correction submitted";
+            const auto& goal = *correction.curve_target;
+            if (goal.new_target)
+                reset_curve();
+            const auto deadline =
+                std::min(r.deadline, r.frame->first_ns + int64_t(settings_.max_age_ms) * 1'000'000);
+            curve_next = CurveFrame{r.id, now, deadline, r.frame->first_ns, goal.x, goal.y};
+            service_curve();
+        } else {
+            submit_correction(correction.dx, correction.dy, r.deadline, r.frame->first_ns);
         }
     }
 }

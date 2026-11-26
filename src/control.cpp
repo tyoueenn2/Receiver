@@ -289,7 +289,7 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     double vx = ex * s.gain_x, vy = ey * s.gain_y;
     const auto& h = s.humanization;
     double distance = std::hypot(ex, ey);
-    if (h.enabled && distance > s.deadzone) {
+    if (h.enabled && !h.uses_abcurves() && distance > s.deadzone) {
         double progress = std::clamp(double(now - acquired_) / (h.duration_ms * 1e6), 0., 1.);
         double length = std::hypot(vx, vy);
         double px = length ? -vy / length : 0, py = length ? vx / length : 0;
@@ -344,6 +344,14 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     if (strength == 0) {
         residual_x_ = residual_y_ = smooth_x_ = smooth_y_ = 0;
     }
+    previous_ = *best;
+    last_ = now;
+    if (h.uses_abcurves()) {
+        Correction correction{0, 0, *best, x, y, strength};
+        if (vx != 0 || vy != 0)
+            correction.curve_target = CurveTarget{vx, vy, !same};
+        return correction;
+    }
     const int minx = std::max(-s.max_step, limits.xmin), maxx = std::min(s.max_step, limits.xmax),
               miny = std::max(-s.max_step, limits.ymin), maxy = std::min(s.max_step, limits.ymax);
     vx = std::clamp(vx, double(minx), double(maxx));
@@ -353,8 +361,6 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     int dx = int(std::trunc(ax)), dy = int(std::trunc(ay));
     residual_x_ = ax - dx;
     residual_y_ = ay - dy;
-    previous_ = *best;
-    last_ = now;
     return {dx, dy, *best, x, y, strength};
 }
 } // namespace receiver
