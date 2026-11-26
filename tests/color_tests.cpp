@@ -95,6 +95,30 @@ void matching() {
     invalid.pixels.resize(1);
     rejects([&] { matcher.build(invalid, s); });
 }
+void fractional_thresholds() {
+    ColorMatcher matcher;
+    for (int format : {1, 2}) {
+        auto f = image(65, 2, format);
+        // Inclusive endpoints at values that require rounding in the HSV conversion.
+        pixel(f, 64, 1, 251, 141, 17);
+        ColorSettings s;
+        s.min_h = s.max_h = (124.f / 234.f) * 60;
+        s.min_s = s.max_s = 23'400.f / 251.f;
+        s.min_v = s.max_v = 251.f * (100.f / 255.f);
+        const auto exact = matcher.build(f, s);
+        CHECK(exact->count == 1 && exact->bits[3] == 1);
+        auto moved = s;
+        moved.max_s = moved.min_s = std::nextafter(s.min_s, 100.f);
+        CHECK(matcher.build(f, moved)->count == 0);
+        moved = s;
+        moved.max_v = moved.min_v = std::nextafter(s.min_v, 100.f);
+        CHECK(matcher.build(f, moved)->count == 0);
+        moved = s;
+        moved.max_h = moved.min_h = std::nextafter(s.min_h, 360.f);
+        CHECK(matcher.build(f, moved)->count == 0);
+        CHECK(matcher.build(f, s)->count == 1 && exact->bits[3] == 1);
+    }
+}
 void regions_and_offsets() {
     auto f = image();
     pixel(f, 10, 1, 255, 0, 0); // Highest, but outside a small FOV.
@@ -347,6 +371,7 @@ void settings() {
 int main() {
     try {
         matching();
+        fractional_thresholds();
         regions_and_offsets();
         controller_modes();
         trigger_geometry();
