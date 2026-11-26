@@ -787,7 +787,7 @@ void App::pi_loop() {
     std::unique_ptr<AbcurvesWorker> curve_worker;
     struct CurveFrame {
         uint64_t id;
-        int64_t deadline, first_ns;
+        int64_t deadline;
         double x, y;
     };
     struct CurvePlan {
@@ -798,11 +798,21 @@ void App::pi_loop() {
     std::optional<CurveFrame> curve_next;
     std::optional<CurvePlan> curve_plan;
     std::optional<mouse_history::Reply> curve_history;
+    std::optional<mouse_history::Steering> steering_sent;
     uint64_t history_token = 0, last_curve_end = 0;
     int64_t history_issued = 0, history_received = 0, history_due = 0;
     constexpr int64_t history_period_ns = 5'000'000;
     constexpr int64_t history_fresh_ns = 10'000'000;
     auto reset_curve = [&] {
+        if (steering_sent) {
+            mouse_history::Steering cancel;
+            cancel.session = steering_sent->session;
+            cancel.token = ++token;
+            cancel.epoch = steering_sent->epoch;
+            cancel.generation = steering_sent->generation;
+            socket.send(mouse_history::packet(cancel), pi);
+            steering_sent.reset();
+        }
         curve_next.reset();
         curve_plan.reset();
     };
@@ -843,8 +853,10 @@ void App::pi_loop() {
         if (stop_ && !pi_udp)
             break;
         auto loop_start = now_ns();
-        if (stop_ && !shutdown_deadline)
+        if (stop_ && !shutdown_deadline) {
+            reset_curve();
             shutdown_deadline = loop_start + 100'000'000;
+        }
         if (shutdown_deadline && loop_start >= shutdown_deadline)
             break;
         control_wake_.wait(pi_udp ? &socket : nullptr, bool(local_mouse),
@@ -1355,8 +1367,7 @@ void App::pi_loop() {
         if (!active || !result_)
             continue;
 
-        auto submit_correction = [&](int dx, int dy, int64_t deadline, int64_t first_ns,
-                                     bool hand_assist = false) {
+        auto submit_correction = [&](int dx, int dy, int64_t deadline, int64_t first_ns) {
             if (!dx && !dy)
                 return true;
             // Serialize final gating and send against disarm and configuration changes.
@@ -1368,8 +1379,6 @@ void App::pi_loop() {
             }
             auto state = injected_.snapshot();
             auto packet = movement(sequence++, dx, dy, 0, 0, state.wire_mask());
-            if (hand_assist)
-                packet.back() = mouse_history::guarded_assist;
             const bool submitted = local_mouse   ? local_mouse->send(dx, dy)
                                    : makcu_mouse ? makcu_mouse->send(dx, dy)
                                                  : socket.send(packet, pi);
@@ -1393,11 +1402,19 @@ void App::pi_loop() {
             stats_.status = "Active - correction submitted";
             return true;
         };
+        const double steering_angle = settings_.humanization.abcurves_angle_deg;
         auto service_curve = [&] {
             const auto at = now_ns();
-            if (!curve_state.ready || !have_history)
+            if (!curve_state.ready || !have_history) {
+                reset_curve();
                 return;
+            }
             const auto& hand = *curve_history;
+            if (steering_sent && !abcurves_aligned(hand.trace, steering_sent->aim[0],
+                                                  steering_sent->aim[1], steering_angle)) {
+                reset_curve();
+                return;
+            }
             if (curve_plan && (at >= curve_plan->frame.deadline || curve_plan->epoch != hand.epoch ||
                                curve_plan->generation != hand.generation ||
                                hand.end_ms > curve_plan->end_ms + abcurves_horizon_ms))
@@ -1408,22 +1425,46 @@ void App::pi_loop() {
                 auto completed = std::move(*curve_plan);
                 curve_plan.reset();
                 const auto elapsed = size_t(hand.end_ms - completed.end_ms);
-                const auto& forecast = completed.reply->positions[elapsed - 1];
+                const auto& forecast = completed.reply->positions;
+                const auto& next = forecast[std::min(elapsed, forecast.size() - 1)];
+                const auto& previous = forecast[std::min(elapsed - 1, forecast.size() - 2)];
                 const auto& frame = completed.frame;
-                auto [dx, dy] = abcurves_assist(hand.trace, elapsed, forecast, frame.x, frame.y,
-                                               settings_.max_step);
-                dx = settings_.gain_x > 0 ? std::clamp(dx, gate.state.xmin, gate.state.xmax) : 0;
-                dy = settings_.gain_y > 0 ? std::clamp(dy, gate.state.ymin, gate.state.ymax) : 0;
-                if (!submit_correction(dx, dy, frame.deadline, frame.first_ns, true))
+                const auto dx = next[0] - previous[0], dy = next[1] - previous[1];
+                const auto aim = abcurves_wire_direction(frame.x, frame.y);
+                const auto tangent = abcurves_wire_direction(dx, dy);
+                const auto remaining_ms = (frame.deadline - at) / 1'000'000;
+                if (remaining_ms > 0 && input_fresh(at) &&
+                    abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle) &&
+                    aim != std::array<int, 2>{} && tangent != std::array<int, 2>{} &&
+                    int64_t(aim[0]) * tangent[0] + int64_t(aim[1]) * tangent[1] > 0) {
+                    mouse_history::Steering advice;
+                    advice.session = client;
+                    advice.token = ++token;
+                    advice.epoch = hand.epoch;
+                    advice.generation = hand.generation;
+                    advice.sample_ms = hand.end_ms;
+                    advice.expires_ms = hand.end_ms + std::min(uint64_t(remaining_ms),
+                                                               mouse_history::steering_lifetime_ms);
+                    advice.angle_cdeg = uint16_t(std::round(steering_angle * 100));
+                    advice.aim = aim;
+                    advice.tangent = tangent;
+                    if (socket.send(mouse_history::packet(advice), pi)) {
+                        steering_sent = advice;
+                        stats_.status = "Active - ABCurves steering update sent";
+                    }
+                } else {
+                    reset_curve();
                     return;
+                }
             }
             if (!curve_plan && curve_next && at < curve_next->deadline && hand.end_ms > last_curve_end) {
                 const auto frame = *curve_next;
                 curve_next.reset();
-                // Forecast only while the hand is already moving toward this observation.
-                const auto [x, y] = current_hand_direction(hand.trace);
-                if (x * frame.x + y * frame.y <= 0)
+                const bool engaged = steering_sent && hand.end_ms < steering_sent->expires_ms;
+                if (!abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle * (engaged ? 1 : .9))) {
+                    reset_curve();
                     return;
+                }
                 curve_worker->submit({frame.id, frame.x, frame.y, hand.trace});
                 curve_plan = CurvePlan{frame, hand.epoch, hand.generation, hand.end_ms, {}};
                 last_curve_end = hand.end_ms;
@@ -1530,7 +1571,13 @@ void App::pi_loop() {
         } else
             cancel_auto_trigger();
         if (use_curve) {
-            if (!correction.curve_target) {
+            const auto rx = settings_.reference_x < 0 ? r.frame->header.width * .5 : settings_.reference_x;
+            const auto ry = settings_.reference_y < 0 ? r.frame->header.height * .5 : settings_.reference_y;
+            const auto distance = std::hypot(correction.aim_x - rx, correction.aim_y - ry);
+            if (!correction.curve_target || !have_history || settings_.gain_x <= 0 || settings_.gain_y <= 0 ||
+                distance > settings_.humanization.abcurves_range_px ||
+                !abcurves_aligned(curve_history->trace, correction.curve_target->x,
+                                  correction.curve_target->y, steering_angle)) {
                 reset_curve();
                 continue;
             }
@@ -1539,7 +1586,7 @@ void App::pi_loop() {
                 reset_curve();
             const auto deadline =
                 std::min(r.deadline, r.frame->first_ns + int64_t(settings_.max_age_ms) * 1'000'000);
-            curve_next = CurveFrame{r.id, deadline, r.frame->first_ns, goal.x, goal.y};
+            curve_next = CurveFrame{r.id, deadline, goal.x, goal.y};
             service_curve();
         } else {
             submit_correction(correction.dx, correction.dy, r.deadline, r.frame->first_ns);

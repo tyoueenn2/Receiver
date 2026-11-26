@@ -41,7 +41,7 @@ class Planner:
             Path("entered").touch()
             while Path("stall").exists():
                 time.sleep(.005)
-        return {"xy": [(i * 2 * self.vx, i * 2 * self.vy) for i in range(1, 17)]}
+        return {"xy": [(i * 2 * self.vx, i * (2 * self.vy - .1)) for i in range(1, 17)]}
 
 def load(*, prewarm):
     assert prewarm
@@ -68,9 +68,8 @@ def main():
         while frame_port == pi_port:
             pi_port = free_port()
         profile = root / 'profile.json'
-        max_step = 8
         profile.write_text(json.dumps(dict(frame_port=frame_port, pi_port=pi_port,
-            gain_x=2, gain_y=2, max_step=max_step, offset_y=25, max_age_ms=100,
+            gain_x=2, gain_y=2, max_age_ms=100,
             omni_python=args.real_python or sys.executable, humanization=dict(enabled=True, path=5))))
         pi = MockPi(pi_port)
         pi.history_enabled = True
@@ -81,60 +80,73 @@ def main():
             process = subprocess.Popen([str(args.executable), '--profile', str(profile), '--simulate',
                 '--arm', '--seconds', '0'], cwd=root, env=env, stdout=output, stderr=subprocess.STDOUT)
 
-        def motions():
-            return [c for c in pi.commands.copy() if c['dx'] or c['dy']]
+        def advice():
+            return [event for event in pi.steering_events.copy() if event['angle']]
 
         try:
             wait_for(lambda: 'ABCurves ready' in log.read_text(), 'Hand history did not become ready',
                      timeout=120 if args.real_python else 8)
             time.sleep(.12)
-            assert not motions(), 'ABCurves moved a stationary mouse'
-            pi.motion_x = 1000 if args.real_python else 2000
-            wait_for(lambda: len(motions()) >= (1 if args.real_python else 5), 'No hand-following correction')
-            assert all(0 < c['dx'] <= max_step and c['dy'] == 0 for c in motions())
+            assert not advice(), 'ABCurves engaged with a stationary mouse'
+            pi.motion_x = 2000
+            time.sleep(.14)
+            assert not advice(), 'A target 64 pixels away exceeded the default range'
+            sender.stop()
+            sender = Sender(port=frame_port, width=160, height=160, fps=90).start()
+            wait_for(lambda: len(advice()) >= (1 if args.real_python else 5), 'No near-target steering advice')
+            assert all(e['angle'] == 500 and 0 < e['expires'] - e['sample'] <= 20 for e in advice())
+            assert all(e['aim'][0] > 0 and abs(e['aim'][1]) <= 1 for e in advice())
 
+            pi.motion_y = 1000
+            time.sleep(.08)
+            count = len(advice())
+            time.sleep(.08)
+            assert len(advice()) == count, 'ABCurves steered outside the direction cone'
+            assert pi.steering_events[-1]['angle'] == 0, 'Receiver did not cancel steering'
+            pi.motion_y = 0
             pi.motion_x = -2000
             time.sleep(.08)
-            count = len(motions())
+            count = len(advice())
             time.sleep(.08)
-            assert len(motions()) == count, 'ABCurves pushed against a reversed gesture'
+            assert len(advice()) == count, 'ABCurves pushed against a reversed gesture'
             pi.motion_x = 0
             time.sleep(.08)
-            assert len(motions()) == count, 'ABCurves moved after a stop'
+            assert len(advice()) == count, 'ABCurves moved after a stop'
             if not args.real_python:
                 pi.history_enabled = False
                 pi.motion_x = 2000
                 time.sleep(.15)
-                assert len(motions()) == count, 'ABCurves used unavailable physical history'
+                assert len(advice()) == count, 'ABCurves used unavailable physical history'
                 pi.history_enabled = True
-                wait_for(lambda: len(motions()) > count + 5, 'Movement did not resume with physical history')
+                wait_for(lambda: len(advice()) > count + 5, 'Steering did not resume with physical history')
                 (root / 'stall').touch()
                 wait_for((root / 'entered').exists, 'No outstanding planner request')
                 pi.physical = 0
                 wait_for(lambda: 'Armed - hold activation button' in log.read_text(),
                          'Receiver did not observe activation release')
-                count = len(motions())
+                count = len(advice())
                 (root / 'stall').unlink()
                 time.sleep(.2)
-                assert len(motions()) == count, 'Late reply produced movement after release'
+                assert len(advice()) == count, 'Late reply produced movement after release'
                 pi.physical = 2
-                wait_for(lambda: len(motions()) > count + 5, 'Movement did not resume after activation')
+                wait_for(lambda: len(advice()) > count + 5, 'Steering did not resume after activation')
                 (root / 'entered').unlink()
                 (root / 'stall').touch()
                 wait_for((root / 'entered').exists, 'No outstanding request before the capture stall')
                 sender.paused = True
                 time.sleep(.15)
-                count = len(motions())
+                count = len(advice())
                 (root / 'stall').unlink()
                 time.sleep(.15)
-                assert len(motions()) == count, 'Late reply used an expired capture'
+                assert len(advice()) == count, 'Late reply used an expired capture'
                 sender.paused = False
-                wait_for(lambda: len(motions()) > count + 5, 'Movement did not resume after fresh frames')
+                wait_for(lambda: len(advice()) > count + 5, 'Steering did not resume after fresh frames')
                 (root / 'fail').touch()
                 wait_for(lambda: 'fixture planner failure' in log.read_text(), 'Worker failure was hidden')
-                count = len(motions())
+                count = len(advice())
                 time.sleep(.2)
-                assert len(motions()) == count, 'Receiver moved after the selected planner failed'
+                assert len(advice()) == count, 'Receiver moved after the selected planner failed'
+            assert all(not c['dx'] and not c['dy'] for c in pi.commands), 'ABCurves sent extra movement'
         finally:
             stop_logged_process(process)
             output = collect_logged_output(process, log, timeout=5)

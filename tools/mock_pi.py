@@ -22,6 +22,7 @@ class MockPi:
         self.upt3_enabled = True
         self.endpoint_poll_us = 1000
         self.history_enabled = False
+        self.steering_events = []
         self.motion_x = self.motion_y = 0.0
         self.motion_generation = 1
         self.commands, self.transitions = [], []
@@ -112,15 +113,20 @@ class MockPi:
                             # the requested version as soon as motion data is available.
                             if telemetry_version >= 2 and not self.motion_enabled:
                                 telemetry_version = 1
+                elif len(data) == 64 and data[:4] == b'UPJ1':
+                    _, angle, candidate, _, epoch, generation, sample, expires, ax, ay, tx, ty = \
+                        struct.unpack('!4sH2x6Q4h', data)
+                    if (self.history_enabled and subscriber == source and
+                            client == candidate and epoch == self.session and generation == self.motion_generation):
+                        self.steering_events.append(dict(angle=angle, sample=sample, expires=expires,
+                                                         aim=(ax, ay), tangent=(tx, ty)))
                 elif len(data) == MOVE.size and data[:4] == b'UPX1':
                     _, move_sequence, dx, dy, wheel, pan, buttons, reserved = MOVE.unpack(data)
                     if owner is not None and owner != source:
                         self.sock.sendto(b'busy', source)
                     elif not self.ready:
                         self.sock.sendto(b'error not50', source)
-                    elif ((not reserved or (reserved == 1 and self.history_enabled and
-                                             dx * self.motion_x + dy * self.motion_y > 0)) and
-                          (move_seq is None or newer(move_sequence, move_seq))):
+                    elif not reserved and (move_seq is None or newer(move_sequence, move_seq)):
                         owner, lease, move_seq = source, now, move_sequence
                         if persistent != buttons:
                             self.transitions.append(dict(time=now, persistent=buttons,

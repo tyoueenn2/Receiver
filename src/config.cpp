@@ -37,7 +37,8 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(CollectionSettings, enabled, aut
                                                 directory)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(HumanizationSettings, enabled, path, curve, duration_ms,
                                                 exponent, adaptive_distance, jitter, jitter_interval_ms,
-                                                noise, noise_period_ms, ema_enabled, ema_alpha)
+                                                noise, noise_period_ms, ema_enabled, ema_alpha,
+                                                abcurves_range_px, abcurves_angle_deg)
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(TrackingSettings, prediction, dynamic_fov, prediction_method,
                                                 fov_button, lead_ms, lead_multiplier, velocity_smoothing_ms,
                                                 max_lead, sticky_distance, held_radius)
@@ -142,7 +143,8 @@ void validate(const Settings& s) {
     if (h.path < 0 || h.path > HumanizationSettings::abcurves_path || !range(h.curve, 0, 1) ||
         !range(h.duration_ms, 10, 1000) ||
         !range(h.exponent, 1, 5) || !range(h.adaptive_distance, 1, 1024) || !range(h.jitter, 0, 20) ||
-        !range(h.jitter_interval_ms, 8, 250) || !range(h.noise, 0, 20) || !range(h.noise_period_ms, 10, 1000))
+        !range(h.jitter_interval_ms, 8, 250) || !range(h.noise, 0, 20) || !range(h.noise_period_ms, 10, 1000) ||
+        !range(h.abcurves_range_px, 1, 512) || !range(h.abcurves_angle_deg, .5f, 30))
         throw std::runtime_error("Humanization settings are outside their allowed range");
     if (d.mode < 0 || d.mode > 2 || !range(d.strength, 0, 1) || !range(d.slow_strength, 0, 2) ||
         !range(d.slow_speed, 1, 2000) || !range(d.window_ms, 5, 100) || !range(d.left_strength, 0, 2) ||
