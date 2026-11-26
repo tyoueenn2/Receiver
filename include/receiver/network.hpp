@@ -12,6 +12,11 @@ class UdpSocket {
     uintptr_t socket_ = ~uintptr_t(0);
     void* readable_ = nullptr;
     friend class ControlWake;
+    friend class App;
+
+    int wait_readable(int timeout_ms);
+    // A negative result means no datagram was consumed. Zero includes truncated packets.
+    int receive_now(std::span<uint8_t> buffer, Address& from, bool& would_block);
 
   public:
     UdpSocket(const std::string& ip, int port);

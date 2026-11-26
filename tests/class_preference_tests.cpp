@@ -1,5 +1,6 @@
 #include "receiver/control.hpp"
 #include "receiver/preferences.hpp"
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -138,6 +139,43 @@ void persistent_anchor() {
     CHECK(select({player, head}, s)->x == head.x); // Reset does not retain the old anchor.
 }
 
+void decode_matches_masked_scores() {
+    constexpr int count = 1400, classes = 12;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const float scores[] = {.8f, .8f, .71f, .1f, 1.1f, nan, inf, -inf};
+    std::vector<float> output((classes + 4) * count);
+    for (int i = 0; i < count; ++i) {
+        output[i] = i % 50 * 6.f + 4;
+        output[count + i] = i / 50 * 8.f + 4;
+        output[2 * count + i] = i % 97 == 0 ? nan : 5.f;
+        output[3 * count + i] = 5.f;
+        for (int c = 0; c < classes; ++c)
+            output[(4 + c) * count + i] = i % 3 ? .8f : scores[(i + c) % std::size(scores)];
+    }
+    for (const auto& selection : {std::vector<int>{}, {8, 0, 8, -1}, {11}, {-1, classes}, {4, 5, 3}}) {
+        for (int preferred : {-1, 0, 7, 11, classes}) {
+            Settings settings;
+            settings.classes = selection;
+            settings.class_preference.class_id = preferred;
+            auto masked = output;
+            for (int c = 0; c < classes; ++c)
+                if (!selection.empty() && c != preferred &&
+                    std::find(selection.begin(), selection.end(), c) == selection.end())
+                    std::fill_n(masked.begin() + (4 + c) * count, count, nan);
+            const auto found = decode_yolo(output, count, classes, 320, 320, 320, settings);
+            settings.classes.clear();
+            const auto expected = decode_yolo(masked, count, classes, 320, 320, 320, settings);
+            CHECK(found.size() == expected.size());
+            for (size_t i = 0; i < found.size(); ++i) {
+                const auto& a = found[i];
+                const auto& b = expected[i];
+                CHECK(a.cls == b.cls && a.score == b.score && a.x == b.x &&
+                      a.y == b.y && a.w == b.w && a.h == b.h);
+            }
+        }
+    }
+}
 void decode_and_settings() {
     Settings s;
     s.classes = {0};
@@ -190,6 +228,7 @@ int main() {
         proximity_preference();
         persistent_anchor();
         decode_and_settings();
+        decode_matches_masked_scores();
         std::cout << checks
                   << " class preference, proximity, filtering, persistence and profile checks passed\n";
     } catch (const std::exception& e) {

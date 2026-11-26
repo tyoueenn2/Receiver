@@ -86,24 +86,37 @@ class Peer {
             }
         }
         if (frames && size_ && now - last_frame_ >= 25'000'000) {
-            FrameHeader h;
-            h.session = session;
-            h.sequence = sequence_++;
-            h.capture_ns = now_ns();
-            h.width = h.height = size_;
-            h.format = 2;
-            h.bytes = uint32_t(size_) * size_ * 4;
-            h.stride = 1352;
-            h.count = uint16_t((h.bytes + h.stride - 1) / h.stride);
-            for (h.index = 0; h.index < h.count; ++h.index) {
-                h.offset = uint32_t(h.index) * h.stride;
-                auto header = encode_frame(h);
-                std::vector<uint8_t> data(header.begin(), header.end());
-                data.resize(48 + std::min<uint32_t>(h.stride, h.bytes - h.offset), 114);
-                CHECK(socket.send(data, target_));
-            }
+            send_frame(size_);
             last_frame_ = now;
         }
+    }
+    uint32_t send_frame(uint16_t size, bool reversed = false, bool partial = false) {
+        FrameHeader h;
+        h.session = session;
+        h.sequence = sequence_++;
+        h.capture_ns = now_ns();
+        h.width = h.height = size;
+        h.format = 2;
+        h.bytes = uint32_t(size) * size * 4;
+        h.stride = 1352;
+        h.count = uint16_t((h.bytes + h.stride - 1) / h.stride);
+        for (uint16_t fragment = 0; fragment < (partial ? 1 : h.count); ++fragment) {
+            h.index = reversed ? uint16_t(h.count - 1 - fragment) : fragment;
+            h.offset = uint32_t(h.index) * h.stride;
+            auto header = encode_frame(h);
+            std::vector<uint8_t> data(header.begin(), header.end());
+            data.resize(48 + std::min<uint32_t>(h.stride, h.bytes - h.offset),
+                        uint8_t((h.offset / h.stride) % 256));
+            CHECK(socket.send(data, target_));
+        }
+        return h.sequence;
+    }
+    void malformed_burst() {
+        std::array<uint8_t, 2600> oversized{};
+        std::array<uint8_t, 48> invalid{'U', 'V', 'F', '1'};
+        CHECK(socket.send(oversized, target_));
+        for (size_t i = 0; i < 80; ++i)
+            CHECK(socket.send(invalid, target_));
     }
     void pump_for(int ms, bool heartbeat = true) {
         const auto deadline = now_ns() + int64_t(ms) * 1'000'000;
@@ -145,10 +158,7 @@ void receive_datagrams(UdpSocket& receive_socket, const Address& target) {
     CHECK(receive_socket.receive(buffer, from, 0) == 0);
 }
 
-void synchronization() {
-    Settings s;
-    s.model = "initial.pt";
-    s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
+std::unique_ptr<UdpSocket> bind_test_endpoints(Settings& s) {
     // Keep Receiver and Pi ports below the ephemeral range and absorb Pi datagrams
     // so Windows does not report asynchronous errors from an unopened UDP port.
     std::unique_ptr<UdpSocket> pi_sink;
@@ -165,6 +175,14 @@ void synchronization() {
     }
     if (!pi_sink)
         throw std::runtime_error("No available loopback ports for sender synchronization");
+    return pi_sink;
+}
+
+void synchronization() {
+    Settings s;
+    s.model = "initial.pt";
+    s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
+    auto pi_sink = bind_test_endpoints(s);
     receive_datagrams(*pi_sink, address(s.pi_ip, s.pi_port));
     s.preview = true;
     s.max_age_ms = 250;
@@ -247,11 +265,61 @@ void synchronization() {
     CHECK(app.stats().error.empty() && !app.stats().armed);
     app.stop();
 }
+void bounded_video_drain() {
+    Settings s;
+    s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
+    auto pi_sink = bind_test_endpoints(s);
+    s.preview = true;
+    s.max_age_ms = 250;
+    App app([](const Settings&, const BackendProgress&, const BackendCancel&) {
+        return std::make_unique<FakeBackend>(160);
+    });
+    app.start(s);
+    Peer peer(s.frame_port);
+    peer.expect(app, 160, "before packet bursts");
+    peer.malformed_burst();
+    const auto first = peer.send_frame(160, true);
+    until(app, "a reordered frame", [&] {
+        peer.poll();
+        const auto preview = app.preview();
+        return preview.frame && preview.frame->header.sequence == first;
+    });
+    auto preview = app.preview();
+    for (size_t offset = 0; offset < preview.frame->header.bytes; ++offset)
+        CHECK(preview.frame->pixels[offset] == uint8_t((offset / 1352) % 256));
+    CHECK(app.stats().network.invalid > 0);
+
+    peer.send_frame(160, false, true);
+    // Sustained bursts during fragment expiry and clock housekeeping.
+    const auto until_ns = now_ns() + 300'000'000;
+    while (now_ns() < until_ns) {
+        peer.malformed_burst();
+        peer.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(app.stats().network.expired > 0 && app.stats().synchronized);
+
+    ++peer.session;
+    peer.requests.clear();
+    peer.expect(app, 160, "after the session change");
+    peer.malformed_burst();
+    const auto older = peer.send_frame(160, false, true);
+    const auto newer = peer.send_frame(160, true);
+    CHECK(newer > older);
+    until(app, "the newest frame of the replacement session", [&] {
+        peer.poll();
+        const auto latest = app.preview();
+        return latest.frame && latest.frame->header.session == peer.session &&
+               latest.frame->header.sequence == newer;
+    });
+    app.stop();
+}
 } // namespace
 int main() {
     try {
         protocol_vectors();
         synchronization();
+        bounded_video_drain();
         std::cout << test::checks << " sender synchronization checks passed\n";
         return 0;
     } catch (const std::exception& error) {

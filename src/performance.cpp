@@ -43,11 +43,16 @@ void recommend_performance(BenchmarkReport& report, PerformanceGoal goal, int ma
         cap = std::min(cap, 60.);
     report.recommended_fps = std::clamp(int(std::floor(std::min(cap, 240.))), 1, 240);
 }
-BenchmarkReport benchmark_model(const Settings& original, const Frame& frame, const BackendFactory& factory,
+BenchmarkReport benchmark_model(const Settings& original, const Frame& source, const BackendFactory& factory,
                                 PerformanceGoal goal, const BackendProgress& progress,
                                 const BackendCancel& cancelled, BenchmarkOptions options) {
     if (options.warmup_ms < 0 || options.sample_ms < 1)
         throw std::runtime_error("Invalid benchmark duration");
+    // Benchmark backends use the same ordinary input memory as standalone verification.
+    std::optional<Frame> heap_copy;
+    if (source.cuda_pinned())
+        heap_copy.emplace(source);
+    const auto& frame = heap_copy ? *heap_copy : source;
     auto info = inspect_model(original);
     std::vector<int> sizes =
         info.fixed_size ? std::vector<int>{info.fixed_size} : std::vector<int>{160, 256, 320, 416, 512, 640};

@@ -110,7 +110,7 @@ struct LocalCapture::Impl {
             (desc.Rotation != DXGI_MODE_ROTATION_IDENTITY && desc.Rotation != DXGI_MODE_ROTATION_UNSPECIFIED))
             throw std::runtime_error("Local capture requires an unrotated BGRA8 desktop display");
     }
-    std::shared_ptr<const Frame> next(int size) {
+    std::shared_ptr<const Frame> next(int size, const std::shared_ptr<FrameMemoryResource>& memory) {
         if (size < 1 || size > 1024 || UINT(size) > desc.ModeDesc.Width || UINT(size) > desc.ModeDesc.Height)
             throw std::runtime_error("Local capture crop must fit the selected display (maximum 1024)");
         DXGI_OUTDUPL_FRAME_INFO info{};
@@ -135,15 +135,7 @@ struct LocalCapture::Impl {
             UINT(size) > source.Height)
             throw std::runtime_error(
                 "Local capture desktop format or dimensions changed. Restart the session.");
-        std::shared_ptr<Frame> frame;
-        for (auto& slot : pool) {
-            if (!slot)
-                slot = std::make_shared<Frame>();
-            if (slot.use_count() == 1) {
-                frame = slot;
-                break;
-            }
-        }
+        auto frame = acquire_frame(pool, memory);
         if (!frame)
             return {}; // A preview/benchmark still owns the pool: drop, never queue.
         const auto first = now_ns();
@@ -189,8 +181,8 @@ struct LocalCapture::Impl {
 };
 LocalCapture::LocalCapture(int output) : impl_(std::make_unique<Impl>(output)) {}
 LocalCapture::~LocalCapture() = default;
-std::shared_ptr<const Frame> LocalCapture::next(int size) {
-    return impl_->next(size);
+std::shared_ptr<const Frame> LocalCapture::next(int size, const std::shared_ptr<FrameMemoryResource>& memory) {
+    return impl_->next(size, memory);
 }
 cursor_protocol::Sample LocalCapture::cursor() const {
     cursor_protocol::Sample s;
@@ -237,7 +229,7 @@ LocalCapture::LocalCapture(int) {
     throw std::runtime_error("Local desktop capture requires Windows 10/11. Select the UDP frame source.");
 }
 LocalCapture::~LocalCapture() = default;
-std::shared_ptr<const Frame> LocalCapture::next(int) {
+std::shared_ptr<const Frame> LocalCapture::next(int, const std::shared_ptr<FrameMemoryResource>&) {
     return {};
 }
 cursor_protocol::Sample LocalCapture::cursor() const {

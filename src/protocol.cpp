@@ -65,7 +65,8 @@ std::array<uint8_t, 48> encode_frame(const FrameHeader& h) {
     put16(p.data() + 44, h.stride);
     return p;
 }
-Reassembler::Reassembler() {
+Reassembler::Reassembler(const std::atomic<std::shared_ptr<FrameMemoryResource>>* memory)
+    : frame_memory_(memory) {
     for (auto& p : pool_)
         p = std::make_shared<Frame>();
 }
@@ -113,11 +114,7 @@ std::shared_ptr<const Frame> Reassembler::accept(Bytes p, int64_t now) {
             *slot = {};
             ++stats.evicted;
         }
-        for (auto& f : pool_)
-            if (f.use_count() == 1) {
-                slot->frame = f;
-                break;
-            }
+        slot->frame = acquire_frame(pool_, frame_memory_ ? frame_memory_->load() : nullptr);
         if (!slot->frame) {
             ++stats.pool_drops;
             return {};

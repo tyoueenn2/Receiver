@@ -22,6 +22,12 @@ class Backend {
     virtual std::vector<int> supported_sizes() const {
         return {};
     }
+    // Called after a model is ready. A replacement may reuse the session's prior resource.
+    virtual std::shared_ptr<FrameMemoryResource>
+    frame_memory_resource(const std::shared_ptr<FrameMemoryResource>& previous) const {
+        (void)previous;
+        return {};
+    }
     virtual std::pair<size_t, size_t> device_memory() const {
         return {};
     }

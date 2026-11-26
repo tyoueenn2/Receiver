@@ -88,49 +88,54 @@ UdpSocket::~UdpSocket() {
     close(Native(socket_));
 #endif
 }
-int UdpSocket::receive(std::span<uint8_t> b, Address& from, int timeout) {
+int UdpSocket::wait_readable(int timeout) {
     const auto fd = Native(socket_);
-    bool would_block = false;
-    const auto read_datagram = [&] {
-        sockaddr_in sa{};
-#ifdef _WIN32
-        int len = sizeof(sa);
-        const auto n = recvfrom(fd, reinterpret_cast<char*>(b.data()), int(b.size()), 0,
-                                reinterpret_cast<sockaddr*>(&sa), &len);
-        if (n < 0) {
-            const int error = WSAGetLastError();
-            would_block = error == WSAEWOULDBLOCK;
-            return would_block || error == WSAEMSGSIZE ? 0 : n;
-        }
-#else
-        socklen_t len = sizeof(sa);
-        const auto n = int(recvfrom(fd, b.data(), b.size(), MSG_TRUNC, reinterpret_cast<sockaddr*>(&sa), &len));
-        if (n < 0) {
-            would_block = errno == EAGAIN || errno == EWOULDBLOCK;
-            return would_block ? 0 : n;
-        }
-        if (n > int(b.size()))
-            return 0;
-#endif
-        from = {sa.sin_addr.s_addr, ntohs(sa.sin_port)};
-        return n;
-    };
-
-    const int n = read_datagram();
-    // Check readability only when we need to wait for the next datagram.
-    if (!would_block || timeout <= 0)
-        return n;
 #ifdef _WIN32
     fd_set set;
     FD_ZERO(&set);
     FD_SET(fd, &set);
     timeval tv{timeout / 1000, (timeout % 1000) * 1000};
-    const int ready = select(0, &set, nullptr, nullptr, &tv);
+    return select(0, &set, nullptr, nullptr, &tv);
 #else
     pollfd event{fd, POLLIN, 0};
-    const int ready = poll(&event, 1, timeout);
+    return poll(&event, 1, timeout);
 #endif
-    return ready > 0 ? read_datagram() : ready;
+}
+int UdpSocket::receive(std::span<uint8_t> b, Address& from, int timeout) {
+    bool would_block;
+    int n = receive_now(b, from, would_block);
+    if (would_block && timeout > 0) {
+        const int ready = wait_readable(timeout);
+        if (ready <= 0)
+            return ready;
+        n = receive_now(b, from, would_block);
+    }
+    return would_block ? 0 : n;
+}
+int UdpSocket::receive_now(std::span<uint8_t> b, Address& from, bool& would_block) {
+    const auto fd = Native(socket_);
+    sockaddr_in sa{};
+    would_block = false;
+#ifdef _WIN32
+    int len = sizeof(sa);
+    const int n = recvfrom(fd, reinterpret_cast<char*>(b.data()), int(b.size()), 0,
+                           reinterpret_cast<sockaddr*>(&sa), &len);
+    if (n < 0) {
+        const int error = WSAGetLastError();
+        would_block = error == WSAEWOULDBLOCK;
+        return error == WSAEMSGSIZE ? 0 : n;
+    }
+#else
+    socklen_t len = sizeof(sa);
+    const int n = int(recvfrom(fd, b.data(), b.size(), MSG_TRUNC, reinterpret_cast<sockaddr*>(&sa), &len));
+    if (n < 0)
+        would_block = errno == EAGAIN || errno == EWOULDBLOCK;
+    if (n > int(b.size()))
+        return 0;
+#endif
+    if (n >= 0)
+        from = {sa.sin_addr.s_addr, ntohs(sa.sin_port)};
+    return n;
 }
 bool UdpSocket::send(Bytes p, const Address& a) {
     sockaddr_in sa{};
