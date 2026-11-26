@@ -158,10 +158,7 @@ void receive_datagrams(UdpSocket& receive_socket, const Address& target) {
     CHECK(receive_socket.receive(buffer, from, 0) == 0);
 }
 
-void synchronization() {
-    Settings s;
-    s.model = "initial.pt";
-    s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
+std::unique_ptr<UdpSocket> bind_test_endpoints(Settings& s) {
     // Keep Receiver and Pi ports below the ephemeral range and absorb Pi datagrams
     // so Windows does not report asynchronous errors from an unopened UDP port.
     std::unique_ptr<UdpSocket> pi_sink;
@@ -178,6 +175,14 @@ void synchronization() {
     }
     if (!pi_sink)
         throw std::runtime_error("No available loopback ports for sender synchronization");
+    return pi_sink;
+}
+
+void synchronization() {
+    Settings s;
+    s.model = "initial.pt";
+    s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
+    auto pi_sink = bind_test_endpoints(s);
     receive_datagrams(*pi_sink, address(s.pi_ip, s.pi_port));
     s.preview = true;
     s.max_age_ms = 250;
@@ -263,9 +268,7 @@ void synchronization() {
 void bounded_video_drain() {
     Settings s;
     s.bind_ip = s.sender_ip = s.pi_ip = "127.0.0.1";
-    s.frame_port = 30000 + int(random_id() % 20000);
-    s.pi_port = s.frame_port + 1;
-    UdpSocket pi_sink("127.0.0.1", s.pi_port);
+    auto pi_sink = bind_test_endpoints(s);
     s.preview = true;
     s.max_age_ms = 250;
     App app([](const Settings&, const BackendProgress&, const BackendCancel&) {
@@ -273,10 +276,10 @@ void bounded_video_drain() {
     });
     app.start(s);
     Peer peer(s.frame_port);
-    peer.expect(160);
+    peer.expect(app, 160, "before packet bursts");
     peer.malformed_burst();
     const auto first = peer.send_frame(160, true);
-    until([&] {
+    until(app, "a reordered frame", [&] {
         peer.poll();
         const auto preview = app.preview();
         return preview.frame && preview.frame->header.sequence == first;
@@ -298,12 +301,12 @@ void bounded_video_drain() {
 
     ++peer.session;
     peer.requests.clear();
-    peer.expect(160);
+    peer.expect(app, 160, "after the session change");
     peer.malformed_burst();
     const auto older = peer.send_frame(160, false, true);
     const auto newer = peer.send_frame(160, true);
     CHECK(newer > older);
-    until([&] {
+    until(app, "the newest frame of the replacement session", [&] {
         peer.poll();
         const auto latest = app.preview();
         return latest.frame && latest.frame->header.session == peer.session &&
