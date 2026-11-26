@@ -55,32 +55,36 @@ cd ABCurves
 python -m pip install -e .
 ```
 
-ABCurves uses Pi UDP output with live physical report history and steering support.
+ABCurves uses Pi UDP output with live physical report history and two-radius steering support.
 Use a USB mouse with a polling interval of 1 ms or faster. The proxy keeps a
 rolling history of 164 complete millisecond intervals in memory.
 
 In Receiver, open **Movement**, enable **Customize movement path**, and select
-**ABCurves**. Two controls appear directly under the style selector.
+**ABCurves**. Three controls appear directly under the style selector.
 
-- **ABCurves target range** limits steering to targets within 50 capture pixels of
-  the aim reference by default.
-- **ABCurves steering angle** defaults to 30 degrees. When your hand leaves that
-  angle from the target bearing, the Pi passes the same report through. A
-  slightly narrower angle is required to engage. The setting also caps the
-  change in direction per report, before HID integer rounding.
+- **ABCurves outer radius** defaults to 50 capture pixels from the aim reference.
+  Movement outside the outer radius passes through.
+- **ABCurves inner radius** defaults to 15 capture pixels. Inside it, the Pi uses
+  the magnitude of each physical report and redirects it along a targetward
+  forecast or directly toward the target. If the detection is centered, the Pi
+  holds XY at zero. Set this radius to 0 to disable full redirection.
+- **ABCurves steering angle** applies between the radii. It defaults to 30 degrees
+  and accepts up to 90 degrees. The Pi passes through reports outside the angle.
+  A slightly narrower angle is required to engage. The setting also caps the
+  change in direction per report in this ring.
 
 Wait for **ABCurves ready** before testing. The headless equivalent is
-`"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_angle_deg": 30}`.
+`"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_inner_px": 15, "abcurves_angle_deg": 30}`.
 The existing activation conditions still apply.
 
-The Continuous Planner forecasts a tangent from your actual hand history.
+The Continuous Planner forecasts a tangent from your actual hand history over 16 ms.
 The Pi rotates each eligible physical XY report toward that tangent, preserving
 its magnitude before integer rounding, as well as its timing, wheel, and
 buttons. Zero input stays zero. A direction change outside the cone cancels
-steering on the Pi immediately. Receiver cancels steering when the target
-leaves range, changes, becomes stale, or activation is released. Each Pi
-steering update expires within 20 ms so dropped packets can only delay
-cancellation briefly.
+outer-ring steering on the Pi immediately. Receiver selects the zone from each
+fresh detection and cancels steering when the target leaves range, changes,
+becomes stale, or activation is released. Each Pi steering update expires
+within 20 ms so dropped packets can only delay cancellation briefly.
 
 ## Practice and checks
 

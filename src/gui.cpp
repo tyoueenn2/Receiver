@@ -1802,10 +1802,18 @@ int run_gui(const std::string& options) {
                 changed |= slider_float("Smooth variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
             }
             if (h.path == receiver::HumanizationSettings::abcurves_path) {
-                changed |= slider_float("ABCurves target range", &h.abcurves_range_px, 1, 512, "%.0f px");
-                changed |= slider_float("ABCurves steering angle", &h.abcurves_angle_deg, .5f, 30, "%.1f deg");
-                hint("Steering stops when your hand leaves this angle from the target. The angle also caps the turn per report.");
-                hint("Install ABCurves 2 and use a Pi proxy with live mouse steering support.");
+                if (slider_float("ABCurves outer radius", &h.abcurves_range_px, 1, 512, "%.0f px")) {
+                    h.abcurves_inner_px = std::min(h.abcurves_inner_px, h.abcurves_range_px - 1);
+                    changed = true;
+                }
+                ImGui::BeginDisabled(h.abcurves_range_px <= 1);
+                changed |= slider_float("ABCurves inner radius", &h.abcurves_inner_px, 0,
+                                        h.abcurves_range_px - 1, "%.0f px");
+                ImGui::EndDisabled();
+                changed |= slider_float("ABCurves steering angle", &h.abcurves_angle_deg, .5f, 90, "%.1f deg");
+                hint("The angle applies between the two radii. Inside the inner radius, any "
+                     "movement is redirected toward the target. Set it to 0 px to disable.");
+                hint("Install ABCurves 2 and use a Pi proxy with two-radius steering support.");
                 if (!stats.movement_status.empty())
                     ImGui::TextWrapped("%s", stats.movement_status.c_str());
             } else if (ImGui::CollapsingHeader("Random jitter")) {

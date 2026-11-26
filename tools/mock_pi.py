@@ -114,11 +114,11 @@ class MockPi:
                             if telemetry_version >= 2 and not self.motion_enabled:
                                 telemetry_version = 1
                 elif len(data) == 64 and data[:4] == b'UPJ1':
-                    _, angle, candidate, _, epoch, generation, sample, expires, ax, ay, tx, ty = \
-                        struct.unpack('!4sH2x6Q4h', data)
+                    _, angle, mode, candidate, _, epoch, generation, sample, expires, ax, ay, tx, ty = \
+                        struct.unpack('!4sHBx6Q4h', data)
                     if (self.history_enabled and subscriber == source and
                             client == candidate and epoch == self.session and generation == self.motion_generation):
-                        self.steering_events.append(dict(angle=angle, sample=sample, expires=expires,
+                        self.steering_events.append(dict(angle=angle, mode=mode, sample=sample, expires=expires,
                                                          aim=(ax, ay), tangent=(tx, ty)))
                 elif len(data) == MOVE.size and data[:4] == b'UPX1':
                     _, move_sequence, dx, dy, wheel, pan, buttons, reserved = MOVE.unpack(data)

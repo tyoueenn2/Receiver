@@ -35,4 +35,8 @@ inline std::array<int, 2> abcurves_wire_direction(double x, double y) {
         return {};
     return {int(std::round(x / length * 10000)), int(std::round(y / length * 10000))};
 }
+
+inline bool abcurves_targetward(const std::array<int, 2>& aim, const std::array<int, 2>& tangent) {
+    return int64_t(aim[0]) * tangent[0] + int64_t(aim[1]) * tangent[1] > 0;
+}
 } // namespace receiver

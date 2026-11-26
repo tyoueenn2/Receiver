@@ -398,8 +398,13 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     last_ = now;
     if (h.uses_abcurves()) {
         Correction correction{0, 0, *best, x, y, strength};
-        if (vx != 0 || vy != 0)
+        const double aim_dx = x - rx, aim_dy = y - ry;
+        if (h.abcurves_inner_px > 0 && std::hypot(aim_dx, aim_dy) <= h.abcurves_inner_px) {
+            correction.curve_target = CurveTarget{aim_dx * s.gain_x, aim_dy * s.gain_y, !same, true};
+            correction.strength = 1;
+        } else if (vx != 0 || vy != 0) {
             correction.curve_target = CurveTarget{vx, vy, !same};
+        }
         return correction;
     }
     const int minx = std::max(-s.max_step, limits.xmin), maxx = std::min(s.max_step, limits.xmax),

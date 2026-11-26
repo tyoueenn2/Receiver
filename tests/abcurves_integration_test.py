@@ -94,7 +94,8 @@ def main():
             sender.stop()
             sender = Sender(port=frame_port, width=160, height=160, fps=90).start()
             wait_for(lambda: len(advice()) >= (1 if args.real_python else 5), 'No near-target steering advice')
-            assert all(e['angle'] == 3000 and 0 < e['expires'] - e['sample'] <= 20 for e in advice())
+            assert all(e['angle'] == 3000 and e['mode'] == 0 and
+                       0 < e['expires'] - e['sample'] <= 20 for e in advice())
             assert all(e['aim'][0] > 0 and abs(e['aim'][1]) <= 1 for e in advice())
 
             pi.motion_x = 4000
@@ -115,6 +116,19 @@ def main():
             count = len(advice())
             time.sleep(.08)
             assert len(advice()) == count, 'ABCurves pushed against a reversed gesture'
+            sender.stop()
+            sender = Sender(port=frame_port, width=64, height=64, fps=90).start()
+            wait_for(lambda: any(e['mode'] == 1 for e in advice()), 'Reversal blocked inner steering')
+            inner_advice = [e for e in advice() if e['mode'] == 1]
+            assert all(e['aim'][0] > 0 and e['tangent'][0] > 0 and
+                       0 < e['expires'] - e['sample'] <= 20 for e in inner_advice)
+            sender.stop()
+            sender = Sender(port=frame_port, width=160, height=160, fps=90).start()
+            wait_for(lambda: pi.steering_events[-1]['angle'] == 0, 'Leaving the inner radius did not cancel steering')
+            time.sleep(.08)
+            count = len(advice())
+            time.sleep(.08)
+            assert len(advice()) == count, 'Reversed input still steered in the outer ring'
             pi.motion_x = 0
             time.sleep(.08)
             assert len(advice()) == count, 'ABCurves moved after a stop'
