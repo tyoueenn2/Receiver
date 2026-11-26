@@ -338,11 +338,12 @@ void App::receive_loop() {
     Reassembler reassembly;
     bool sender_lost = false;
     std::array<uint8_t, 2048> data{};
-    while (!stop_) {
-        Address from;
-        int n = socket.receive(data, from, 2);
-        auto now = now_ns();
-        bool video_packet = false;
+    constexpr size_t max_batch = 64;
+    constexpr int64_t batch_ns = 250'000;
+    std::array<double, max_batch> reassembly_times;
+    size_t completed = 0, replaced = 0;
+    int width = 0, height = 0;
+    auto process_packet = [&](int n, const Address& from, int64_t now) {
         if (n > 0 && from.ip == allowed.ip) {
             Bytes p(data.data(), size_t(n));
             if (n == 16 && !std::memcmp(data.data(), "UVH1", 4) && be32(data.data() + 4) == 0) {
@@ -405,26 +406,43 @@ void App::receive_loop() {
                             }
                     }
                 } else if (n >= 48 && !std::memcmp(data.data(), "UVF1", 4)) {
-                    video_packet = true;
                     auto frame = reassembly.accept(p, now);
                     if (frame) {
-                        std::lock_guard lock(mutex_);
-                        if (latest_)
-                            ++stats_.replaced;
-                        calibration_frame_ = frame;
-                        latest_ = std::move(frame);
-                        stats_.width = latest_->header.width;
-                        stats_.height = latest_->header.height;
-                        stats_.video_complete_ns = latest_->complete_ns;
-                        stats_.reassembly.add(double(latest_->complete_ns - latest_->first_ns) / 1e6);
+                        width = frame->header.width;
+                        height = frame->header.height;
+                        reassembly_times[completed++] = double(frame->complete_ns - frame->first_ns) / 1e6;
+                        {
+                            std::lock_guard lock(mutex_);
+                            if (latest_)
+                                ++replaced;
+                            calibration_frame_ = frame;
+                            latest_ = std::move(frame);
+                            stats_.video_complete_ns = latest_->complete_ns;
+                        }
                         cv_.notify_one();
                     }
                 }
             }
         }
-        // accept() already expires stale frames when a video packet arrives.
-        if (!video_packet)
-            reassembly.expire(now);
+    };
+
+    while (!stop_) {
+        Address from;
+        bool would_block;
+        int n = socket.receive_now(data, from, would_block);
+        if (would_block && socket.wait_readable(2) > 0 && !stop_)
+            n = socket.receive_now(data, from, would_block);
+        auto now = now_ns();
+        const auto deadline = now + batch_ns;
+        for (size_t count = 0; n >= 0 && !stop_; ++count) {
+            process_packet(n, from, now);
+            if (count + 1 == max_batch || now_ns() >= deadline)
+                break;
+            n = socket.receive_now(data, from, would_block);
+            now = now_ns();
+        }
+        now = now_ns();
+        reassembly.expire(now);
         auto seen = sender_seen_.load();
         if (seen && now >= seen && now - seen > 100'000'000 && !sender_lost) {
             sender_seen_ = 0;
@@ -451,26 +469,30 @@ void App::receive_loop() {
                 pending_ping = last_ping = now;
             }
         }
-        // Keep packet counters and resolution negotiation off the per-fragment lock path.
-        if (now >= next_network_update) {
+        int size = 0;
+        if (completed || now >= next_network_update) {
             next_network_update = now + 1'000'000;
-            int size = 0;
-            {
-                std::lock_guard lock(mutex_);
-                stats_.network = reassembly.stats;
-                stats_.synchronized = clock_.synchronized(now);
-                stats_.clock_uncertainty_ms = clock_.uncertainty_ms();
-                // Publish only the active model's validated size. A pending or failed
-                // replacement must not change the sender's capture dimensions.
-                if (session && !sender_lost && (calibration_only_ || stats_.model_revision != 0))
-                    size = settings_.input_size;
+            std::lock_guard lock(mutex_);
+            // A pending or failed model replacement must not change the capture dimensions.
+            if (session && !sender_lost && (calibration_only_ || stats_.model_revision != 0))
+                size = settings_.input_size;
+            stats_.network = reassembly.stats;
+            stats_.synchronized = clock_.synchronized(now);
+            stats_.clock_uncertainty_ms = clock_.uncertainty_ms();
+            stats_.replaced += replaced;
+            if (completed) {
+                stats_.width = width;
+                stats_.height = height;
+                for (size_t i = 0; i < completed; ++i)
+                    stats_.reassembly.add(reassembly_times[i]);
             }
-            if (size && (size != requested_size || now - last_resolution >= 250'000'000)) {
-                auto request = encode_resolution_request(session, uint16_t(size), uint16_t(size));
-                if (socket.send(request, peer)) {
-                    requested_size = size;
-                    last_resolution = now;
-                }
+        }
+        completed = replaced = 0;
+        if (size && (size != requested_size || now - last_resolution >= 250'000'000)) {
+            auto request = encode_resolution_request(session, uint16_t(size), uint16_t(size));
+            if (socket.send(request, peer)) {
+                requested_size = size;
+                last_resolution = now;
             }
         }
     }
