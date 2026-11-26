@@ -109,6 +109,20 @@ static std::vector<uint8_t> read_file(const std::filesystem::path& path) {
         throw std::runtime_error("Incomplete model read");
     return b;
 }
+class CudaPinnedFrameMemory final : public FrameMemoryResource {
+    uint8_t* try_allocate(size_t bytes) override {
+        void* data = nullptr;
+        if (cudaHostAlloc(&data, bytes, cudaHostAllocPortable) == cudaSuccess)
+            return static_cast<uint8_t*>(data);
+        (void)cudaGetLastError();
+        return nullptr;
+    }
+    void deallocate(uint8_t* data, size_t) noexcept override {
+        (void)cudaFreeHost(data);
+    }
+    bool cuda_pinned() const noexcept override { return true; }
+};
+
 class TrtBackend final : public Backend {
     Log log_;
     std::unique_ptr<nvinfer1::IRuntime> runtime_;
@@ -197,6 +211,12 @@ class TrtBackend final : public Backend {
     }
     std::vector<std::string> class_names() const override {
         return names_;
+    }
+    std::shared_ptr<FrameMemoryResource>
+    frame_memory_resource(const std::shared_ptr<FrameMemoryResource>& previous) const override {
+        if (std::dynamic_pointer_cast<CudaPinnedFrameMemory>(previous))
+            return previous;
+        return std::make_shared<CudaPinnedFrameMemory>();
     }
     int input_size() const override {
         return size_;
@@ -456,11 +476,21 @@ class TrtBackend final : public Backend {
     Inference run(const Frame& frame) override {
         const auto& h = frame.header;
         auto b = letterbox(h.width, h.height, size_);
-        auto copy_start = now_ns();
-        std::memcpy(pinned_, frame.pixels.data(), h.bytes);
-        double host_copy_ms = double(now_ns() - copy_start) / 1e6;
+        const auto* source = frame.pixels.data();
+        double host_copy_ms = 0;
+        if (!frame.cuda_pinned()) {
+            const auto copy_start = now_ns();
+            std::memcpy(pinned_, source, h.bytes);
+            host_copy_ms = double(now_ns() - copy_start) / 1e6;
+            source = pinned_;
+        }
         checked(cudaEventRecord(begin_, stream_));
-        checked(cudaMemcpyAsync(raw_, pinned_, h.bytes, cudaMemcpyHostToDevice, stream_));
+        // Complete asynchronous reads before a failed inference returns the frame to the pool.
+        struct WaitOnFailure {
+            cudaStream_t stream;
+            ~WaitOnFailure() { if (stream) (void)cudaStreamSynchronize(stream); }
+        } wait{stream_};
+        checked(cudaMemcpyAsync(raw_, source, h.bytes, cudaMemcpyHostToDevice, stream_));
         launch_preprocess(raw_, input_, half_input_, h.width, h.height, h.format == 1 ? 3 : 4, size_,
                           b.resized_w, b.resized_h, b.left, b.top, stream_);
         checked(cudaGetLastError());
@@ -478,6 +508,7 @@ class TrtBackend final : public Backend {
                                 stream_));
         checked(cudaEventRecord(done_, stream_));
         checked(cudaEventSynchronize(done_));
+        wait.stream = nullptr;
         float upload = 0, infer = 0, download = 0;
         checked(cudaEventElapsedTime(&upload, begin_, prepared_));
         checked(cudaEventElapsedTime(&infer, prepared_, inferred_));

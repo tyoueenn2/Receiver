@@ -42,6 +42,7 @@ struct Stats {
     uint64_t model_revision = 0;
     std::string model_message, model_error;
     BenchmarkReport benchmark;
+    std::string frame_memory = "heap";
     Samples reassembly, upload, inference, postprocess, submit, receiver_total, capture_age, control_handoff;
 };
 struct Preview {
@@ -95,6 +96,7 @@ class App {
     std::shared_ptr<const Frame> observe_frame(int64_t after);
     bool calibration_compatible_locked() const;
     BackendFactory backend_factory_;
+    std::atomic<std::shared_ptr<FrameMemoryResource>> frame_memory_;
     std::optional<Settings> pending_model_;
     std::optional<PerformanceGoal> pending_benchmark_;
     std::atomic<bool> benchmark_cancel_{false};

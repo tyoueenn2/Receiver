@@ -15,6 +15,16 @@
 #include <mmsystem.h>
 #endif
 namespace receiver {
+namespace {
+const char* frame_memory_status(const std::shared_ptr<FrameMemoryResource>& memory) {
+    if (!memory)
+        return "heap";
+    if (memory->failed())
+        return "heap fallback (pooled frame allocation failed)";
+    return memory->cuda_pinned() ? "CUDA pinned" : "backend resource";
+}
+} // namespace
+
 App::App(BackendFactory factory) : injected_(random_id()), backend_factory_(std::move(factory)) {
     injected_.set_wake([this] { control_wake_.notify(); });
 }
@@ -145,6 +155,9 @@ void App::stop() {
         latest_.reset();
         preview_ = {};
         stats_.video_complete_ns = 0;
+        calibration_frame_.reset();
+        if (auto memory = frame_memory_.exchange({}))
+            stats_.frame_memory = frame_memory_status(memory);
         if (stats_.error.empty())
             stats_.status = "Stopped";
     }
@@ -311,6 +324,8 @@ Stats App::stats() const {
     auto s = stats_;
     s.injection = std::move(injection);
     s.running = !stop_;
+    if (auto memory = frame_memory_.load())
+        s.frame_memory = frame_memory_status(memory);
     return s;
 }
 Preview App::preview() const {
@@ -335,7 +350,7 @@ void App::receive_loop() {
     size_t cursor_query_index = 0;
     std::array<uint64_t, 16> retired{};
     size_t retire_at = 0;
-    Reassembler reassembly;
+    Reassembler reassembly(&frame_memory_);
     bool sender_lost = false;
     std::array<uint8_t, 2048> data{};
     constexpr size_t max_batch = 64;
@@ -506,6 +521,7 @@ void App::inference_loop() {
         initial = settings_;
     }
     std::unique_ptr<Backend> backend;
+    std::shared_ptr<FrameMemoryResource> session_memory;
     auto progress = [this](const std::string& message) {
         std::lock_guard lock(mutex_);
         stats_.model_message = message;
@@ -523,7 +539,7 @@ void App::inference_loop() {
         reconcile_classes(config, next->class_names());
         return next;
     };
-    auto publish = [&](const Settings& config) {
+    auto publish = [&](const Settings& config, std::shared_ptr<FrameMemoryResource> memory) {
         settings_ = config;
         stats_.backend = config.color.mode == 1 ? "HSV color targeting (CPU, no model)"
                          : simulated_           ? "SIMULATION (fixed test detection, loopback only)"
@@ -539,6 +555,10 @@ void App::inference_loop() {
         }
         stats_.model_loading = false;
         ++stats_.model_revision;
+        stats_.frame_memory = frame_memory_status(memory);
+        if (memory)
+            session_memory = memory;
+        frame_memory_.store(std::move(memory));
     };
     if (!simulated_ && !calibration_only_)
         backend = load(initial);
@@ -549,7 +569,7 @@ void App::inference_loop() {
             stats_.backend = "Calibration only";
             ++stats_.model_revision;
         } else
-            publish(initial);
+            publish(initial, backend ? backend->frame_memory_resource(session_memory) : nullptr);
         stats_.model_message = initial.color.mode == 1 ? "HSV color targeting ready."
                                : simulated_            ? ""
                                                        : "Model ready.";
@@ -581,11 +601,12 @@ void App::inference_loop() {
                 auto replacement = simulated_ ? std::unique_ptr<Backend>{} : load(config);
                 if (stop_)
                     break;
+                auto memory = replacement ? replacement->frame_memory_resource(session_memory) : nullptr;
                 auto old = std::move(backend);
                 backend = std::move(replacement);
                 {
                     std::lock_guard lock(mutex_);
-                    publish(config);
+                    publish(config, std::move(memory));
                     pending_model_.reset();
                     ++epoch_;
                     result_.reset();
@@ -653,7 +674,7 @@ void App::inference_loop() {
             }
             // Capture only when inference is ready. DXGI retains the newest desktop;
             // no transport, compression, conversion, or extra capture thread is needed.
-            auto picture = capture->next(size);
+            auto picture = capture->next(size, frame_memory_.load());
             auto cursor = capture->cursor();
             sender_seen_ = now_ns(); // A successful bounded poll also proves capture is healthy.
             std::lock_guard lock(mutex_);
@@ -1539,7 +1560,7 @@ void App::export_metrics(const std::string& path) const {
                       {"capture_age_upper_at_submission", &s.capture_age}})
         f << pair.first << ',' << pair.second->count << ',' << pair.second->percentile(.5) << ','
           << pair.second->percentile(.95) << ',' << pair.second->percentile(.99) << '\n';
-    f << "# backend," << s.backend << "\n# frames," << s.inferred << "\n# sent," << s.sent
+    f << "# backend," << s.backend << "\n# frame_memory," << s.frame_memory << "\n# frames," << s.inferred << "\n# sent," << s.sent
       << "\n# synthetic_snapshots," << s.synthetic_snapshots << "\n# release_snapshots,"
       << s.release_snapshots << "\n# hold_heartbeats," << s.hold_heartbeats << "\n# persistent_injected_mask,"
       << unsigned(s.injection.persistent_mask) << "\n# pending_click_commands," << s.injection.pending_clicks

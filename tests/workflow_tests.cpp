@@ -91,6 +91,13 @@ void write(const std::filesystem::path& p, Bytes data) {
     std::ofstream f(p, std::ios::binary);
     f.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size()));
 }
+class WorkflowFrameMemory final : public FrameMemoryResource {
+    uint8_t* try_allocate(size_t bytes) override { return std::allocator<uint8_t>{}.allocate(bytes); }
+    void deallocate(uint8_t* data, size_t bytes) noexcept override {
+        std::allocator<uint8_t>{}.deallocate(data, bytes);
+    }
+    bool cuda_pinned() const noexcept override { return true; }
+};
 class FakeBackend : public Backend {
     int size_;
     std::string model_;
@@ -108,6 +115,10 @@ class FakeBackend : public Backend {
     std::vector<std::string> class_names() const override {
         return model_ == "second.pt" ? std::vector<std::string>{"second", "first"}
                                      : std::vector<std::string>{"first", "second"};
+    }
+    std::shared_ptr<FrameMemoryResource>
+    frame_memory_resource(const std::shared_ptr<FrameMemoryResource>& previous) const override {
+        return previous ? previous : std::make_shared<WorkflowFrameMemory>();
     }
     int input_size() const override {
         return size_;
@@ -319,6 +330,10 @@ void app_workflows() {
             return bool(app.preview().frame);
         });
     }
+    const auto retained = app.preview().frame;
+    CHECK(retained && retained->cuda_pinned() && app.stats().frame_memory == "CUDA pinned");
+    const auto* retained_pixels = retained->pixels.data();
+    const auto retained_sequence = retained->header.sequence;
     auto completed = app.stats().network.completed;
     app.arm(true);
     CHECK(app.stats().armed);
@@ -338,6 +353,12 @@ void app_workflows() {
     until([&] { return app.stats().model_revision == 2; });
     CHECK(app.stats().running && app.stats().error.empty() && !app.stats().armed);
     CHECK(app.settings().model == "second.pt" && app.settings().input_size == 640);
+    until([&] {
+        send_picture(sender, to, sequence++);
+        const auto newest = app.preview().frame;
+        return newest && newest->header.sequence > retained_sequence &&
+               newest->pixels.get_allocator() == retained->pixels.get_allocator();
+    });
     CHECK(app.settings().classes == std::vector<int>{0}); // Class labels survive reordered IDs.
     CHECK(app.settings().class_preference.class_id == 1 &&
           app.settings().class_preference.class_name == "first");
@@ -395,6 +416,7 @@ void app_workflows() {
     app.stop();
     CHECK(now_ns() - before < 1'000'000'000);
     CHECK(!app.stats().model_loading && !app.stats().benchmarking && !app.stats().running);
+    CHECK(retained->pixels.data() == retained_pixels && retained->header.sequence == retained_sequence);
 }
 } // namespace
 int main() {

@@ -15,9 +15,89 @@ template<class F> void rejects(F f, const std::string& expected) {
     }
     throw std::runtime_error("Expected rejection: " + expected);
 }
+class FakeFrameMemory final : public FrameMemoryResource {
+    uint8_t* try_allocate(size_t bytes) override {
+        ++attempts;
+        if (reject)
+            return nullptr;
+        return std::allocator<uint8_t>{}.allocate(bytes);
+    }
+    void deallocate(uint8_t* data, size_t bytes) noexcept override {
+        ++frees;
+        std::allocator<uint8_t>{}.deallocate(data, bytes);
+    }
+    bool cuda_pinned() const noexcept override { return true; }
+
+  public:
+    int attempts = 0, frees = 0;
+    bool reject = false;
+};
+
+void pooled_frame_memory() {
+    auto original = std::make_shared<FakeFrameMemory>();
+    auto replacement = std::make_shared<FakeFrameMemory>();
+    std::weak_ptr<FrameMemoryResource> original_lifetime = original;
+    std::shared_ptr<const Frame> retained;
+    {
+        std::atomic<std::shared_ptr<FrameMemoryResource>> active;
+        Reassembler reassembly(&active);
+        reassembly.reset(1);
+        FrameHeader header;
+        header.session = 1;
+        header.width = header.height = 1;
+        header.format = 2;
+        header.bytes = 4;
+        header.stride = 1352;
+        header.count = 1;
+        auto frame = [&](uint8_t pixel) {
+            ++header.sequence;
+            const auto encoded = encode_frame(header);
+            std::vector<uint8_t> packet(encoded.begin(), encoded.end());
+            packet.insert(packet.end(), 4, pixel);
+            return reassembly.accept(packet, header.sequence);
+        };
+        auto heap_frame = frame(1);
+        CHECK(heap_frame && !heap_frame->cuda_pinned());
+        active.store(original);
+        retained = frame(2);
+        CHECK(retained && retained->cuda_pinned() && original->attempts == 1);
+        {
+            Frame copy = *retained;
+            CHECK(!copy.cuda_pinned() && copy.pixels[0] == 2 && retained->pixels[0] == 2);
+        }
+        active.store(replacement);
+        replacement->reject = true;
+        original.reset();
+        auto fallback = frame(3);
+        CHECK(fallback && !fallback->cuda_pinned() && replacement->failed() && replacement->attempts == 1);
+        std::array<std::shared_ptr<const Frame>, 4> others;
+        for (auto& other : others) {
+            other = frame(4);
+            CHECK(other && !other->cuda_pinned());
+        }
+        CHECK(!frame(5) && reassembly.stats.pool_drops == 1);
+        CHECK(retained->pixels[0] == 2 && heap_frame->pixels[0] == 1 && replacement->attempts == 1);
+    }
+    CHECK(!original_lifetime.expired() && retained->pixels[0] == 2);
+    retained.reset();
+    CHECK(original_lifetime.expired());
+
+    std::array<std::shared_ptr<Frame>, 4> local;
+    std::array<std::shared_ptr<Frame>, 4> owners;
+    auto pinned = std::make_shared<FakeFrameMemory>();
+    for (auto& owner : owners) {
+        owner = acquire_frame(local, pinned);
+        CHECK(owner && owner->cuda_pinned());
+    }
+    CHECK(!acquire_frame(local, {}));
+    owners[0].reset();
+    CHECK(!acquire_frame(local, {})->cuda_pinned() && pinned->frees == 1);
+    CHECK(owners[1]->cuda_pinned() && pinned->attempts == 4);
+}
 int main(int argc, char** argv) {
     std::filesystem::path temp;
     try {
+        pooled_frame_memory();
         Settings s;
         s.model = "renamed model.ONNX";
         CHECK(select_backend(s) == "tensorrt");

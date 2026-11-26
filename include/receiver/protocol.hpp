@@ -1,4 +1,5 @@
 #pragma once
+#include "frame_memory.hpp"
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -58,9 +59,35 @@ std::array<uint8_t, 24> encode_resolution_request(uint64_t session, uint16_t wid
 struct Frame {
     FrameHeader header;
     int64_t first_ns = 0, complete_ns = 0;
-    std::vector<uint8_t> pixels;
-    Frame() : pixels(max_frame_bytes) {}
+    std::vector<uint8_t, FrameAllocator<uint8_t>> pixels;
+    explicit Frame(const std::shared_ptr<FrameMemoryResource>& memory = {})
+        : pixels(max_frame_bytes, FrameAllocator<uint8_t>(memory)) {}
+    bool cuda_pinned() const noexcept { return pixels.get_allocator().resource()->cuda_pinned(); }
 };
+
+// Only the pool owner can acquire a slot. Remove its old storage before replacing it,
+// so even a model switch stays within the original pool capacity.
+template <size_t Count>
+std::shared_ptr<Frame> acquire_frame(std::array<std::shared_ptr<Frame>, Count>& pool,
+                                     const std::shared_ptr<FrameMemoryResource>& preferred) {
+    for (auto& entry : pool) {
+        if (entry && entry.use_count() != 1)
+            continue;
+        const auto& memory = preferred && !preferred->failed() ? preferred : heap_frame_memory();
+        if (!entry || entry->pixels.get_allocator().resource() != memory) {
+            entry.reset();
+            try {
+                entry = std::make_shared<Frame>(memory);
+            } catch (const std::bad_alloc&) {
+                if (!memory->failed())
+                    throw;
+                entry = std::make_shared<Frame>();
+            }
+        }
+        return entry;
+    }
+    return {};
+}
 struct ReassemblyStats {
     uint64_t packets = 0, invalid = 0, duplicates = 0, expired = 0, evicted = 0, completed = 0, old = 0,
              pool_drops = 0;
@@ -73,13 +100,14 @@ class Reassembler {
     };
     std::array<Slot, 3> slots_{};
     std::array<std::shared_ptr<Frame>, 7> pool_;
+    const std::atomic<std::shared_ptr<FrameMemoryResource>>* frame_memory_;
     uint64_t session_ = 0;
     uint32_t completed_ = 0;
     bool have_completed_ = false;
 
   public:
     ReassemblyStats stats;
-    Reassembler();
+    explicit Reassembler(const std::atomic<std::shared_ptr<FrameMemoryResource>>* memory = nullptr);
     void reset(uint64_t session);
     void expire(int64_t now);
     std::shared_ptr<const Frame> accept(Bytes data, int64_t now);
