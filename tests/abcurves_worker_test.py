@@ -22,20 +22,37 @@ class AbcurvesWorkerTests(unittest.TestCase):
 
     def test_forecast_starts_from_current_hand_history(self):
         movement, planner, prepare = self.make_movement()
-        planner.advance.return_value = {'xy': [(i, -2 * i) for i in range(1, 17)]}
+        planner.advance.return_value = {'xy': [(i, -2 * i) for i in range(1, 161)]}
         first = [(1, 2)] * 164
         second = [(-1, 3)] * 164
         for history in (first, second):
             result = movement.advance(dict(target=(19, -3), history=history))
-            self.assertEqual(result['positions'][0], [1, 2])
-            self.assertEqual(result['positions'][-1], [16, 32])
+            self.assertEqual(len(result['directions']), 17)
+            for x, y in result['directions']:
+                self.assertGreater(x, 0)
+                self.assertAlmostEqual(y, 2 * x)
         self.assertEqual(prepare.call_args_list, [
             call([(1, -2)] * 164, current_xy=(0, 0)),
             call([(-1, -3)] * 164, current_xy=(0, 0)),
         ])
         self.assertEqual(planner.reset.call_args_list, [call(initial_xy=(0, 0), history='filtered')] * 2)
         self.assertEqual(planner.update_target.call_args_list, [call((19, 3), timestamp_us=0)] * 2)
-        self.assertEqual(planner.advance.call_args_list, [call(16000)] * 2)
+        self.assertEqual(planner.advance.call_args_list, [call(160000)] * 2)
+
+    def test_late_curve_changes_steering_and_a_tail_pointing_away_does_not(self):
+        movement, planner, _ = self.make_movement()
+        request = dict(target=(100, 0), history=[(1, 0)] * 164)
+        straight = [(i, 0) for i in range(1, 17)]
+        planner.advance.return_value = {'xy': straight + [(i, 0) for i in range(17, 161)]}
+        base_x, base_y = movement.advance(request)['directions'][5]
+        self.assertGreater(base_x, 0)
+        self.assertEqual(base_y, 0)
+        planner.advance.return_value = {'xy': straight + [(i, 16 - i) for i in range(17, 161)]}
+        turn_x, turn_y = movement.advance(request)['directions'][5]
+        self.assertAlmostEqual(turn_x, base_x)
+        self.assertGreater(turn_y / turn_x, .5)
+        planner.advance.return_value = {'xy': straight + [(16 - 2 * (i - 16), 0) for i in range(17, 161)]}
+        self.assertEqual(movement.advance(request)['directions'][5], [1, 0])
 
     def test_invalid_history_does_not_drive_planner(self):
         movement, planner, prepare = self.make_movement()

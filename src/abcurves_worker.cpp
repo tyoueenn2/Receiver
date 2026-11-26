@@ -67,7 +67,7 @@ void AbcurvesWorker::run() {
             PythonWorker worker(python, "tools/abcurves_worker.py", "ABCurves", "abcurves",
                                 startup_deadline, cancelled);
             auto hello = worker.receive_json(startup_deadline);
-            if (hello.value("status", "") != "ready" || hello.value("version", 0) != 3)
+            if (hello.value("status", "") != "ready" || hello.value("version", 0) != 4)
                 throw worker.error("unsupported worker protocol");
             {
                 std::lock_guard lock(mutex_);
@@ -90,19 +90,20 @@ void AbcurvesWorker::run() {
                 worker.send_json({{"target", {request.x, request.y}}, {"history", request.history}},
                                  deadline);
                 const auto result = worker.receive_json(deadline);
-                const auto& positions = result.at("positions");
-                if (result.value("status", "") != "result" || !positions.is_array() ||
-                    positions.size() != abcurves_horizon_ms)
-                    throw worker.error("invalid movement response");
                 Reply reply{request.id};
-                for (size_t i = 0; i < reply.positions.size(); ++i) {
-                    const auto& pos = positions[i];
-                    if (!pos.is_array() || pos.size() != 2 || !pos[0].is_number() || !pos[1].is_number())
-                        throw worker.error("invalid forecast position");
-                    const double x = pos[0].get<double>(), y = pos[1].get<double>();
+                const auto& directions = result.at("directions");
+                if (result.value("status", "") != "result" || !directions.is_array() ||
+                    directions.size() != reply.directions.size())
+                    throw worker.error("invalid movement response");
+                for (size_t i = 0; i < reply.directions.size(); ++i) {
+                    const auto& direction = directions[i];
+                    if (!direction.is_array() || direction.size() != 2 ||
+                        !direction[0].is_number() || !direction[1].is_number())
+                        throw worker.error("invalid forecast direction");
+                    const double x = direction[0].get<double>(), y = direction[1].get<double>();
                     if (!std::isfinite(x) || !std::isfinite(y))
-                        throw worker.error("invalid forecast position");
-                    reply.positions[i] = {x, y};
+                        throw worker.error("invalid forecast direction");
+                    reply.directions[i] = {x, y};
                 }
                 {
                     std::lock_guard lock(mutex_);

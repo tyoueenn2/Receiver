@@ -21,7 +21,7 @@ class AbcurvesWorker {
     };
     struct Reply {
         uint64_t id;
-        std::array<std::array<double, 2>, abcurves_horizon_ms> positions{};
+        std::array<std::array<double, 2>, abcurves_max_plan_age_ms + 1> directions{};
     };
     struct State {
         bool ready = false;

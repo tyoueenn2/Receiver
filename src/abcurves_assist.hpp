@@ -4,7 +4,7 @@
 #include <cmath>
 
 namespace receiver {
-inline constexpr size_t abcurves_horizon_ms = 16;
+inline constexpr size_t abcurves_max_plan_age_ms = 16;
 
 inline std::array<int, 2> current_hand_direction(const mouse_history::Trace& trace) {
     std::array<int, 2> recent{}, newest{};

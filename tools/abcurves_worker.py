@@ -1,10 +1,13 @@
-"""Forecast a short continuation from the user's real mouse movement."""
+"""Forecast steering directions from the user's real mouse movement."""
 import math
+import os
 
 from worker_protocol import read_json, run_worker, send_json
 
 HISTORY_LENGTH = 164
-HORIZON_MS = 16
+HORIZON_MS = 160
+MAX_PLAN_AGE_MS = 16
+VELOCITY_DECAY = 0.5 ** (1 / 40)
 
 
 class Movement:
@@ -36,15 +39,32 @@ class Movement:
         positions = self.planner.advance(HORIZON_MS * 1000)['xy']
         if len(positions) != HORIZON_MS:
             raise RuntimeError('Unexpected ABCurves forecast length')
-        return {'status': 'result', 'positions': [[float(dx), -float(dy)] for dx, dy in positions]}
+        directions = [None] * (MAX_PLAN_AGE_MS + 1)
+        future_x = future_y = 0.0
+        next_x, next_y = map(float, positions[-1])
+        for i in range(HORIZON_MS - 1, -1, -1):
+            previous_x, previous_y = map(float, positions[i - 1]) if i else (0.0, 0.0)
+            dx, dy = next_x - previous_x, previous_y - next_y
+            next_x, next_y = previous_x, previous_y
+            # Weight nearer predicted velocities more heavily without discarding the far path.
+            future_x = dx + VELOCITY_DECAY * future_x
+            future_y = dy + VELOCITY_DECAY * future_y
+            if i <= MAX_PLAN_AGE_MS:
+                if x * future_x + y * future_y > 0:
+                    directions[i] = [future_x, future_y]
+                else:
+                    directions[i] = [dx, dy]
+        return {'status': 'result', 'directions': directions}
 
 
 def serve(stream):
     motion = Movement()
-    send_json(stream, {'status': 'ready', 'version': 3})
+    send_json(stream, {'status': 'ready', 'version': 4})
     while True:
         send_json(stream, motion.advance(read_json(stream)))
 
 
 if __name__ == '__main__':
+    # The planner's batch-one matrices are too small to benefit from BLAS worker teams.
+    os.environ['OPENBLAS_NUM_THREADS'] = '1'
     run_worker(serve, __doc__)

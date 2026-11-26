@@ -34,14 +34,15 @@ class Planner:
         assert timestamp_us == 0
 
     def advance(self, timestamp_us):
-        assert timestamp_us == 16000
+        assert timestamp_us == 160000
         if Path("fail").exists():
             raise RuntimeError("fixture planner failure")
         if Path("stall").exists():
             Path("entered").touch()
             while Path("stall").exists():
                 time.sleep(.005)
-        return {"xy": [(i * 2 * self.vx, i * (2 * self.vy - .1)) for i in range(1, 17)]}
+        return {"xy": [(i * 2 * self.vx, i * 2 * self.vy - max(0, i - 20))
+                       for i in range(1, 161)]}
 
 def load(*, prewarm):
     assert prewarm
@@ -97,6 +98,8 @@ def main():
             assert all(e['angle'] == 3000 and e['mode'] == 0 and
                        0 < e['expires'] - e['sample'] <= 20 for e in advice())
             assert all(e['aim'][0] > 0 and abs(e['aim'][1]) <= 1 for e in advice())
+            if not args.real_python:
+                assert all(e['tangent'][1] > 500 for e in advice()), 'The turn after 20 ms did not affect steering'
 
             pi.motion_x = 4000
             pi.motion_y = 1000

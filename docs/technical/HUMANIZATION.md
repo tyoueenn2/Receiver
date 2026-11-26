@@ -77,8 +77,10 @@ Wait for **ABCurves ready** before testing. The headless equivalent is
 `"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_inner_px": 15, "abcurves_angle_deg": 30}`.
 The existing activation conditions still apply.
 
-The Continuous Planner forecasts a tangent from your actual hand history over 16 ms.
-The Pi rotates each eligible physical XY report toward that tangent, preserving
+The Continuous Planner forecasts 160 ms of movement from your actual hand history.
+Predicted motion across the path guides each steering direction, with greater
+weight on the nearer part of the curve. The Pi rotates each eligible physical
+XY report toward that direction, preserving
 its magnitude before integer rounding, as well as its timing, wheel, and
 buttons. Zero input stays zero. A direction change outside the cone cancels
 outer-ring steering on the Pi immediately. Receiver selects the zone from each

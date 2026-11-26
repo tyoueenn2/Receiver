@@ -1499,7 +1499,7 @@ void App::pi_loop() {
             };
             if (curve_plan && (at >= curve_plan->frame.deadline || curve_plan->epoch != hand.epoch ||
                                curve_plan->generation != hand.generation ||
-                               hand.end_ms > curve_plan->end_ms + abcurves_horizon_ms))
+                               hand.end_ms > curve_plan->end_ms + abcurves_max_plan_age_ms))
                 curve_plan.reset();
             if (curve_plan && curve_state.reply && curve_state.reply->id == curve_plan->frame.id)
                 curve_plan->reply = curve_state.reply;
@@ -1507,14 +1507,11 @@ void App::pi_loop() {
                 auto completed = std::move(*curve_plan);
                 curve_plan.reset();
                 const auto elapsed = size_t(hand.end_ms - completed.end_ms);
-                const auto& forecast = completed.reply->positions;
-                const auto& next = forecast[std::min(elapsed, forecast.size() - 1)];
-                const auto& previous = forecast[std::min(elapsed - 1, forecast.size() - 2)];
+                const auto [dx, dy] = completed.reply->directions[elapsed];
                 const auto& frame = completed.frame;
-                const auto dx = next[0] - previous[0], dy = next[1] - previous[1];
                 const auto tangent = abcurves_wire_direction(dx, dy);
                 if (frame.mode == CurveMode::inner) {
-                    inner_tangent = CurveTangent{completed.end_ms + abcurves_horizon_ms, tangent};
+                    inner_tangent = CurveTangent{completed.end_ms + abcurves_max_plan_age_ms, tangent};
                 } else {
                     const auto aim = abcurves_wire_direction(frame.x, frame.y);
                     if (!abcurves_targetward(aim, tangent) ||
