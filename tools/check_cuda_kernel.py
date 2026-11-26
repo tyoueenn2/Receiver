@@ -7,7 +7,7 @@ from pathlib import Path
 
 def main():
     p = argparse.ArgumentParser(); p.add_argument('--nvrtc', required=True)
-    p.add_argument('--output', default='preprocess.ptx'); p.add_argument('--arch', default='compute_86')
+    p.add_argument('--output', default='preprocess.ptx'); p.add_argument('--arch', default='compute_75')
     p.add_argument('--source', help='Optional production kernel header')
     p.add_argument('--include', action='append', default=[], help='Optional CUDA header include directory')
     a = p.parse_args()
@@ -28,7 +28,14 @@ def main():
     assert nvrtc.nvrtcCreateProgram(c.byref(program), source, b'preprocess_kernel.cuh', 0, None, None) == 0
     try:
         flags = [f'--gpu-architecture={a.arch}'.encode(), b'--std=c++17']
-        flags += [f'--include-path={Path(path).resolve()}'.encode() for path in a.include]
+        includes = [Path(path).resolve() for path in a.include]
+        if not includes:
+            # An NVRTC library selected from the CUDA Toolkit has a sibling include directory.
+            toolkit_include = next((path / 'include' for path in library.parents
+                                    if (path / 'include/cuda_fp16.h').is_file()), None)
+            if toolkit_include:
+                includes.append(toolkit_include)
+        flags += [f'--include-path={path}'.encode() for path in includes]
         options = (c.c_char_p * len(flags))(*flags)
         result = nvrtc.nvrtcCompileProgram(program, len(flags), options)
         length = c.c_size_t(); nvrtc.nvrtcGetProgramLogSize(program, c.byref(length))

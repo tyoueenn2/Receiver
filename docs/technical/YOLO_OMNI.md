@@ -18,8 +18,10 @@ Then install the fork's remaining dependencies with that environment's Python:
 `python -m pip install -r tools/requirements-omni.txt`. Set `omni_source`
 to the checkout root; this selects its custom modules ahead of stock Ultralytics.
 The receiver does not install packages or download checkpoints automatically.
-Native inference uses FP32, preserving compatibility with the fork's custom
-modules. TensorRT exports use the existing FP16 path.
+Native inference uses FP32. For standard YOLO checkpoints, the worker folds
+batch normalization into supported convolutions at load time. It also tries
+channels-last weights on CPU when oneDNN is available. TensorRT exports use
+the existing FP16 path.
 
 For the GUI, set these once in `user-settings/setup.json`, then choose
 **Connections > Reload setup file** while stopped. See [machine setup](MACHINE_SETUP.md).
@@ -67,18 +69,21 @@ its current confidence, class filters, NMS, letterbox reversal, freshness checks
 and mouse controls. There is no extra queue of inference requests.
 
 The worker uses normalized RGB, half-pixel bilinear resize and 114-valued
-letterbox padding. It validates task, device, warmup output and every frame.
+letterbox padding when needed. A frame that already matches the model input
+size goes straight from normalization to inference. The worker validates task,
+device, warmup output and every frame.
 Pose, segmentation, OBB, classification, state-dict-only and embedded-NMS models
 are not supported. Loading is bounded to 120 seconds; a frame exchange to 10
 seconds. Stop interrupts worker waits and reaps the process. Dependency, model
 and protocol failures fail the session; they never silently change backends.
 Logs are written to `cache/omni-worker-*.log` and errors include the log path.
 
-For PyTorch, **Inference** measures synchronized model execution. **Copies/preprocess**
-also includes preprocessing, local transport, output transfer and worker overhead.
-These numbers are not the CUDA-event measurements used by TensorRT. Compare
-receiver-to-submission p95/p99 as well as detection quality on representative
-captures. CPU mode is for functional checks and may exceed freshness limits.
+For PyTorch, **Inference** measures the forward pass with CUDA events on GPU
+and a wall clock on CPU. On CUDA, the worker can queue preprocessing and
+inference before waiting for output transfer. **Copies/preprocess** also
+includes preprocessing, local transport, output transfer and worker overhead.
+Compare receiver-to-submission p95/p99 and detection quality on representative
+captures. CPU mode may exceed freshness limits.
 
 For single-frame verification, `receiver_verify` is now built with either backend:
 
@@ -105,8 +110,8 @@ worker fixture. A separate actual-model CPU smoke test also passed using an
 untrained Game2Real nano checkpoint from upstream commit
 `0b8610dbfc4d5eb3496ac8037002ea3c81a24fbd`: its `[1,84,2100]` output matched direct
 PyTorch inference, and RGB/BGRA preprocessing matched an independent bilinear
-reference. This does not establish trained-model accuracy or RTX 3060 Ti
-performance. Validate your checkpoint and deployment Python environment using
+reference. Validate trained-model accuracy and performance in your deployment
+Python environment using
 the preview or single-frame verifier. To repeat the optional check in an
 environment with the dependencies installed:
 

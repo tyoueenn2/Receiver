@@ -19,7 +19,7 @@ def main():
     assert all(path.is_dir() for path in includes), 'CUDA header packages missing'
     args.output.mkdir(parents=True, exist_ok=True)
     for source in ('preprocess_kernel.cuh', 'engine_precision_kernel.cuh'):
-        for architecture in ('compute_75', 'compute_86'):
+        for architecture in ('compute_75', 'compute_86', 'compute_90', 'compute_120'):
             command = [sys.executable, str(root / 'tools/check_cuda_kernel.py'),
                        '--nvrtc', str(libraries[0]), '--source', str(root / 'src' / source),
                        '--arch', architecture, '--output', str(args.output / f'{source}-{architecture}.ptx')]

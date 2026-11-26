@@ -86,12 +86,55 @@ class Model:
                                      int(stride.max().item()) if stride is not None else 32)
         self.family = model_family(self.network)
         select_raw_detection(self.network)
+        self.channels_last = False
+        if self.family == 'yolo':
+            self.fold_conv_batch_norm()
+            self.channels_last = (self.device.type == 'cpu' and torch.backends.mkldnn.is_available()
+                                  and torch.backends.mkldnn.enabled)
+        self.cuda_timing = None
+        if self.device.type == 'cuda':
+            self.cuda_timing = (torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True))
         self.synchronize()
+        try:
+            if self.channels_last:
+                self.network.to(memory_format=torch.channels_last)
+            self.warm_up()
+        except RuntimeError:
+            if not self.channels_last:
+                raise
+            # Custom detection checkpoints can require contiguous weights.
+            self.channels_last = False
+            self.network.to(memory_format=torch.contiguous_format)
+            self.warm_up()
+        if self.cuda_timing:
+            for event in self.cuda_timing:
+                event.record()
+        self.synchronize()
+
+    def fold_conv_batch_norm(self):
+        from ultralytics.nn.modules.conv import Conv, DWConv
+
+        torch = self.torch
+        # Fold only the standard Conv wrappers. Model.fuse() can remove the
+        # one-to-many detection head from an end-to-end checkpoint.
+        for layer in self.network.modules():
+            if type(layer) not in (Conv, DWConv):
+                continue
+            norm = getattr(layer, 'bn', None)
+            if (type(norm) is torch.nn.BatchNorm2d and norm.running_mean is not None
+                    and norm.running_var is not None and type(layer.conv) is torch.nn.Conv2d):
+                layer.conv = torch.nn.utils.fusion.fuse_conv_bn_eval(layer.conv, norm)
+                layer.forward = layer.forward_fuse
+                del layer.bn
+
+    def warm_up(self):
+        torch = self.torch
         with torch.inference_mode():
             tensor = torch.zeros((1, 3, self.size, self.size), device=self.device)
+            if self.channels_last:
+                tensor = tensor.contiguous(memory_format=torch.channels_last)
             for _ in range(3):
                 self.raw_output(self.network(tensor))
-        self.synchronize()
 
     def synchronize(self):
         if self.device.type == 'cuda':
@@ -120,16 +163,21 @@ class Model:
         np, torch = self.np, self.torch
         image = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3 if fmt == 1 else 4)
         if fmt == 2:
-            image = image[:, :, [2, 1, 0]]  # BGRA -> RGB
-        if not image.flags.writeable:
+            image = np.ascontiguousarray(image[:, :, 2::-1])  # BGRA -> RGB
+        elif not image.flags.writeable:
             image = image.copy()
-        tensor = torch.from_numpy(np.ascontiguousarray(image)).to(self.device, dtype=torch.float32)
+        tensor = torch.from_numpy(image).to(self.device, dtype=torch.float32, non_blocking=True)
         tensor = tensor.permute(2, 0, 1).unsqueeze(0) / 255.
+        if width == height == self.size:
+            return tensor
         # Match Receiver's half-pixel bilinear resize and C++ round-to-nearest letterbox.
         scale = min(np.float32(self.size) / width, np.float32(self.size) / height)
         rw = max(1, int(np.floor(np.float32(width * scale) + np.float32(.5))))
         rh = max(1, int(np.floor(np.float32(height * scale) + np.float32(.5))))
-        tensor = torch.nn.functional.interpolate(tensor, size=(rh, rw), mode='bilinear', align_corners=False)
+        if (width, height) != (rw, rh):
+            tensor = torch.nn.functional.interpolate(tensor, size=(rh, rw), mode='bilinear', align_corners=False)
+        if rw == rh == self.size:
+            return tensor
         left, top = (self.size - rw) // 2, (self.size - rh) // 2
         return torch.nn.functional.pad(tensor, (left, self.size - rw - left, top,
                                                 self.size - rh - top), value=114. / 255.)
@@ -137,12 +185,25 @@ class Model:
     def run(self, data, width, height, fmt):
         with self.torch.inference_mode():
             tensor = self.preprocess(data, width, height, fmt)
-            self.synchronize()
-            start = time.perf_counter()
+            if self.channels_last:
+                tensor = tensor.contiguous(memory_format=self.torch.channels_last)
+            if self.cuda_timing:
+                begin, end = self.cuda_timing
+                begin.record()
+            else:
+                start = time.perf_counter()
             output = self.raw_output(self.network(tensor))
-            self.synchronize()
-            inference_ms = (time.perf_counter() - start) * 1000
+            if self.cuda_timing:
+                end.record()
+            else:
+                inference_ms = (time.perf_counter() - start) * 1000
             array = output.detach().to('cpu', dtype=self.torch.float32).contiguous().numpy()
+            if self.cuda_timing:
+                # The blocking CUDA-to-CPU copy waits for the end event on
+                # the same stream. A CPU-returning model needs an explicit wait.
+                if not output.is_cuda:
+                    end.synchronize()
+                inference_ms = begin.elapsed_time(end)
         return dict(status='result', classes=len(self.names), candidates=array.shape[2],
                     inference_ms=inference_ms), array.astype('<f4', copy=False).tobytes()
 

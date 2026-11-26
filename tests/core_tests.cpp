@@ -2,6 +2,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <stdexcept>
 using namespace receiver;
@@ -72,8 +73,57 @@ std::array<uint8_t, 128> status3(uint64_t client, uint64_t token, uint32_t seq,
     put32(p.data() + 88, 0xffffffff);
     return p;
 }
+
+void yolo_decode_edges() {
+    constexpr int count = 258;
+    constexpr int classes = 3;
+    std::vector<float> logits((4 + classes) * count);
+    auto at = [&](int row, int i) -> float& { return logits[row * count + i]; };
+    for (int i : {0, 255, 256, 257}) {
+        at(0, i) = i == 0 ? 16.f : float(i);
+        at(1, i) = 32;
+        at(2, i) = 1;
+        at(3, i) = 1;
+    }
+    Settings settings;
+    settings.classes = {2, 0, 2};
+    settings.class_preference.class_id = 1;
+    at(4, 0) = at(6, 0) = .9f;
+    at(5, 255) = .8f;
+    at(6, 255) = std::numeric_limits<float>::quiet_NaN();
+    at(5, 256) = settings.confidence;
+    at(6, 256) = std::numeric_limits<float>::infinity();
+    at(5, 257) = .95f;
+    at(6, 257) = 1.1f;
+    const auto detections = decode_yolo(logits, count, classes, 320, 320, 320, settings);
+    CHECK(detections.size() == 3);
+    CHECK(detections[0].cls == 0 && detections[0].x == 15.5f);
+    CHECK(detections[1].cls == 1 && detections[1].x == 254.5f);
+    CHECK(detections[2].cls == 1 && detections[2].x == 255.5f &&
+          detections[2].score == settings.confidence);
+
+    // One stronger candidate leaves only 999 slots for equal-score rows.
+    constexpr int dense_count = 1003;
+    std::vector<float> dense(5 * dense_count);
+    for (int i = 0; i < dense_count; ++i) {
+        dense[i] = 24.f;
+        dense[dense_count + i] = 24.f;
+        dense[2 * dense_count + i] = dense[3 * dense_count + i] = 4.f;
+        dense[4 * dense_count + i] = .8f;
+    }
+    dense[998] = 64.f;
+    dense[999] = 80.f;
+    dense[1000] = 96.f;
+    dense[1001] = 112.f;
+    dense[4 * dense_count + 1001] = .9f;
+    const auto capped = decode_yolo(dense, dense_count, 1, 320, 320, 320, Settings{});
+    CHECK(capped.size() == 3);
+    CHECK(capped[0].x == 110.f && capped[1].x == 22.f && capped[2].x == 62.f);
+}
+
 int main() {
     try {
+        yolo_decode_edges();
         CHECK(newer(0, 0xffffffff));
         CHECK(!newer(5, 5));
         CHECK(!newer(4, 5));

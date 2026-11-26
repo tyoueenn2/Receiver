@@ -71,11 +71,22 @@ covered by the Xvfb tests.
 
 ## With CUDA and TensorRT
 
+CUDA builds default to CMake's `all-major` setting. The installed toolkit
+generates kernels for its supported major architectures and PTX for its highest
+major architecture. Use the TensorRT support matrix to check your GPU and driver.
+[TensorRT support matrix](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/getting-started/support-matrix.html)
+
+For a smaller build that targets compute capability 8.6, which includes the RTX
+3060 Ti, add `-DRECEIVER_CUDA_ARCHITECTURES=86` to the configure command. Set
+`-DRECEIVER_CUDA_ARCHITECTURES=all-major` to select the portable build in an
+existing build directory.
+
 ### Windows
 
 Use Windows 11 x64, Visual Studio 2022 with the Desktop development with C++ workload and a Windows SDK, CMake 3.24+, Git, **CUDA Toolkit 12.9**, and the **TensorRT 10.13 Windows x64 CUDA 12 SDK**. Use an NVIDIA driver supported by that CUDA version. This backend deliberately targets TensorRT **10.x**; TensorRT 11's precision/export API is different and is rejected at compile time.
 
-Official SDK references: [TensorRT Windows installation](https://docs.nvidia.com/deeplearning/tensorrt/latest/installing-tensorrt/install-zip.html), [TensorRT compatibility matrix](https://docs.nvidia.com/deeplearning/tensorrt/latest/getting-started/support-matrix.html). Select the 10.13 release, rather than substituting the latest major version.
+Follow the Windows SDK installation guide with the 10.13 release archive.
+[TensorRT Windows installation](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/installing-tensorrt/install-zip.html)
 
 In an x64 Developer PowerShell, from this directory:
 
@@ -88,7 +99,7 @@ ctest --preset windows-cuda
 .\build\cuda\Release\receiver.exe
 ```
 
-Set `TENSORRT_ROOT` to your actual extracted SDK directory containing `include` and `lib`. CUDA kernels target SM 8.6, the RTX 3060 Ti architecture. CMake fetches pinned Dear ImGui 1.92.1 and nlohmann/json 3.12.0 sources; subsequent builds can run offline.
+Set `TENSORRT_ROOT` to your actual extracted SDK directory containing `include` and `lib`. CMake fetches pinned Dear ImGui 1.92.1 and nlohmann/json 3.12.0 sources. Subsequent builds can run offline.
 
 ### Linux headless
 
@@ -102,4 +113,4 @@ ctest --preset linux-cuda
 ./build/linux-cuda/receiver_headless --profile profiles/yolo11n.json --arm --seconds 0
 ```
 
-The default CUDA architecture is SM 8.6 for the planned RTX 3060 Ti. Override it at configure time for another supported NVIDIA GPU, for example `cmake --preset linux-cuda -DRECEIVER_CUDA_ARCHITECTURES=89`. The Linux executable uses the Raspberry Pi UDP backend; the DirectX GUI and local Windows mouse backend are not built.
+The Linux headless executable supports Raspberry Pi UDP and MAKCU output.

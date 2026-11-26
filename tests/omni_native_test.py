@@ -46,7 +46,8 @@ def main():
                                    auto_size=True, device='cpu'))
             assert automatic.size == 256, f'Checkpoint image-size metadata ignored: {automatic.size}'
             del automatic
-        for width, height, fmt, size in [(127, 91, 1, 320), (320, 160, 2, 160), (1, 1, 2, 32),
+        for width, height, fmt, size in [(320, 320, 1, 320), (320, 320, 2, 320), (320, 160, 2, 320),
+                                       (127, 91, 1, 320), (320, 160, 2, 160), (1, 1, 2, 32),
                                        (31, 97, 1, 256), (1024, 1, 2, 64), (1, 1024, 1, 64),
                                        (257, 257, 2, 192), (512, 321, 1, 416)]:
             image = rng.integers(0, 256, (height, width, 3 if fmt == 1 else 4), dtype=np.uint8)

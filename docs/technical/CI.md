@@ -19,7 +19,7 @@ No job needs a Raspberry Pi, USB mouse, GPU or trained custom weights.
 | Preprocessing reference | RGB/BGRA, rectangular/odd images and 1-pixel dimensions match independent NumPy bilinear letterboxing |
 | ONNX schema oracle | 19 models generated with the official ONNX schema verify fixed/dynamic image sizes, names and rejected formats |
 | ONNX detection reference | The included YOLO11 sample runs in ONNX Runtime; native class filtering, NMS and coordinate mapping match torchvision |
-| CUDA compilation | Both production kernels compile to PTX for compute_75 and compute_86 through NVIDIA NVRTC |
+| CUDA compilation | Production kernels compile to PTX for compute_75, compute_86, compute_90, and compute_120 through NVIDIA NVRTC |
 | TensorRT API check | Production host code compiles against pinned official TensorRT 10.13, ONNX parser and CUDA 12.9 headers |
 | Extracted packages | Installed Windows ZIP/Linux tar.gz contents are checked, started disarmed and rerun class-preference unit/pipeline and worker fault tests outside the checkout |
 

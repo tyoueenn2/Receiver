@@ -504,8 +504,10 @@ int main() {
         CHECK(!settings_from_json(nlohmann::json{{"version", 1}, {"input_size", 256}}).auto_size);
         BenchmarkReport report;
         report.samples = {{160, 10, 400, 2, 3, ""}, {320, 10, 350, 3, 4, ""}, {512, 10, 200, 5, 6, ""}};
+        report.samples[1].p95_ms = 2;
         recommend_performance(report, PerformanceGoal::fastest, 30);
-        CHECK(report.recommended_size == 160);
+        CHECK(report.recommended_size == 320 && report.recommended_fps == 0);
+        report.samples[1].p95_ms = 4;
         recommend_performance(report, PerformanceGoal::balanced, 30);
         CHECK(report.recommended_size == 320);
         recommend_performance(report, PerformanceGoal::efficient, 30);
@@ -519,6 +521,10 @@ int main() {
         CHECK(measured.samples.size() == 6);
         CHECK(std::all_of(measured.samples.begin(), measured.samples.end(),
                           [](const auto& x) { return x.frames && x.fps > 0 && x.error.empty(); }));
+        s.input_size = 416;
+        auto latency = benchmark_model(s, frame, fake_factory, PerformanceGoal::fastest, {}, {}, {0, 2});
+        CHECK(latency.samples.size() == 1 && latency.samples[0].size == 416);
+        CHECK(latency.recommended_size == 416 && latency.recommended_fps == 0);
         rejects([&] {
             benchmark_model(s, frame, fake_factory, PerformanceGoal::fastest, {}, [] { return true; },
                             {0, 2});
@@ -533,7 +539,7 @@ int main() {
         write(engine, wrapped);
         s.model = engine.string();
         auto engine_report =
-            benchmark_model(s, frame, fake_factory, PerformanceGoal::fastest, {}, {}, {0, 2});
+            benchmark_model(s, frame, fake_factory, PerformanceGoal::balanced, {}, {}, {0, 2});
         CHECK(engine_report.samples.size() == 1 && engine_report.recommended_size == 1024);
         setup_workflows(root / "setup");
         app_workflows();

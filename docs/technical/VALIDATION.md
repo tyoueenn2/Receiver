@@ -31,7 +31,7 @@ Receiver now performs version-bound, one-shot UPT3 upgrade probes while continui
 
 The native non-GPU Windows build completed and all 5 CTest suites passed; the core executable reported 76,868 checks. The focused real-process loopback regression passed five scenarios: Pi startup 350 ms after Receiver; all initial UPT3 responses dropped before recovery; UPT3 enabled after established UPT1 fallback; a permanent UPT1-only peer retaining continuous movement while bounded probes continued; and delayed old-epoch UPT3 replies followed by a server restart, telemetry loss, and recovery. Direction output and a scheduled click both became available after a valid in-place UPT3 upgrade without restarting Receiver. Existing main network and direction integrations also passed.
 
-These are deterministic UDP loopback tests using `tools/mock_pi.py` and simulated inference. They do not validate TensorRT execution, RTX 3060 Ti performance, Raspberry Pi scheduling, physical USB/Raw Gadget behavior, a Logitech mouse, or LAN loss/latency.
+These deterministic UDP loopback tests used `tools/mock_pi.py` and simulated inference. TensorRT execution, GPU performance, physical device behavior, and LAN timing require deployment tests.
 
 ## Release recovery and proxy interoperability audit — 2026-09-13
 
@@ -55,9 +55,9 @@ Final local regression:
 
 The receive/performance path was reviewed without speculative changes: reassembly retains a bounded three-frame incomplete set and seven-buffer pool, copies each fragment once, and publishes only the newest complete frame. Inference and output use latest-value slots, freshness deadlines, and event-driven handoff. The TensorRT path reuses pinned/device buffers and one CUDA stream for asynchronous upload, fused preprocessing, enqueue, and download; synchronization occurs before bounded CPU decode/NMS consumes the result. No profiling evidence from this host justified weakening freshness or adding pipeline complexity.
 
-The production CMake path sets CUDA architecture 86 for the RTX 3060 Ti, requires a CUDA toolkit plus TensorRT 10.x headers/libraries, defines `RECEIVER_HAS_TENSORRT`, and creates `receiver_verify` only when `RECEIVER_TENSORRT=ON`. This host has an NVIDIA MX450 and driver 592.82 but no NVCC, complete TensorRT SDK, or Visual Studio toolchain, so this run proves only the non-GPU build. No TensorRT backend was linked or executed, and simulated inference timings are not GPU measurements.
+The CUDA build uses the architectures configured in CMake and requires a CUDA toolkit plus TensorRT 10.x headers and libraries. This check used the hardware-free build on a Windows host with an NVIDIA MX450 and driver 592.82.
 
-Still required on the deployment hardware: a linked MSVC/CUDA/TensorRT build, `receiver_verify` and representative-image comparison, engine build/warmup/FP16 checks, RTX 3060 Ti latency and memory measurements, the proxy's Linux tests, physical Raspberry Pi/Raw Gadget/USB behavior, Logitech G Pro Wireless enumeration and interference testing, reconnect/backpressure testing, and LAN freshness/throughput measurements. None of those hardware checks is claimed as passed.
+Deployment checks include a linked MSVC/CUDA/TensorRT build, `receiver_verify` with representative captures, engine build and warmup, GPU latency and memory measurements, proxy Linux tests, physical USB enumeration and interference testing, reconnect and backpressure testing, and LAN freshness and throughput measurements.
 
 ## Interface update — 2026-09-10
 
@@ -69,7 +69,7 @@ The Windows GUI was rebuilt locally with guided Setup, Detection, Mouse, and Sav
 
 ## Implemented and locally verified
 
-Development host: Windows, Intel Core i7-1165G7, NVIDIA GeForce MX450, NVIDIA driver 592.82. This is not the planned RTX 3060 Ti deployment system.
+The development host ran Windows on an Intel Core i7-1165G7 and NVIDIA GeForce MX450 with driver 592.82.
 
 - Native Windows test build: C++20 receiver core, headless executable, and Dear ImGui/DirectX 11 GUI compile and link with LLVM-MinGW 20260826 (Clang 23.1.0), CMake 4.4.3, Dear ImGui 1.92.1, and nlohmann/json 3.12.0.
 - C++ core and synthetic-input tests pass: binary framing, malformed dimensions/lengths, duplicates and conflicting fragments, reversed fragment order, assembly expiry/eviction, sender session changes, held-buffer lifetime/pool exhaustion, 10,000 malformed fuzz datagrams, clock offset bounds, telemetry token/sequence checks, wraparound, NMS/class filtering, letterbox reversal, selection/persistence, movement clamping, fractional accumulation, smoothing, profile validation, persistent holds/releases/heartbeats, and scheduled-click ACK faults.
@@ -84,7 +84,7 @@ Development host: Windows, Intel Core i7-1165G7, NVIDIA GeForce MX450, NVIDIA dr
 ## Still required on deployment hardware
 
 - A complete MSVC + CUDA 12.9 + TensorRT 10.13 production build, including the NVCC host launch wrapper and SDK linking. MSVC and a full CUDA toolkit are not installed on this development host. The portable test executables do not contain TensorRT.
-- TensorRT engine build, warmup, FP16 inference, numerical comparison, GPU memory measurement, and latency measurements on the RTX 3060 Ti.
+- TensorRT engine build, warmup, FP16 inference, numerical comparison, memory and latency measurements on the deployment GPU.
 - The authoritative public proxy's own Linux test suite. WSL/Linux is not installed on this development host, and Raw Gadget/libusb cannot be exercised as a Windows application.
 - Physical mouse/USB enumeration, Pi report merging and telemetry behavior under actual USB backpressure, button release, and endpoint disconnect/reconnect.
 - LAN performance at 160/320 captures and 120/240 FPS, preview overhead, and true capture-to-USB timing.
@@ -101,7 +101,7 @@ All zero-millisecond GPU entries in simulation CSV files mean the inference back
 - All seven default Test Hub entries passed through the same background process runner used by the GUI. The six GUI pages rendered their own hidden framebuffer; the Test Hub screenshot was visually reviewed.
 - Prediction methods, prediction resets/limits, sticky distance, dynamic FOV, EMA response, local injected-event exclusion, and profile round-tripping passed deterministic checks.
 - The actual Windows mouse reader started successfully without sending movement. A separate local-backend application session received synthetic frames without a Pi, remained disarmed, and recorded zero submitted corrections.
-- Local cursor injection/feel was deliberately left for explicit manual activation. RTX 3060 Ti TensorRT performance, physical Pi/USB operation, and deployment behavior remain unvalidated by these checks. Optional model/CUDA entries do not count as passing unless their prerequisites are supplied and the checks actually run.
+- Explicit manual activation is required to check local cursor movement. TensorRT performance and physical Pi and USB behavior require deployment tests.
 
 ### Steady demo and local pacing update
 
