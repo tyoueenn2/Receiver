@@ -1802,7 +1802,10 @@ int run_gui(const std::string& options) {
                 changed |= slider_float("Smooth variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
             }
             if (h.path == receiver::HumanizationSettings::abcurves_path) {
-                hint("Install ABCurves 2 in the configured Python environment to use the Continuous Planner.");
+                changed |= slider_float("ABCurves target range", &h.abcurves_range_px, 1, 512, "%.0f px");
+                changed |= slider_float("ABCurves steering angle", &h.abcurves_angle_deg, .5f, 30, "%.1f deg");
+                hint("Steering stops when your hand leaves this angle from the target. The angle also caps the turn per report.");
+                hint("Install ABCurves 2 and use a Pi proxy with live mouse steering support.");
                 if (!stats.movement_status.empty())
                     ImGui::TextWrapped("%s", stats.movement_status.c_str());
             } else if (ImGui::CollapsingHeader("Random jitter")) {

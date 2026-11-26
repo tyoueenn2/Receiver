@@ -67,7 +67,7 @@ void AbcurvesWorker::run() {
             PythonWorker worker(python, "tools/abcurves_worker.py", "ABCurves", "abcurves",
                                 startup_deadline, cancelled);
             auto hello = worker.receive_json(startup_deadline);
-            if (hello.value("status", "") != "ready" || hello.value("version", 0) != 1)
+            if (hello.value("status", "") != "ready" || hello.value("version", 0) != 3)
                 throw worker.error("unsupported worker protocol");
             {
                 std::lock_guard lock(mutex_);
@@ -87,20 +87,28 @@ void AbcurvesWorker::run() {
                     request_.reset();
                 }
                 const auto deadline = now_ns() + 1'000'000'000;
-                worker.send_json({{"generation", request.generation},
-                                  {"step_ms", request.step_ms},
-                                  {"target", {request.x, request.y}},
-                                  {"executed", {request.executed_x, request.executed_y}}},
+                worker.send_json({{"target", {request.x, request.y}}, {"history", request.history}},
                                  deadline);
                 const auto result = worker.receive_json(deadline);
-                const auto dx = result.at("dx").get<double>(), dy = result.at("dy").get<double>();
-                if (result.value("status", "") != "result" || !std::isfinite(dx) || !std::isfinite(dy))
+                const auto& positions = result.at("positions");
+                if (result.value("status", "") != "result" || !positions.is_array() ||
+                    positions.size() != abcurves_horizon_ms)
                     throw worker.error("invalid movement response");
+                Reply reply{request.id};
+                for (size_t i = 0; i < reply.positions.size(); ++i) {
+                    const auto& pos = positions[i];
+                    if (!pos.is_array() || pos.size() != 2 || !pos[0].is_number() || !pos[1].is_number())
+                        throw worker.error("invalid forecast position");
+                    const double x = pos[0].get<double>(), y = pos[1].get<double>();
+                    if (!std::isfinite(x) || !std::isfinite(y))
+                        throw worker.error("invalid forecast position");
+                    reply.positions[i] = {x, y};
+                }
                 {
                     std::lock_guard lock(mutex_);
                     if (stopped_ || current != revision_)
                         break;
-                    state_.reply = Reply{request.id, dx, dy};
+                    state_.reply = reply;
                 }
                 wake_();
             }

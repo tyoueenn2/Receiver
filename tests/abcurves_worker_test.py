@@ -1,4 +1,4 @@
-"""Check the ABCurves adapter without installing or loading its model."""
+"""Check the ABCurves hand-history adapter with a deterministic planner."""
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -12,57 +12,40 @@ from abcurves_worker import Movement
 class AbcurvesWorkerTests(unittest.TestCase):
     def make_movement(self):
         planner = Mock()
+        prepare = Mock(return_value=SimpleNamespace(observed_xy=(0, 0), history='filtered'))
         load = Mock(return_value=planner)
-        module = SimpleNamespace(__version__='2.0.0', load=load)
+        module = SimpleNamespace(__version__='2.0.0', prepare_history=prepare, load=load)
         with patch.dict(sys.modules, abcurves=module):
             movement = Movement()
         load.assert_called_once_with(prewarm=True)
-        return movement, planner
+        return movement, planner, prepare
 
-    def test_continuous_clock_and_coordinate_conversion(self):
-        movement, planner = self.make_movement()
-        planner.advance.side_effect = [
-            {'xy': [(1, -2), (6.5, -7.25)]},
-            {'xy': [(9, -12)]},
-        ]
-        first = movement.advance(dict(generation=1, step_ms=8, target=(20, 12), executed=(3, 4)))
-        second = movement.advance(dict(generation=1, step_ms=12, target=(-3, 6), executed=(6, 7)))
-
-        planner.reset.assert_called_once_with()
-        self.assertEqual(planner.update_target.call_args_list, [
-            call((23, -16), timestamp_us=0),
-            call((3, -13), timestamp_us=8000),
+    def test_forecast_starts_from_current_hand_history(self):
+        movement, planner, prepare = self.make_movement()
+        planner.advance.return_value = {'xy': [(i, -2 * i) for i in range(1, 17)]}
+        first = [(1, 2)] * 164
+        second = [(-1, 3)] * 164
+        for history in (first, second):
+            result = movement.advance(dict(target=(19, -3), history=history))
+            self.assertEqual(result['positions'][0], [1, 2])
+            self.assertEqual(result['positions'][-1], [16, 32])
+        self.assertEqual(prepare.call_args_list, [
+            call([(1, -2)] * 164, current_xy=(0, 0)),
+            call([(-1, -3)] * 164, current_xy=(0, 0)),
         ])
-        self.assertEqual(planner.advance.call_args_list, [call(8000), call(20000)])
-        self.assertEqual(first, dict(status='result', dx=3.5, dy=3.25))
-        self.assertEqual(second, dict(status='result', dx=3, dy=5))
+        self.assertEqual(planner.reset.call_args_list, [call(initial_xy=(0, 0), history='filtered')] * 2)
+        self.assertEqual(planner.update_target.call_args_list, [call((19, 3), timestamp_us=0)] * 2)
+        self.assertEqual(planner.advance.call_args_list, [call(16000)] * 2)
 
-    def test_new_generation_restarts_planner_clock(self):
-        movement, planner = self.make_movement()
-        planner.advance.return_value = {'xy': [(2, 3)]}
-        movement.advance(dict(generation=4, step_ms=32, target=(10, 2), executed=(0, 0)))
-        result = movement.advance(dict(generation=5, step_ms=1, target=(-10, -2), executed=(0, 0)))
-
-        self.assertEqual(planner.reset.call_args_list, [call(), call()])
-        self.assertEqual(planner.update_target.call_args_list, [
-            call((10, -2), timestamp_us=0),
-            call((-10, 2), timestamp_us=0),
-        ])
-        self.assertEqual(planner.advance.call_args_list, [call(32000), call(1000)])
-        self.assertEqual(result, dict(status='result', dx=2, dy=-3))
-
-    def test_invalid_requests_leave_planner_untouched(self):
-        movement, planner = self.make_movement()
-        valid = dict(generation=1, step_ms=8, target=(20, 12), executed=(0, 0))
-        for step_ms in (0, -1, 33, 1.5, True):
-            with self.subTest(step_ms=step_ms):
-                with self.assertRaisesRegex(ValueError, 'step duration'):
-                    movement.advance(dict(valid, step_ms=step_ms))
-        for update in (dict(target=(float('nan'), 0)), dict(executed=(0, float('inf')))):
-            with self.subTest(update=update):
-                with self.assertRaisesRegex(ValueError, 'Non-finite'):
-                    movement.advance(dict(valid, **update))
-        self.assertEqual(planner.mock_calls, [])
+    def test_invalid_history_does_not_drive_planner(self):
+        movement, planner, prepare = self.make_movement()
+        for history in ([], [(0, 0)] * 163, [(40000, 1)] * 164, [(0, .2)] * 164):
+            with self.assertRaisesRegex(ValueError, 'Invalid physical mouse history'):
+                movement.advance(dict(target=(3, 4), history=history))
+        with self.assertRaisesRegex(ValueError, 'Non-finite'):
+            movement.advance(dict(target=(float('inf'), 1), history=[(0, 0)] * 164))
+        self.assertFalse(planner.mock_calls)
+        prepare.assert_not_called()
 
     def test_missing_or_unsupported_dependency_reports_setup_error(self):
         with patch.dict(sys.modules, abcurves=None):

@@ -830,20 +830,34 @@ void App::pi_loop() {
     std::unique_ptr<AbcurvesWorker> curve_worker;
     struct CurveFrame {
         uint64_t id;
-        int64_t observed, deadline, first_ns;
+        int64_t deadline;
         double x, y;
     };
-    std::optional<CurveFrame> curve_next, curve_pending;
-    uint64_t curve_generation = 1;
-    int64_t curve_last_observed = 0;
-    double curve_executed_x = 0, curve_executed_y = 0;
+    struct CurvePlan {
+        CurveFrame frame;
+        uint64_t epoch, generation, end_ms;
+        std::optional<AbcurvesWorker::Reply> reply;
+    };
+    std::optional<CurveFrame> curve_next;
+    std::optional<CurvePlan> curve_plan;
+    std::optional<mouse_history::Reply> curve_history;
+    std::optional<mouse_history::Steering> steering_sent;
+    uint64_t history_token = 0, last_curve_end = 0;
+    int64_t history_issued = 0, history_received = 0, history_due = 0;
+    constexpr int64_t history_period_ns = 5'000'000;
+    constexpr int64_t history_fresh_ns = 10'000'000;
     auto reset_curve = [&] {
-        if (curve_last_observed)
-            ++curve_generation;
-        curve_last_observed = 0;
-        curve_executed_x = curve_executed_y = 0;
+        if (steering_sent) {
+            mouse_history::Steering cancel;
+            cancel.session = steering_sent->session;
+            cancel.token = ++token;
+            cancel.epoch = steering_sent->epoch;
+            cancel.generation = steering_sent->generation;
+            socket.send(mouse_history::packet(cancel), pi);
+            steering_sent.reset();
+        }
         curve_next.reset();
-        curve_pending.reset();
+        curve_plan.reset();
     };
     auto reset_controller = [&] {
         controller.reset();
@@ -882,11 +896,14 @@ void App::pi_loop() {
         if (stop_ && !pi_udp)
             break;
         auto loop_start = now_ns();
-        if (stop_ && !shutdown_deadline)
+        if (stop_ && !shutdown_deadline) {
+            reset_curve();
             shutdown_deadline = loop_start + 100'000'000;
+        }
         if (shutdown_deadline && loop_start >= shutdown_deadline)
             break;
-        control_wake_.wait(pi_udp ? &socket : nullptr, bool(local_mouse));
+        control_wake_.wait(pi_udp ? &socket : nullptr, bool(local_mouse),
+                           shutdown_deadline ? 0 : history_due);
         auto now = now_ns();
 #ifdef _WIN32
         if (GetAsyncKeyState(VK_DELETE) & 0x8000)
@@ -979,6 +996,24 @@ void App::pi_loop() {
                 break;
             if (from != pi)
                 continue;
+            if (n >= 4 && !std::memcmp(bytes.data(), "UPH1", 4)) {
+                mouse_history::Reply history;
+                if (mouse_history::parse_reply(bytes.data(), size_t(n), history) &&
+                    history.session == client && history.token == history_token &&
+                    now - history_issued <= history_fresh_ns && history.epoch == gate.state.server &&
+                    history.generation == gate.state.motion_generation) {
+                    const bool same_source = curve_history && history.epoch == curve_history->epoch &&
+                                             history.generation == curve_history->generation;
+                    if (!same_source || history.end_ms > curve_history->end_ms) {
+                        if (!same_source)
+                            last_curve_end = 0;
+                        curve_history = history;
+                        history_received = now;
+                    }
+                    history_token = 0;
+                }
+                continue;
+            }
             if (n >= 4 && (!std::memcmp(bytes.data(), "UPT1", 4) || !std::memcmp(bytes.data(), "UPT2", 4) ||
                            !std::memcmp(bytes.data(), "UPT3", 4))) {
                 const bool wire_v1 = !std::memcmp(bytes.data(), "UPT1", 4);
@@ -1293,21 +1328,44 @@ void App::pi_loop() {
             calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status));
         const bool use_curve = !calibration_only_ && !settings_.return_action.enabled &&
                                settings_.humanization.uses_abcurves();
-        if (use_curve && !curve_worker)
+        const bool use_hand_history = use_curve && pi_udp;
+        if (use_hand_history && !curve_worker)
             curve_worker = std::make_unique<AbcurvesWorker>([this] { control_wake_.notify(); });
         AbcurvesWorker::State curve_state;
         if (curve_worker) {
-            curve_worker->configure(use_curve ? std::string_view(settings_.omni_python) : std::string_view{});
-            if (use_curve)
+            curve_worker->configure(use_hand_history ? std::string_view(settings_.omni_python)
+                                                     : std::string_view{});
+            if (use_hand_history)
                 curve_state = curve_worker->poll();
         }
+        const bool have_history = use_hand_history && curve_history && gate.state.has_motion &&
+                                  curve_history->epoch == gate.state.server &&
+                                  curve_history->generation == gate.state.motion_generation &&
+                                  now - history_received <= history_fresh_ns;
         stats_.movement_status = !use_curve                   ? ""
+                                 : !pi_udp                    ? "ABCurves requires Pi physical report history"
                                  : !curve_state.error.empty() ? curve_state.error
-                                 : curve_state.ready          ? "ABCurves ready"
-                                                              : "Loading ABCurves";
+                                 : !curve_state.ready         ? "Loading ABCurves"
+                                 : !have_history              ? "Waiting for Pi physical report history"
+                                                              : "ABCurves ready";
         bool active = !exclusive && !calibration_only_ && stats_.armed && !stats_.model_loading &&
                       !stats_.benchmarking && !proxy_error && sender_ok && input_ok && motion_ok &&
                       cursor_ok && activation_held(gate.state.physical, settings_);
+        if (active && use_hand_history && gate.state.has_motion && curve_state.ready) {
+            if (now >= history_due) {
+                const auto query_token = ++token;
+                if (socket.send(mouse_history::query(client, query_token), pi)) {
+                    history_token = query_token;
+                    history_issued = now_ns();
+                }
+                history_due = now + history_period_ns;
+            }
+        } else {
+            history_due = 0;
+            history_token = 0;
+            curve_history.reset();
+            last_curve_end = 0;
+        }
         stats_.pi_ready = input_ok;
         stats_.physical = gate.state.physical;
         if (exclusive) {
@@ -1387,44 +1445,72 @@ void App::pi_loop() {
             stats_.status = "Active - correction submitted";
             return true;
         };
+        const double steering_angle = settings_.humanization.abcurves_angle_deg;
         auto service_curve = [&] {
-            if (!curve_state.ready || (curve_pending && now > curve_pending->deadline)) {
+            const auto at = now_ns();
+            if (!curve_state.ready || !have_history) {
                 reset_curve();
                 return;
             }
-            // A reply can only use movement from this active stream and a still-fresh observation.
-            const auto& reply = curve_state.reply;
-            if (curve_pending && reply && reply->id == curve_pending->id) {
-                const auto frame = *curve_pending;
-                curve_pending.reset();
-                const int minx = std::max(-settings_.max_step, gate.state.xmin);
-                const int maxx = std::min(settings_.max_step, gate.state.xmax);
-                const int miny = std::max(-settings_.max_step, gate.state.ymin);
-                const int maxy = std::min(settings_.max_step, gate.state.ymax);
-                const double x = std::round(reply->dx), y = std::round(reply->dy);
-                const int dx = settings_.gain_x > 0 ? int(std::clamp(x, double(minx), double(maxx))) : 0;
-                const int dy = settings_.gain_y > 0 ? int(std::clamp(y, double(miny), double(maxy))) : 0;
-                if (!submit_correction(dx, dy, frame.deadline, frame.first_ns))
-                    return;
-                if ((settings_.gain_x > 0 && dx != x) || (settings_.gain_y > 0 && dy != y)) {
-                    // A capped command leaves the planner ahead of the movement actually submitted.
+            const auto& hand = *curve_history;
+            if (steering_sent && !abcurves_aligned(hand.trace, steering_sent->aim[0],
+                                                  steering_sent->aim[1], steering_angle)) {
+                reset_curve();
+                return;
+            }
+            if (curve_plan && (at >= curve_plan->frame.deadline || curve_plan->epoch != hand.epoch ||
+                               curve_plan->generation != hand.generation ||
+                               hand.end_ms > curve_plan->end_ms + abcurves_horizon_ms))
+                curve_plan.reset();
+            if (curve_plan && curve_state.reply && curve_state.reply->id == curve_plan->frame.id)
+                curve_plan->reply = curve_state.reply;
+            if (curve_plan && curve_plan->reply && hand.end_ms > curve_plan->end_ms) {
+                auto completed = std::move(*curve_plan);
+                curve_plan.reset();
+                const auto elapsed = size_t(hand.end_ms - completed.end_ms);
+                const auto& forecast = completed.reply->positions;
+                const auto& next = forecast[std::min(elapsed, forecast.size() - 1)];
+                const auto& previous = forecast[std::min(elapsed - 1, forecast.size() - 2)];
+                const auto& frame = completed.frame;
+                const auto dx = next[0] - previous[0], dy = next[1] - previous[1];
+                const auto aim = abcurves_wire_direction(frame.x, frame.y);
+                const auto tangent = abcurves_wire_direction(dx, dy);
+                const auto remaining_ms = (frame.deadline - at) / 1'000'000;
+                if (remaining_ms > 0 && input_fresh(at) &&
+                    abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle) &&
+                    aim != std::array<int, 2>{} && tangent != std::array<int, 2>{} &&
+                    int64_t(aim[0]) * tangent[0] + int64_t(aim[1]) * tangent[1] > 0) {
+                    mouse_history::Steering advice;
+                    advice.session = client;
+                    advice.token = ++token;
+                    advice.epoch = hand.epoch;
+                    advice.generation = hand.generation;
+                    advice.sample_ms = hand.end_ms;
+                    advice.expires_ms = hand.end_ms + std::min(uint64_t(remaining_ms),
+                                                               mouse_history::steering_lifetime_ms);
+                    advice.angle_cdeg = uint16_t(std::round(steering_angle * 100));
+                    advice.aim = aim;
+                    advice.tangent = tangent;
+                    if (socket.send(mouse_history::packet(advice), pi)) {
+                        steering_sent = advice;
+                        stats_.status = "Active - ABCurves steering update sent";
+                    }
+                } else {
                     reset_curve();
                     return;
                 }
-                curve_executed_x += dx;
-                curve_executed_y += dy;
             }
-            if (!curve_pending && curve_next && now <= curve_next->deadline) {
+            if (!curve_plan && curve_next && at < curve_next->deadline && hand.end_ms > last_curve_end) {
                 const auto frame = *curve_next;
-                const int step_ms = curve_last_observed
-                                        ? int(std::clamp<int64_t>(
-                                              (frame.observed - curve_last_observed) / 1'000'000, 1, 32))
-                                        : 8;
-                curve_worker->submit({frame.id, curve_generation, step_ms, frame.x, frame.y,
-                                      curve_executed_x, curve_executed_y});
-                curve_last_observed = frame.observed;
-                curve_pending = frame;
                 curve_next.reset();
+                const bool engaged = steering_sent && hand.end_ms < steering_sent->expires_ms;
+                if (!abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle * (engaged ? 1 : .9))) {
+                    reset_curve();
+                    return;
+                }
+                curve_worker->submit({frame.id, frame.x, frame.y, hand.trace});
+                curve_plan = CurvePlan{frame, hand.epoch, hand.generation, hand.end_ms, {}};
+                last_curve_end = hand.end_ms;
             }
         };
         if (result_->id == last_result) {
@@ -1528,7 +1614,13 @@ void App::pi_loop() {
         } else
             cancel_auto_trigger();
         if (use_curve) {
-            if (!correction.curve_target) {
+            const auto rx = settings_.reference_x < 0 ? r.frame->header.width * .5 : settings_.reference_x;
+            const auto ry = settings_.reference_y < 0 ? r.frame->header.height * .5 : settings_.reference_y;
+            const auto distance = std::hypot(correction.aim_x - rx, correction.aim_y - ry);
+            if (!correction.curve_target || !have_history || settings_.gain_x <= 0 || settings_.gain_y <= 0 ||
+                distance > settings_.humanization.abcurves_range_px ||
+                !abcurves_aligned(curve_history->trace, correction.curve_target->x,
+                                  correction.curve_target->y, steering_angle)) {
                 reset_curve();
                 continue;
             }
@@ -1537,7 +1629,7 @@ void App::pi_loop() {
                 reset_curve();
             const auto deadline =
                 std::min(r.deadline, r.frame->first_ns + int64_t(settings_.max_age_ms) * 1'000'000);
-            curve_next = CurveFrame{r.id, now, deadline, r.frame->first_ns, goal.x, goal.y};
+            curve_next = CurveFrame{r.id, deadline, goal.x, goal.y};
             service_curve();
         } else {
             submit_correction(correction.dx, correction.dy, r.deadline, r.frame->first_ns);

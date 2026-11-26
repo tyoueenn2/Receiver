@@ -22,6 +22,7 @@ struct HumanizationSettings {
     float jitter = 0, jitter_interval_ms = 30, noise = 1, noise_period_ms = 100;
     bool ema_enabled = false;
     float ema_alpha = .5f;
+    float abcurves_range_px = 50, abcurves_angle_deg = 30;
     bool uses_abcurves() const {
         return enabled && path == abcurves_path;
     }

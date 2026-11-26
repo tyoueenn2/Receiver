@@ -38,7 +38,7 @@ With the Pi connection, production physical mouse data comes from cumulative **U
 | Ease in | Builds from zero to normal strength over the selected time using an adjustable exponent. |
 | Adaptive | Reduces strength near the aim point, reaching full strength at the chosen approach distance. |
 | Smooth noise | Adds smoothly interpolated random variation perpendicular to the correction. |
-| ABCurves | Uses the external ABCurves 2 Continuous Planner for movement. |
+| ABCurves | Steers physical mouse reports near a target using your live movement history. |
 
 **Small random variations** adds bounded jitter in mouse units at a configurable interval. Both jitter and smooth noise fade within 20 picture pixels of the aim point and are disabled inside the dead zone. No variation occurs without a current eligible target. Smoothing is time-based exponential averaging. Shaping state resets on target change, deactivation, stale input, and configuration changes; no future path points are queued. Direction strength is applied after shaping/smoothing and before the existing device/per-update caps. Zero strength clears fractional and smoothed leftovers.
 
@@ -55,18 +55,32 @@ cd ABCurves
 python -m pip install -e .
 ```
 
-In Receiver, open **Movement**, enable **Customize movement path**, and select
-**ABCurves**. A headless profile uses `"humanization": {"enabled": true, "path": 5}`.
-Wait for **ABCurves ready** before testing movement. The first load can take longer
-while Python warms the model. Startup and runtime errors appear in Movement and
-the headless log, with worker details in `cache/abcurves-worker-*.log`.
+ABCurves uses Pi UDP output with live physical report history and steering support.
+Use a USB mouse with a polling interval of 1 ms or faster. The proxy keeps a
+rolling history of 164 complete millisecond intervals in memory.
 
-Receiver feeds gain-scaled target offsets to the Continuous Planner, treating one
-configured output count as one common angular count. Each eligible capture can
-produce one combined correction under the configured movement and device limits.
-The planner resets on target changes, disarm, and stale input. It uses Receiver's
-integer output and applies to ordinary tracking. Random jitter and the ABCurves
-report renderer are outside this movement style.
+In Receiver, open **Movement**, enable **Customize movement path**, and select
+**ABCurves**. Two controls appear directly under the style selector.
+
+- **ABCurves target range** limits steering to targets within 50 capture pixels of
+  the aim reference by default.
+- **ABCurves steering angle** defaults to 30 degrees. When your hand leaves that
+  angle from the target bearing, the Pi passes the same report through. A
+  slightly narrower angle is required to engage. The setting also caps the
+  change in direction per report, before HID integer rounding.
+
+Wait for **ABCurves ready** before testing. The headless equivalent is
+`"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_angle_deg": 30}`.
+The existing activation conditions still apply.
+
+The Continuous Planner forecasts a tangent from your actual hand history.
+The Pi rotates each eligible physical XY report toward that tangent, preserving
+its magnitude before integer rounding, as well as its timing, wheel, and
+buttons. Zero input stays zero. A direction change outside the cone cancels
+steering on the Pi immediately. Receiver cancels steering when the target
+leaves range, changes, becomes stale, or activation is released. Each Pi
+steering update expires within 20 ms so dropped packets can only delay
+cancellation briefly.
 
 ## Practice and checks
 

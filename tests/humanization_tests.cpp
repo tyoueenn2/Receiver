@@ -1,4 +1,5 @@
 #include "receiver/control.hpp"
+#include "../src/abcurves_assist.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -16,6 +17,17 @@ bool close(double a, double b) {
 }
 int main() {
     try {
+        mouse_history::Trace hand{};
+        CHECK(!abcurves_aligned(hand, 100, 0, 5));
+        std::fill(hand.end() - 4, hand.end(), std::array<int, 2>{100, 0});
+        CHECK(abcurves_aligned(hand, 100, 8, 5));
+        CHECK(!abcurves_aligned(hand, 100, 9, 5));
+        CHECK(!abcurves_aligned(hand, -100, 0, 5));
+        CHECK(abcurves_wire_direction(3, 4) == (std::array<int, 2>{6000, 8000}));
+        hand.back() = {-100, 0};
+        CHECK(!abcurves_aligned(hand, 100, 0, 5));
+        hand[hand.size() - 2] = hand.back() = {};
+        CHECK(!abcurves_aligned(hand, 100, 0, 5));
         DirectionSettings d;
         CHECK(direction_multiplier(30, 0, {}, d) == 1);
         d.enabled = true;
@@ -186,15 +198,20 @@ int main() {
         CHECK(!c.update(centered, 320, 320, s, limits, 331'000'000).curve_target);
         auto file = std::filesystem::temp_directory_path() / "receiver-humanization-test.json";
         s.direction = d;
+        CHECK(s.humanization.abcurves_range_px == 50 && s.humanization.abcurves_angle_deg == 30);
+        s.humanization.abcurves_range_px = 42;
+        s.humanization.abcurves_angle_deg = 3.5;
         save_settings(s, file.string());
         auto loaded = load_settings(file.string());
         CHECK(loaded.direction.mode == 2 && loaded.humanization.uses_abcurves());
+        CHECK(loaded.humanization.abcurves_range_px == 42 && loaded.humanization.abcurves_angle_deg == 3.5);
         {
             std::ofstream f(file);
             f << "{\"version\":1,\"gain_x\":0.3}";
         }
         loaded = load_settings(file.string());
         CHECK(!loaded.direction.enabled && !loaded.humanization.enabled && loaded.gain_x == .3f);
+        CHECK(loaded.humanization.abcurves_range_px == 50 && loaded.humanization.abcurves_angle_deg == 30);
         std::filesystem::remove(file);
         s.direction.slow_speed = 0;
         bool invalid = false;

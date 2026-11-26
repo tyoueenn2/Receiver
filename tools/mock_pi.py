@@ -21,6 +21,8 @@ class MockPi:
         self.motion_enabled = True
         self.upt3_enabled = True
         self.endpoint_poll_us = 1000
+        self.history_enabled = False
+        self.steering_events = []
         self.motion_x = self.motion_y = 0.0
         self.motion_generation = 1
         self.commands, self.transitions = [], []
@@ -79,6 +81,15 @@ class MockPi:
                 if self.transactions.handle(data,source,self.session,self.motion_generation,self.physical,persistent,self.ready):
                     if data[:4] == b'UPM1':
                         owner,lease=source,now
+                elif len(data) == SUBSCRIBE.size and data[:8] == b'UPS3HIS1':
+                    _, _, candidate, candidate_token = SUBSCRIBE.unpack(data)
+                    if (self.history_enabled and self.ready and self.endpoint_poll_us <= 1000 and
+                            subscriber == source and client == candidate and telemetry_version == 3):
+                        end_ms = time.perf_counter_ns() // 1000000
+                        dx, dy = round(self.motion_x / 1000), round(self.motion_y / 1000)
+                        packet = struct.pack('!4s4xQQQQQ', b'UPH1', client, candidate_token,
+                                             self.session, self.motion_generation, end_ms)
+                        self.sock.sendto(packet + struct.pack('!hh', dx, dy) * 164, source)
                 elif len(data) == SUBSCRIBE.size and data[:4] in (b'UPS1', b'UPS2', b'UPS3'):
                     _, reserved, candidate, candidate_token = SUBSCRIBE.unpack(data)
                     self.subscription_versions.append(data[:4])
@@ -102,6 +113,13 @@ class MockPi:
                             # the requested version as soon as motion data is available.
                             if telemetry_version >= 2 and not self.motion_enabled:
                                 telemetry_version = 1
+                elif len(data) == 64 and data[:4] == b'UPJ1':
+                    _, angle, candidate, _, epoch, generation, sample, expires, ax, ay, tx, ty = \
+                        struct.unpack('!4sH2x6Q4h', data)
+                    if (self.history_enabled and subscriber == source and
+                            client == candidate and epoch == self.session and generation == self.motion_generation):
+                        self.steering_events.append(dict(angle=angle, sample=sample, expires=expires,
+                                                         aim=(ax, ay), tangent=(tx, ty)))
                 elif len(data) == MOVE.size and data[:4] == b'UPX1':
                     _, move_sequence, dx, dy, wheel, pan, buttons, reserved = MOVE.unpack(data)
                     if owner is not None and owner != source:

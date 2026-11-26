@@ -1,5 +1,8 @@
 #pragma once
+#include "abcurves_assist.hpp"
+#include <array>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -12,13 +15,13 @@ namespace receiver {
 class AbcurvesWorker {
   public:
     struct Request {
-        uint64_t id, generation;
-        int step_ms;
-        double x, y, executed_x, executed_y;
+        uint64_t id;
+        double x, y;
+        mouse_history::Trace history;
     };
     struct Reply {
         uint64_t id;
-        double dx, dy;
+        std::array<std::array<double, 2>, abcurves_horizon_ms> positions{};
     };
     struct State {
         bool ready = false;
