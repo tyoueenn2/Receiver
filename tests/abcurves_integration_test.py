@@ -42,6 +42,13 @@ class Planner:
             while Path("stall").exists():
                 time.sleep(.005)
         if timestamp_us == 320000:
+            if Path("flat").exists():
+                Path("flat-entered").touch()
+                return {"xy": [(0, 0)] * 320}
+            if not self.vx and not self.vy:
+                # The first positive motion is too small to use before the forecast is refreshed.
+                return {"xy": [(.001 * min(i, 100) + .5 * max(i - 100, 0), -.3 * max(i - 100, 0))
+                               for i in range(1, 321)]}
             # A reversed hand first goes left, then turns toward the target late in the forecast.
             turn = 80 if self.vx < 0 else 0
             vertical = 0.7 if self.vy < 0 else -0.7
@@ -71,6 +78,11 @@ def check_additive(pi, sender, root, log, real_python):
         wait_for(lambda: any(c['dy'] < 0 for c in moves()[count:]),
                  'Recent physical movement did not change the generated path')
 
+    pi.motion_x = pi.motion_y = 0
+    time.sleep(.18)
+    count = len(moves())
+    wait_for(lambda: any(c['dx'] > 0 for c in moves()[count:]), 'Steering stopped when the hand stopped')
+
     pi.history_enabled = False
     time.sleep(.08)
     count = len(moves())
@@ -99,11 +111,35 @@ def check_additive(pi, sender, root, log, real_python):
     assert len(moves()) == count, 'Additive movement continued after activation release'
 
 
+def check_idle(pi, root, log, real_python):
+    def moves():
+        return [c for c in pi.commands.copy() if c['dx'] or c['dy']]
+
+    wait_for(lambda: sum(c['dx'] > 0 and (real_python is not None or c['dy'] > 0) for c in moves()) >= 3,
+             'Stationary activation did not sustain targetward movement')
+    assert not any(e['angle'] for e in pi.steering_events), 'Idle additive mode sent a steering advisory'
+    if not real_python:
+        (root / 'flat').touch()
+        wait_for((root / 'flat-entered').exists, 'The flat fixture forecast did not run')
+        time.sleep(.08)
+        count = len(moves())
+        wait_for(lambda: any(c['dx'] == 1 and c['dy'] == 0 for c in moves()[count:]),
+                 'The flat forecast prevented stationary movement')
+
+    pi.physical = 0
+    wait_for(lambda: 'Armed - hold activation button' in log.read_text(), 'Activation release was ignored')
+    count = len(moves())
+    time.sleep(.12)
+    assert len(moves()) == count, 'Idle additive movement continued after activation release'
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('executable', type=lambda s: Path(s).resolve())
     parser.add_argument('--real-python', help='Use an interpreter with ABCurves installed')
-    parser.add_argument('--additive', action='store_true', help='Exercise additive trajectory playback')
+    scenarios = parser.add_mutually_exclusive_group()
+    scenarios.add_argument('--additive', action='store_true', help='Exercise additive trajectory playback')
+    scenarios.add_argument('--idle', action='store_true', help='Exercise additive playback from a still mouse')
     args = parser.parse_args()
     source_tools = Path(__file__).resolve().parents[1] / 'tools'
     with tempfile.TemporaryDirectory(prefix='receiver-abcurves-') as directory:
@@ -120,9 +156,12 @@ def main():
             pi_port = free_port()
         profile = root / 'profile.json'
         profile.write_text(json.dumps(dict(frame_port=frame_port, pi_port=pi_port,
-            gain_x=2, gain_y=2, max_age_ms=100, max_step=5 if args.additive else 32,
+            gain_x=.2 if args.idle else 2, gain_y=.2 if args.idle else 2,
+            reference_x=209 if args.idle else -1, max_age_ms=50 if args.idle else 100,
+            max_step=5 if args.additive or args.idle else 32,
             omni_python=args.real_python or sys.executable,
-            humanization=dict(enabled=True, path=6 if args.additive else 5))))
+            humanization=dict(enabled=True, path=6 if args.additive or args.idle else 5),
+            direction=dict(enabled=args.idle, slow_strength=0))))
         pi = MockPi(pi_port)
         pi.history_enabled = True
         if args.additive:
@@ -140,6 +179,9 @@ def main():
         try:
             wait_for(lambda: 'ABCurves ready' in log.read_text(), 'Hand history did not become ready',
                      timeout=120 if args.real_python else 8)
+            if args.idle:
+                check_idle(pi, root, log, args.real_python)
+                return
             if args.additive:
                 check_additive(pi, sender, root, log, args.real_python)
                 return

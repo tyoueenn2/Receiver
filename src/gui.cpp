@@ -1818,7 +1818,7 @@ int run_gui(const std::string& options) {
                     ImGui::TextWrapped("%s", stats.movement_status.c_str());
             } else if (h.path == receiver::HumanizationSettings::abcurves_trajectory_path) {
                 hint("Uses recent physical input to predict a 320 ms path and adds corrections "
-                     "along it while activation is held. Your mouse movement is also applied.");
+                     "while activation is held, including when the mouse is still.");
                 hint("Install ABCurves 2 and use a Pi proxy with live physical report history.");
                 if (!stats.movement_status.empty())
                     ImGui::TextWrapped("%s", stats.movement_status.c_str());
@@ -1830,13 +1830,16 @@ int run_gui(const std::string& options) {
             ImGui::EndDisabled();
             section("Directional assistance",
                     "Change correction strength based on your physical mouse movement.");
-            ImGui::BeginDisabled(settings.mouse_backend == 2);
+            const bool additive = h.uses_abcurves_trajectory();
+            ImGui::BeginDisabled(settings.mouse_backend == 2 || additive);
             changed |= ImGui::Checkbox("Adapt to my mouse direction", &d.enabled);
             ImGui::EndDisabled();
-            if (settings.mouse_backend == 2)
+            if (additive)
+                hint("ABCurves (additive) uses physical input in its own forecast.");
+            else if (settings.mouse_backend == 2)
                 hint("MAKCU reports buttons but no physical motion totals. Directional assistance is "
                      "unavailable; sensitivity, smoothing, prediction and dynamic search area still work.");
-            if (d.enabled) {
+            if (d.enabled && !additive) {
                 changed |= combo("Assistance behavior", &d.mode,
                                  "Stronger when moving away\0Stronger when moving toward\0Different strength "
                                  "for left and right\0");

@@ -388,7 +388,7 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
         vx = smooth_x_;
         vy = smooth_y_;
     }
-    double strength = direction_multiplier(ex, ey, motion, s.direction);
+    double strength = h.uses_abcurves_trajectory() ? 1 : direction_multiplier(ex, ey, motion, s.direction);
     vx *= strength;
     vy *= strength;
     if (strength == 0) {

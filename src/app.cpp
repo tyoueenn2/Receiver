@@ -1339,7 +1339,6 @@ void App::pi_loop() {
         auto physical_motion = motion_tracker.estimate(now);
         stats_.motion_available = input_ok && physical_motion.available;
         stats_.mouse_speed = stats_.motion_available ? std::hypot(physical_motion.x, physical_motion.y) : 0;
-        bool motion_ok = !settings_.direction.enabled || stats_.motion_available;
         bool cursor_ok = true;
 #ifdef _WIN32
         if (local_mouse && settings_.cursor_check) {
@@ -1353,6 +1352,7 @@ void App::pi_loop() {
         const bool use_curve = !calibration_only_ && !settings_.return_action.enabled &&
                                settings_.humanization.uses_abcurves();
         const bool use_trajectory = use_curve && settings_.humanization.uses_abcurves_trajectory();
+        const bool motion_ok = use_trajectory || !settings_.direction.enabled || stats_.motion_available;
         const bool use_hand_history = use_curve && pi_udp;
         if (use_hand_history && !curve_worker)
             curve_worker = std::make_unique<AbcurvesWorker>([this] { control_wake_.notify(); });
@@ -1605,26 +1605,36 @@ void App::pi_loop() {
             }
             if (curve_plan && (at >= curve_plan->frame.deadline || curve_plan->epoch != hand.epoch ||
                                curve_plan->generation != hand.generation ||
-                               hand.end_ms > curve_plan->end_ms + abcurves_trajectory_replan_ms))
+                               hand.end_ms > curve_plan->end_ms + abcurves_max_trajectory_age_ms))
                 curve_plan.reset();
             if (curve_plan && curve_state.reply && curve_state.reply->id == curve_plan->frame.id) {
                 const auto& frame = curve_plan->frame;
                 auto& points = curve_state.reply->positions;
                 const auto elapsed = size_t(hand.end_ms - curve_plan->end_ms);
-                const auto begin = abcurves_trajectory_start(points, elapsed, frame.x, frame.y);
-                if (begin < points.size())
+                const bool stationary = abcurves_stationary(hand.trace);
+                const auto begin = abcurves_trajectory_start(points, elapsed, frame.x, frame.y, stationary);
+                if (begin < points.size()) {
                     curve_playback = CurvePlayback{frame, std::move(points), hand.end_ms, begin};
-                else
+                } else if (stationary) {
+                    // A flat forecast can leave a still hand stuck on the same target forever.
+                    // Feed a bounded targetward step through the usual pacing and quantization.
+                    const auto scale = std::max({1., std::abs(frame.x), std::abs(frame.y)});
+                    std::vector<std::array<double, 2>> fallback(abcurves_stationary_fallback_ms);
+                    for (size_t i = 0; i < fallback.size(); ++i) {
+                        const auto progress = double(i + 1) / (double(fallback.size()) * scale);
+                        fallback[i] = {frame.x * progress, frame.y * progress};
+                    }
+                    curve_playback = CurvePlayback{frame, std::move(fallback), hand.end_ms, 0};
+                } else {
                     curve_playback.reset();
+                }
                 curve_plan.reset();
             }
-            if (!curve_plan && curve_next && at < curve_next->deadline && hand.end_ms > last_curve_end &&
-                (!curve_playback || hand.end_ms - last_curve_end >= abcurves_trajectory_replan_ms)) {
+            if (!curve_plan && curve_next && at < curve_next->deadline) {
                 const auto frame = *curve_next;
                 curve_next.reset();
                 curve_worker->submit({frame.id, frame.x, frame.y, hand.trace, true});
                 curve_plan = CurvePlan{frame, hand.epoch, hand.generation, hand.end_ms, {}};
-                last_curve_end = hand.end_ms;
             }
         };
         if (result_->id == last_result) {

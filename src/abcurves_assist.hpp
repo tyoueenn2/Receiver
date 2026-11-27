@@ -7,8 +7,16 @@
 namespace receiver {
 inline constexpr size_t abcurves_max_plan_age_ms = 16;
 inline constexpr size_t abcurves_trajectory_ms = 320;
-inline constexpr uint64_t abcurves_trajectory_replan_ms = 32;
+inline constexpr uint64_t abcurves_max_trajectory_age_ms = 32;
 inline constexpr uint64_t abcurves_trajectory_max_step_ms = 10;
+inline constexpr size_t abcurves_stationary_history_ms = 16;
+inline constexpr size_t abcurves_stationary_start_ms = 5;
+inline constexpr size_t abcurves_stationary_fallback_ms = 20;
+
+inline bool abcurves_stationary(const mouse_history::Trace& trace) {
+    return std::all_of(trace.end() - abcurves_stationary_history_ms, trace.end(),
+                       [](const auto& delta) { return delta[0] == 0 && delta[1] == 0; });
+}
 
 inline std::array<int, 2> current_hand_direction(const mouse_history::Trace& trace) {
     std::array<int, 2> recent{}, newest{};
@@ -49,13 +57,22 @@ inline std::array<double, 2> abcurves_position(std::span<const std::array<double
 }
 
 inline size_t abcurves_trajectory_start(std::span<const std::array<double, 2>> path, size_t elapsed,
-                                       double x, double y) {
+                                       double x, double y, bool stationary) {
     // The observed hand can start by going away. Start playing where the forecast turns toward the target.
+    const auto useful_progress = .25 * std::hypot(x, y);
     for (size_t i = elapsed; i < path.size(); ++i) {
         const auto from = abcurves_position(path, i);
         const auto to = path[i];
-        if (x * (to[0] - from[0]) + y * (to[1] - from[1]) > 0)
-            return i;
+        const auto progress = x * (to[0] - from[0]) + y * (to[1] - from[1]);
+        if (progress <= 0 || (stationary && progress < useful_progress / abcurves_stationary_start_ms))
+            continue;
+        if (stationary) {
+            // Skip sub-count drift that would be discarded on every replan.
+            const auto ahead = abcurves_position(path, std::min(i + abcurves_stationary_start_ms, path.size()));
+            if (x * (ahead[0] - from[0]) + y * (ahead[1] - from[1]) < useful_progress)
+                continue;
+        }
+        return i;
     }
     return path.size();
 }

@@ -94,11 +94,15 @@ Choose **ABCurves (additive)** under **Movement → Path style**. The planner us
 the same rolling physical mouse history to generate a 320 ms path toward the
 current target. Receiver adds timed movement deltas along the path while your
 physical input continues to move the cursor. If the forecast starts by moving
-away, playback starts at the first targetward part of the path. Receiver
-refreshes the forecast from live input and capture, normally after about 32 ms.
+away, playback starts at the first targetward part of the path. Each fresh
+detection frame requests a forecast using the latest physical mouse history.
+When the planner is busy, Receiver keeps the newest pending frame.
 
 This mode uses the existing targeting, activation, dead zone, gain, and maximum
-step controls. It continues to assist when you move in a different direction.
+step controls. It starts from a still mouse and continues to assist when you
+move in a different direction. For a still mouse, playback skips sub-count drift
+and uses a small targetward step if the forecast has no usable movement.
+Additive ABCurves uses physical input through its own forecast.
 It stops when activation is released, the target is lost, or input or capture
 becomes stale. The headless equivalent is
 `"humanization": {"enabled": true, "path": 6}`.
