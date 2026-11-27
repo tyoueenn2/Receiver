@@ -1482,7 +1482,8 @@ void App::pi_loop() {
             if (use_hand_history)
                 curve_state = curve_worker->poll();
         }
-        const bool have_history = use_hand_history && curve_history && gate.state.has_motion &&
+        const bool can_request_history = use_hand_history && curve_state.ready && gate.state.has_motion;
+        const bool have_history = can_request_history && curve_history &&
                                   curve_history->epoch == gate.state.server &&
                                   curve_history->generation == gate.state.motion_generation &&
                                   now - history_received <= history_fresh_ns;
@@ -1495,7 +1496,7 @@ void App::pi_loop() {
         bool active = !exclusive && !calibration_only_ && stats_.armed && !stats_.model_loading &&
                       !stats_.benchmarking && !proxy_error && sender_ok && input_ok && motion_ok &&
                       cursor_ok && activation_held(gate.state.physical, settings_);
-        if (active && use_hand_history && gate.state.has_motion && curve_state.ready) {
+        if (active && can_request_history) {
             if (now >= history_due) {
                 const auto query_token = ++token;
                 if (socket.send(mouse_history::query(client, query_token), pi)) {
