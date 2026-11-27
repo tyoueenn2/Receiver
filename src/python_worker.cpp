@@ -2,6 +2,7 @@
 #include "receiver/network.hpp"
 #include <algorithm>
 #include <filesystem>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <utility>
@@ -110,11 +111,14 @@ struct PythonWorker::Impl {
     std::runtime_error error(const std::string& message) const {
         return std::runtime_error(label_ + ": " + message + ". Worker log: " + log_path_);
     }
-    bool ready(Socket s, bool write, int64_t deadline) const {
+    void check_deadline(int64_t deadline) const {
         if (cancelled_ && cancelled_())
             throw error("worker operation cancelled");
         if (now_ns() >= deadline)
             throw error("worker timed out");
+    }
+    bool ready(Socket s, bool write, int64_t deadline) const {
+        check_deadline(deadline);
         fd_set set;
         FD_ZERO(&set);
         FD_SET(s, &set);
@@ -131,17 +135,18 @@ struct PythonWorker::Impl {
     void transfer(void* data, size_t size, bool write, int64_t deadline) const {
         auto* p = static_cast<char*>(data);
         while (size) {
-            if (!ready(connection_, write, deadline))
-                continue;
-            int chunk = int(std::min<size_t>(size, 64 * 1024));
+            check_deadline(deadline);
+            const int chunk = int(std::min<size_t>(size, std::numeric_limits<int>::max()));
 #ifdef _WIN32
             int n = write ? send(connection_, p, chunk, 0) : recv(connection_, p, chunk, 0);
 #else
             int n = int(write ? send(connection_, p, size_t(chunk), MSG_NOSIGNAL)
                               : recv(connection_, p, size_t(chunk), 0));
 #endif
-            if (n < 0 && retry_socket())
+            if (n < 0 && retry_socket()) {
+                ready(connection_, write, deadline);
                 continue;
+            }
             if (n <= 0)
                 throw error("worker disconnected");
             p += n;

@@ -16,7 +16,7 @@ class UdpSocket {
 
     int wait_readable(int timeout_ms);
     // A negative result means no datagram was consumed. Zero includes truncated packets.
-    int receive_now(std::span<uint8_t> buffer, Address& from, bool& would_block);
+    int receive_now(std::span<uint8_t> buffer, Address& from, bool& would_block, bool* oversized = nullptr);
 
   public:
     UdpSocket(const std::string& ip, int port);

@@ -11,6 +11,7 @@
 #endif
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -123,19 +124,28 @@ class CudaPinnedFrameMemory final : public FrameMemoryResource {
     bool cuda_pinned() const noexcept override { return true; }
 };
 
-class TrtBackend final : public Backend {
+class TrtBackend final : public Backend, private InferencePipeline {
     Log log_;
     std::unique_ptr<nvinfer1::IRuntime> runtime_;
     std::unique_ptr<nvinfer1::ICudaEngine> engine_;
     std::unique_ptr<nvinfer1::IExecutionContext> context_;
     cudaStream_t stream_ = nullptr;
     cudaGraphExec_t inference_graph_ = nullptr;
-    cudaEvent_t begin_ = nullptr, prepared_ = nullptr, inferred_ = nullptr, done_ = nullptr;
-    uint8_t* pinned_ = nullptr;
-    uint8_t* raw_ = nullptr;
+    struct Slot {
+        cudaEvent_t begin = nullptr, uploaded = nullptr, preprocess = nullptr;
+        cudaEvent_t prepared = nullptr, inferred = nullptr, done = nullptr;
+        uint8_t* pinned = nullptr;
+        uint8_t* raw = nullptr;
+        float* host_output = nullptr;
+        double host_copy_ms = 0;
+        std::shared_ptr<const Frame> frame;
+    };
+    std::array<Slot, 2> slots_;
+    cudaStream_t upload_stream_ = nullptr, notification_stream_ = nullptr;
+    std::function<void()> wake_;
+    size_t head_ = 0, in_flight_ = 0;
     void* input_ = nullptr;
     float* output_ = nullptr;
-    float* host_output_ = nullptr;
     bool half_input_ = false;
     void* half_output_ = nullptr;
     int size_ = 0, classes_ = 0, count_ = 0;
@@ -143,25 +153,36 @@ class TrtBackend final : public Backend {
     std::string input_name_, output_name_, description_;
     std::vector<std::string> names_;
     void cleanup() {
+        if (upload_stream_)
+            (void)cudaStreamSynchronize(upload_stream_);
         if (stream_)
-            cudaStreamSynchronize(stream_);
+            (void)cudaStreamSynchronize(stream_);
+        if (notification_stream_)
+            (void)cudaStreamSynchronize(notification_stream_);
         if (inference_graph_)
             cudaGraphExecDestroy(inference_graph_);
-        if (raw_)
-            cudaFree(raw_);
+        for (auto& slot : slots_) {
+            if (slot.raw)
+                cudaFree(slot.raw);
+            if (slot.pinned)
+                cudaFreeHost(slot.pinned);
+            if (slot.host_output)
+                cudaFreeHost(slot.host_output);
+            for (auto event :
+                 {slot.begin, slot.uploaded, slot.preprocess, slot.prepared, slot.inferred, slot.done})
+                if (event)
+                    cudaEventDestroy(event);
+        }
+        if (upload_stream_)
+            cudaStreamDestroy(upload_stream_);
+        if (notification_stream_)
+            cudaStreamDestroy(notification_stream_);
         if (input_)
             cudaFree(input_);
         if (output_)
             cudaFree(output_);
         if (half_output_)
             cudaFree(half_output_);
-        if (pinned_)
-            cudaFreeHost(pinned_);
-        if (host_output_)
-            cudaFreeHost(host_output_);
-        for (auto e : {begin_, prepared_, inferred_, done_})
-            if (e)
-                cudaEventDestroy(e);
         if (stream_)
             cudaStreamDestroy(stream_);
     }
@@ -447,17 +468,30 @@ class TrtBackend final : public Backend {
         output_count_ = size_t(classes_ + 4) * count_;
         report("TensorRT: allocating CUDA buffers");
         checked(cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking));
-        for (auto* e : {&begin_, &prepared_, &inferred_, &done_})
-            checked(cudaEventCreate(e));
-        checked(cudaMallocHost(reinterpret_cast<void**>(&pinned_), max_frame_bytes));
-        checked(cudaMalloc(reinterpret_cast<void**>(&raw_), max_frame_bytes));
+        const bool pipelined = s.tensorrt_pipeline && s.frame_source == "udp";
+        if (pipelined) {
+            checked(cudaStreamCreateWithFlags(&upload_stream_, cudaStreamNonBlocking));
+            checked(cudaStreamCreateWithFlags(&notification_stream_, cudaStreamNonBlocking));
+        }
+        for (size_t i = 0; i < (pipelined ? slots_.size() : 1); ++i) {
+            auto& slot = slots_[i];
+            for (auto* event : {&slot.begin, &slot.prepared, &slot.inferred, &slot.done})
+                checked(cudaEventCreate(event));
+            if (pipelined) {
+                checked(cudaEventCreate(&slot.uploaded));
+                checked(cudaEventCreate(&slot.preprocess));
+            }
+            checked(cudaMallocHost(reinterpret_cast<void**>(&slot.pinned), max_frame_bytes));
+            checked(cudaMalloc(reinterpret_cast<void**>(&slot.raw), max_frame_bytes));
+            checked(
+                cudaMallocHost(reinterpret_cast<void**>(&slot.host_output), output_count_ * sizeof(float)));
+        }
         half_input_ = engine_->getTensorDataType(input_name_.c_str()) == nvinfer1::DataType::kHALF;
         const size_t input_bytes = size_t(3) * size_ * size_ * (half_input_ ? sizeof(uint16_t) : sizeof(float));
         checked(cudaMalloc(&input_, input_bytes));
         checked(cudaMalloc(reinterpret_cast<void**>(&output_), output_count_ * sizeof(float)));
         if (engine_->getTensorDataType(output_name_.c_str()) == nvinfer1::DataType::kHALF)
             checked(cudaMalloc(&half_output_, output_count_ * 2));
-        checked(cudaMallocHost(reinterpret_cast<void**>(&host_output_), output_count_ * sizeof(float)));
         if (!context_->setTensorAddress(input_name_.c_str(), input_) ||
             !context_->setTensorAddress(output_name_.c_str(), half_output_ ? half_output_ : output_))
             throw std::runtime_error("Cannot bind TensorRT tensors");
@@ -472,48 +506,125 @@ class TrtBackend final : public Backend {
         prepare_inference_graph();
         if (inference_graph_)
             description_ += " / CUDA Graph";
+        if (pipelined)
+            description_ += " / overlap";
     }
     Inference run(const Frame& frame) override {
+        if (in_flight_)
+            throw std::logic_error("TensorRT pipeline must be empty before synchronous inference");
+        // The synchronous caller owns the frame. Drain queued reads if a later CUDA call fails.
+        try {
+            enqueue(slots_[0], frame, false);
+            return collect(slots_[0], false);
+        } catch (...) {
+            (void)cudaStreamSynchronize(stream_);
+            throw;
+        }
+    }
+    InferencePipeline* pipeline() override {
+        return upload_stream_ ? this : nullptr;
+    }
+
+  private:
+    void set_wake(std::function<void()> wake) override {
+        if (notification_stream_)
+            checked(cudaStreamSynchronize(notification_stream_));
+        wake_ = std::move(wake);
+    }
+    static void CUDART_CB notify_completion(void* backend) noexcept {
+        const auto& wake = static_cast<TrtBackend*>(backend)->wake_;
+        if (wake)
+            wake();
+    }
+    void submit(std::shared_ptr<const Frame> frame) override {
+        if (in_flight_ == slots_.size())
+            throw std::logic_error("TensorRT pipeline is full");
+        auto& slot = slots_[(head_ + in_flight_) % slots_.size()];
+        slot.frame = std::move(frame);
+        enqueue(slot, *slot.frame, true);
+        ++in_flight_;
+        // Keep the CUDA callback off the inference stream so CPU scheduling
+        // cannot hold up the next GPU job.
+        if (wake_) {
+            checked(cudaStreamWaitEvent(notification_stream_, slot.done, 0));
+            checked(cudaLaunchHostFunc(notification_stream_, notify_completion, this));
+        }
+    }
+    bool ready() const override {
+        if (!in_flight_)
+            return false;
+        const auto status = cudaEventQuery(slots_[head_].done);
+        if (status == cudaErrorNotReady)
+            return false;
+        checked(status);
+        return true;
+    }
+    Inference take() override {
+        if (!in_flight_)
+            throw std::logic_error("TensorRT pipeline is empty");
+        auto& slot = slots_[head_];
+        auto result = collect(slot, true);
+        slot.frame.reset();
+        head_ = (head_ + 1) % slots_.size();
+        --in_flight_;
+        return result;
+    }
+    void discard() override {
+        while (in_flight_)
+            take();
+    }
+
+    void enqueue(Slot& slot, const Frame& frame, bool pipelined) {
         const auto& h = frame.header;
         auto b = letterbox(h.width, h.height, size_);
         const auto* source = frame.pixels.data();
-        double host_copy_ms = 0;
+        slot.host_copy_ms = 0;
         if (!frame.cuda_pinned()) {
             const auto copy_start = now_ns();
-            std::memcpy(pinned_, source, h.bytes);
-            host_copy_ms = double(now_ns() - copy_start) / 1e6;
-            source = pinned_;
+            std::memcpy(slot.pinned, source, h.bytes);
+            slot.host_copy_ms = double(now_ns() - copy_start) / 1e6;
+            source = slot.pinned;
         }
-        checked(cudaEventRecord(begin_, stream_));
-        // Complete asynchronous reads before a failed inference returns the frame to the pool.
-        struct WaitOnFailure {
-            cudaStream_t stream;
-            ~WaitOnFailure() { if (stream) (void)cudaStreamSynchronize(stream); }
-        } wait{stream_};
-        checked(cudaMemcpyAsync(raw_, source, h.bytes, cudaMemcpyHostToDevice, stream_));
-        launch_preprocess(raw_, input_, half_input_, h.width, h.height, h.format == 1 ? 3 : 4, size_,
+        const auto upload = pipelined ? upload_stream_ : stream_;
+        checked(cudaEventRecord(slot.begin, upload));
+        checked(cudaMemcpyAsync(slot.raw, source, h.bytes, cudaMemcpyHostToDevice, upload));
+        if (pipelined) {
+            checked(cudaEventRecord(slot.uploaded, upload));
+            checked(cudaStreamWaitEvent(stream_, slot.uploaded, 0));
+            checked(cudaEventRecord(slot.preprocess, stream_));
+        }
+        launch_preprocess(slot.raw, input_, half_input_, h.width, h.height, h.format == 1 ? 3 : 4, size_,
                           b.resized_w, b.resized_h, b.left, b.top, stream_);
         checked(cudaGetLastError());
-        checked(cudaEventRecord(prepared_, stream_));
+        checked(cudaEventRecord(slot.prepared, stream_));
         if (inference_graph_)
             checked(cudaGraphLaunch(inference_graph_, stream_));
         else if (!context_->enqueueV3(stream_))
             throw std::runtime_error("TensorRT inference failed: " + log_.message());
-        checked(cudaEventRecord(inferred_, stream_));
+        checked(cudaEventRecord(slot.inferred, stream_));
         if (half_output_) {
             launch_half_to_float(half_output_, output_, output_count_, stream_);
             checked(cudaGetLastError());
         }
-        checked(cudaMemcpyAsync(host_output_, output_, output_count_ * sizeof(float), cudaMemcpyDeviceToHost,
-                                stream_));
-        checked(cudaEventRecord(done_, stream_));
-        checked(cudaEventSynchronize(done_));
-        wait.stream = nullptr;
-        float upload = 0, infer = 0, download = 0;
-        checked(cudaEventElapsedTime(&upload, begin_, prepared_));
-        checked(cudaEventElapsedTime(&infer, prepared_, inferred_));
-        checked(cudaEventElapsedTime(&download, inferred_, done_));
-        return {{host_output_, output_count_}, count_, classes_, host_copy_ms + upload + download, infer};
+        checked(cudaMemcpyAsync(slot.host_output, output_, output_count_ * sizeof(float),
+                                cudaMemcpyDeviceToHost, stream_));
+        checked(cudaEventRecord(slot.done, stream_));
+    }
+    Inference collect(Slot& slot, bool pipelined) {
+        checked(cudaEventSynchronize(slot.done));
+        float upload = 0, preprocess = 0, infer = 0, download = 0;
+        if (pipelined) {
+            checked(cudaEventElapsedTime(&upload, slot.begin, slot.uploaded));
+            checked(cudaEventElapsedTime(&preprocess, slot.preprocess, slot.prepared));
+        } else
+            checked(cudaEventElapsedTime(&upload, slot.begin, slot.prepared));
+        checked(cudaEventElapsedTime(&infer, slot.prepared, slot.inferred));
+        checked(cudaEventElapsedTime(&download, slot.inferred, slot.done));
+        return {{slot.host_output, output_count_},
+                count_,
+                classes_,
+                slot.host_copy_ms + upload + preprocess + download,
+                infer};
     }
 };
 std::unique_ptr<Backend> make_tensorrt_backend(const Settings& settings, const BackendProgress& progress) {

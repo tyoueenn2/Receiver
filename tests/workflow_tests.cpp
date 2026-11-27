@@ -1,6 +1,7 @@
 #include "receiver/app.hpp"
 #include "receiver/preferences.hpp"
 #include <algorithm>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -98,14 +99,18 @@ class WorkflowFrameMemory final : public FrameMemoryResource {
     }
     bool cuda_pinned() const noexcept override { return true; }
 };
-class FakeBackend : public Backend {
+std::atomic<bool> observed_two_frames{false};
+class FakeBackend : public Backend, private InferencePipeline {
     int size_;
     std::string model_;
+    bool use_pipeline_;
     std::array<float, 6> output_{160, 160, 40, 40, .9f, .1f};
+    std::deque<std::pair<std::shared_ptr<const Frame>, int64_t>> in_flight_;
 
   public:
     explicit FakeBackend(const Settings& s)
-        : size_(s.model == "second.pt" ? 640 : s.input_size), model_(s.model) {}
+        : size_(s.model == "second.pt" ? 640 : s.input_size), model_(s.model),
+          use_pipeline_(s.tensorrt_pipeline) {}
     Inference run(const Frame&) override {
         return {output_, 1, 2, 0, .1};
     }
@@ -125,6 +130,33 @@ class FakeBackend : public Backend {
     }
     std::vector<int> supported_sizes() const override {
         return model_.ends_with(".engine") ? std::vector<int>{1024} : std::vector<int>{};
+    }
+    InferencePipeline* pipeline() override {
+        return use_pipeline_ ? this : nullptr;
+    }
+
+  private:
+    // Omit completion notifications to exercise the scheduler's bounded fallback wait.
+    void set_wake(std::function<void()>) override {}
+    void submit(std::shared_ptr<const Frame> frame) override {
+        if (in_flight_.size() >= 2)
+            throw std::logic_error("App exceeded the two-frame pipeline capacity");
+        in_flight_.emplace_back(std::move(frame), now_ns() + 30'000'000);
+        if (in_flight_.size() == 2)
+            observed_two_frames = true;
+    }
+    bool ready() const override {
+        return !in_flight_.empty() && now_ns() >= in_flight_.front().second;
+    }
+    Inference take() override {
+        if (!ready())
+            throw std::logic_error("App attempted to collect an unfinished inference");
+        auto frame = std::move(in_flight_.front().first);
+        in_flight_.pop_front();
+        return run(*frame);
+    }
+    void discard() override {
+        in_flight_.clear();
     }
 };
 std::unique_ptr<Backend> fake_factory(const Settings& s, const BackendProgress&,
@@ -284,6 +316,7 @@ void app_workflows() {
     if (!pi_sink)
         throw std::runtime_error("No available loopback ports for workflow checks");
     s.max_age_ms = 250;
+    s.tensorrt_pipeline = true;
     s.classes = {1};
     s.selected_class_names = {"second"};
     s.class_preference = {0, "first", 1, 24};
@@ -302,7 +335,13 @@ void app_workflows() {
         send_picture(sender, to, sequence++);
         return app.stats().network.completed > 0;
     });
+    CHECK(sender.send(std::vector<uint8_t>(2049), to));
+    until([&] { return app.stats().network.oversized == 1; });
     until([&] { return bool(app.preview().frame); });
+    until([&] {
+        send_picture(sender, to, sequence++);
+        return observed_two_frames.load();
+    });
     {
         auto view = app.settings();
         CHECK(app.preview().frame);

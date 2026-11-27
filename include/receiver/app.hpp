@@ -61,7 +61,8 @@ class App {
     };
     mutable std::mutex mutex_;
     std::condition_variable cv_;
-    ControlWake control_wake_;
+    ControlWake control_wake_, receive_wake_, inference_wake_;
+    std::atomic<bool> pipelining_{false};
     InjectedButtonManager injected_;
     Settings settings_;
     Stats stats_;

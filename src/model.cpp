@@ -398,7 +398,8 @@ bool connection_settings_changed(const Settings& a, const Settings& b) {
 bool model_settings_changed(const Settings& a, const Settings& b) {
     return (a.color.mode == 1) != (b.color.mode == 1) || a.model != b.model || a.metadata != b.metadata ||
            a.input_size != b.input_size || a.auto_size != b.auto_size ||
-           a.inference_backend != b.inference_backend || a.omni_python != b.omni_python ||
-           a.omni_source != b.omni_source || a.omni_device != b.omni_device || a.omni_worker != b.omni_worker;
+           a.inference_backend != b.inference_backend || a.tensorrt_pipeline != b.tensorrt_pipeline ||
+           a.omni_python != b.omni_python || a.omni_source != b.omni_source ||
+           a.omni_device != b.omni_device || a.omni_worker != b.omni_worker;
 }
 } // namespace receiver

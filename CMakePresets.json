@@ -22,6 +22,7 @@
       "binaryDir": "${sourceDir}/build/cuda",
       "cacheVariables": {
         "RECEIVER_TENSORRT": "ON",
+        "RECEIVER_CUDA_ARCHITECTURES": "native",
         "TENSORRT_ROOT": "$env{TENSORRT_ROOT}"
       }
     },
@@ -46,6 +47,7 @@
       "binaryDir": "${sourceDir}/build/linux-cuda",
       "cacheVariables": {
         "RECEIVER_TENSORRT": "ON",
+        "RECEIVER_CUDA_ARCHITECTURES": "native",
         "TENSORRT_ROOT": "$env{TENSORRT_ROOT}"
       }
     },

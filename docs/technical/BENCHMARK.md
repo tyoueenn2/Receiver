@@ -45,6 +45,27 @@ regular TensorRT execution. For a before-and-after comparison on your GPU, keep
 the same engine and settings, and compare the warmed **Inference** and
 **Receiver-to-submission** percentiles. [NVIDIA TensorRT optimization guide](https://docs.nvidia.com/deeplearning/tensorrt/10.x.x/performance/optimization.html)
 
+For UDP capture, enable **Model → Advanced model runtime → Overlap TensorRT frames**
+or set `"tensorrt_pipeline": true` in the profile. It allows two frames in
+flight, uploads on a separate CUDA stream, and submits a waiting frame before CPU
+postprocessing of the completed one. TensorRT still uses one execution context
+and preserves frame order. Compare completed FPS, capture age at submission,
+and stale drops using the same model and settings. The default uses one frame in flight.
+
+The `receiver_gpu_pipeline_check` build target checks queued results against
+synchronous inference at 640×640. It also reports synchronous model, transfer and
+decode p95 and pipelined throughput. Run it with `models/yolo11n.onnx` on the
+deployment GPU. The scheduled **Receiver GPU smoke and performance** workflow
+requires a trusted Linux x64 runner labeled `cuda`, an installed TensorRT 10
+SDK and CUDA Toolkit, and the repository variable `RECEIVER_GPU_CI=true`.
+Set `RECEIVER_GPU_MAX_P95_MS` to the runner's calibrated latency budget to
+make the workflow fail when the synchronous p95 exceeds it.
+
+The CUDA presets target the GPU installed on the build machine. For a portable
+or cross-machine build, override `RECEIVER_CUDA_ARCHITECTURES` with the target
+architectures or `all-major`. CPU Release builds can opt into link-time
+optimization with `-DRECEIVER_RELEASE_IPO=ON`.
+
 CUDA preprocessing reads unscaled RGB and BGRA crops directly. For engines
 that already accept FP16 input, the preprocessing kernel writes the normalized
 values with the engine's existing FP16 rounding in the same launch.
