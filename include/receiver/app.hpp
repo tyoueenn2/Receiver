@@ -4,6 +4,7 @@
 #include "network.hpp"
 #include "performance.hpp"
 #include "cursor_protocol.hpp"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <fstream>
@@ -12,15 +13,16 @@
 #include <vector>
 namespace receiver {
 struct Samples {
-    // Snapshots contain eight rings. Heap storage avoids large Debug stack frames.
+    // Heap storage avoids large Debug stack frames in full timing snapshots.
     std::vector<double> values = std::vector<double>(2048);
     uint64_t count = 0;
     void add(double v) {
         values[count++ % values.size()] = v;
     }
     double percentile(double p) const;
+    std::array<double, 3> percentiles() const;
 };
-struct Stats {
+struct AppStatus {
     ReassemblyStats network;
     InjectionMetrics injection;
     uint64_t inferred = 0, sent = 0, synthetic_snapshots = 0, release_snapshots = 0, hold_heartbeats = 0,
@@ -43,7 +45,12 @@ struct Stats {
     std::string model_message, model_error;
     BenchmarkReport benchmark;
     std::string frame_memory = "heap";
+    uint64_t detection_frames = 0;
+    int64_t first_detection_ns = 0, last_detection_ns = 0;
+};
+struct Stats : AppStatus {
     Samples reassembly, upload, inference, postprocess, submit, receiver_total, capture_age, control_handoff;
+    Samples capture_to_detection;
 };
 struct Preview {
     std::shared_ptr<const Frame> frame;
@@ -131,7 +138,9 @@ class App {
     uint64_t click(int button, uint32_t count = 1,
                    std::chrono::microseconds press_duration = std::chrono::milliseconds(10),
                    std::chrono::microseconds interval = std::chrono::milliseconds(10));
+    AppStatus status() const;
     Stats stats() const;
+    void reset_detection_metrics();
     Preview preview() const;
     void export_metrics(const std::string& path) const;
 };

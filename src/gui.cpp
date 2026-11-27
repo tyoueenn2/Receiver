@@ -455,11 +455,11 @@ int run_gui(const std::string& options) {
     auto open_model = [&](const std::string& path) {
         try {
             if (!settings.model.empty())
-                preferences.save(app.stats().running ? app.settings() : settings, profile, names);
+                preferences.save(app.status().running ? app.settings() : settings, profile, names);
             auto selected = preferences.select_model(settings, path);
             if (selected.color.mode != 1)
                 receiver::select_backend(selected);
-            if (app.stats().running)
+            if (app.status().running)
                 app.configure(session_settings(selected), true);
             settings = selected;
             model_draft = settings.model;
@@ -476,9 +476,9 @@ int run_gui(const std::string& options) {
     auto open_profile = [&](const std::string& path) {
         try {
             auto loaded = preferences.load_profile(path);
-            if (app.stats().running)
+            if (app.status().running)
                 app.arm(false);
-            if (app.stats().running)
+            if (app.status().running)
                 app.configure(session_settings(loaded));
             settings = loaded;
             profile = path;
@@ -516,6 +516,12 @@ int run_gui(const std::string& options) {
     bool pending_preview_close = false;
     std::array<float, 180> latency{};
     size_t graph = 0;
+    constexpr std::array timing_labels{"Build picture", "Wake movement worker", "Prepare image",
+                                       "Run model", "Filter results", "Send command",
+                                       "Capture to detection upper bound", "Receive to send"};
+    std::array<std::array<double, 3>, timing_labels.size()> timings{};
+    std::array<uint64_t, timing_labels.size()> timing_counts{};
+    int64_t next_timing_refresh = 0;
     auto smoke_started = receiver::now_ns();
     int smoke_exit = 0;
     ImVec2 last_display_size(compact ? 1060.f : 1280.f, compact ? 740.f : 900.f);
@@ -554,7 +560,7 @@ int run_gui(const std::string& options) {
                 error = e.what();
             }
         }
-        auto stats = app.stats();
+        auto stats = app.status();
         auto video = video_preview.snapshot();
         auto video_state = video.state();
         if (passive_smoke) {
@@ -2314,23 +2320,33 @@ int run_gui(const std::string& options) {
                                 static_cast<unsigned long long>(stats.network.pool_drops));
                     ImGui::Text("Oversized datagrams: %llu",
                                 static_cast<unsigned long long>(stats.network.oversized));
+                    const auto timing_now = receiver::now_ns();
+                    if (timing_now >= next_timing_refresh) {
+                        const auto samples = app.stats();
+                        const std::array series{&samples.reassembly, &samples.control_handoff, &samples.upload,
+                                                &samples.inference, &samples.postprocess, &samples.submit,
+                                                &samples.capture_to_detection, &samples.receiver_total};
+                        for (size_t i = 0; i < series.size(); ++i) {
+                            timings[i] = series[i]->percentiles();
+                            timing_counts[i] = series[i]->count;
+                        }
+                        latency[graph++ % latency.size()] = float(timings.back()[1]);
+                        next_timing_refresh = timing_now + 250'000'000;
+                    }
                     if (ImGui::BeginTable("Timings", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                         for (auto label : {"Stage", "p50 ms", "p95 ms", "p99 ms"})
                             ImGui::TableSetupColumn(label);
                         ImGui::TableHeadersRow();
-                        for (auto pair : {std::pair{"Build picture", &stats.reassembly},
-                                          {"Wake movement worker", &stats.control_handoff},
-                                          {"Prepare image", &stats.upload},
-                                          {"Run model", &stats.inference},
-                                          {"Filter results", &stats.postprocess},
-                                          {"Send command", &stats.submit},
-                                          {"Receive to send", &stats.receiver_total}}) {
+                        for (size_t row = 0; row < timings.size(); ++row) {
                             ImGui::TableNextRow();
                             ImGui::TableNextColumn();
-                            ImGui::TextUnformatted(pair.first);
-                            for (double percentile : {.5, .95, .99}) {
+                            ImGui::TextUnformatted(timing_labels[row]);
+                            for (double percentile : timings[row]) {
                                 ImGui::TableNextColumn();
-                                ImGui::Text("%.3f", pair.second->percentile(percentile));
+                                if (timing_counts[row])
+                                    ImGui::Text("%.3f", percentile);
+                                else
+                                    ImGui::TextUnformatted("-");
                             }
                         }
                         ImGui::EndTable();
@@ -2338,7 +2354,6 @@ int run_gui(const std::string& options) {
                     hint("p50 is the median; p95 and p99 show slower cases. Practice skips the model, so its "
                          "timings "
                          "do not measure real detection speed.");
-                    latency[graph++ % latency.size()] = float(stats.receiver_total.percentile(.95));
                     ImGui::PlotLines("p95 ms", latency.data(), int(latency.size()),
                                      int(graph % latency.size()), nullptr, 0, 50, ImVec2(0, 70));
                     if (ImGui::Button("Save performance report")) {
@@ -2416,7 +2431,7 @@ int run_gui(const std::string& options) {
             texture.clear();
         }
         if (!smoke && !demo && preferences_dirty && !stats.model_loading && !stats.benchmarking &&
-            !app.stats().model_loading && !app.stats().benchmarking && stats.error.empty() &&
+            !app.status().model_loading && !app.status().benchmarking && stats.error.empty() &&
             receiver::now_ns() - preferences_changed > 750'000'000) {
             try {
                 preferences.save(settings, profile, names);
@@ -2454,7 +2469,7 @@ int run_gui(const std::string& options) {
                     gui.save_frame("gui-smoke.bmp");
                     if (separate_preview.handle())
                         gui.save_frame("gui-smoke-preview.bmp", &separate_preview);
-                    auto result = app.stats();
+                    auto result = app.status();
                     if (passive_smoke ? !(saw_waiting && saw_live && saw_stale && drew_passive_frame &&
                                           !result.running && !result.inferred && !result.sent && !result.pi_ready)
                                       : (!result.inferred || !result.pi_ready || !result.synchronized))
@@ -2524,7 +2539,7 @@ int run_gui(const std::string& options) {
         }
     if (!smoke && !demo) {
         try {
-            if (app.stats().running)
+            if (app.status().running)
                 settings = app.settings();
             preferences.save(settings, profile, names);
         } catch (...) {

@@ -4,7 +4,7 @@
 #include <cstdio>
 namespace receiver::gui {
 bool draw_preview_image(const PreviewImage& image, const Preview& picture, const Settings& settings,
-                        const Stats& stats, const std::vector<std::string>& names, bool simulated,
+                        const AppStatus& stats, const std::vector<std::string>& names, bool simulated,
                         ImVec2 available, float maximum_scale) {
     if (!image.view || image.width <= 0 || image.height <= 0 || available.x < 1 || available.y < 21)
         return false;

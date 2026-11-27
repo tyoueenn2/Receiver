@@ -24,6 +24,49 @@ Use the headless runner when preview is disabled:
 
 The profile must contain the real sender and Pi addresses. Movement still requires the configured physical button. To measure inference alone, omit `--arm`; submission-related metrics will have zero samples. The sample sender can replay `--raw frame.rgb` and emulate loss/reordering; its Python scheduling/packetization is not a production screen-capture benchmark.
 
+## YOLO11s capture-to-detection matrix
+
+Build the TensorRT Receiver on the RTX 3060 Ti. Export the same YOLO11s weights
+to two fixed, batch-one ONNX models at 320×320 and 640×640 with
+`tools/export_model.py --fixed --weights <path> --size <size>`. Use two copies
+of the weights with different filenames to keep both exports and manifests.
+On the Receiver PC, generate the run plan with the paths to those exports:
+
+```powershell
+py tools/benchmark_detection.py plan --receiver-ip 192.168.1.10 --sender-ip 192.168.1.20 --model-320 runs/yolo11s-320.onnx --model-640 runs/yolo11s-640.onnx --output runs/detection --sender-fps 0 120 240 --local-dxgi
+```
+
+For each row of `commands.csv`, verify both NICs negotiated the specified
+1, 2.5, or 10 Gbps link before starting the commands on their respective PCs.
+For the local DXGI rows, run only the Receiver command. Play the same
+continuously updating clip in the crop on each run, and record desktop refresh,
+GPU/driver, CUDA/TensorRT versions, link speed, and both build revisions.
+Sender FPS zero uses source timing for DXGI/WGC and 60 FPS GDI polling.
+The plan includes both pixel formats and both TensorRT modes for each network
+capture method. Use a single `--sender-fps 0` for 72 network rows.
+
+Receiver stays disarmed. It starts timing after synchronized detections and
+five seconds of warmup, then records for 30 seconds by default. Detection FPS is
+the number of frame completions after the first measured result divided by the
+elapsed time from the first result to the last. The p50/p95/p99 rows use the last
+2,048 samples. Each sample spans capture timestamp through publication of the
+decoded detection frame, including transport, waiting, inference, and
+postprocessing. A frame with zero boxes still counts. For UDP, the result is a
+conservative upper bound derived from the two PCs' clock exchange. The latency
+sample count and coverage are reported alongside FPS. DXGI uses its desktop
+presentation time, WGC uses its system-relative frame time capped at
+acquisition, and GDI measures from the start of the bitmap copy.
+
+```powershell
+py tools/benchmark_detection.py summarize --output runs/detection
+```
+
+`summary.csv` includes the measured detection statistics, missing or incomplete
+rows, model hashes, and theoretical Ethernet serialization time and FPS limits.
+The network limits assume untagged IPv4 Ethernet and the default 1,400-byte UVF1
+datagrams. They include protocol and Ethernet overhead. Actual detection FPS
+and latency depend on desktop capture, host scheduling, packet loss, and GPU work.
+
 ## What the metrics mean
 
 - **Reassembly:** first received fragment to completed frame.
