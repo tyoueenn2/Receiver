@@ -88,6 +88,21 @@ fresh detection and cancels steering when the target leaves range, changes,
 becomes stale, or activation is released. Each Pi steering update expires
 within 20 ms so dropped packets can only delay cancellation briefly.
 
+### ABCurves additive mode
+
+Choose **ABCurves (additive)** under **Movement → Path style**. The planner uses
+the same rolling physical mouse history to generate a 320 ms path toward the
+current target. Receiver adds timed movement deltas along the path while your
+physical input continues to move the cursor. If the forecast starts by moving
+away, playback starts at the first targetward part of the path. Receiver
+refreshes the forecast from live input and capture, normally after about 32 ms.
+
+This mode uses the existing targeting, activation, dead zone, gain, and maximum
+step controls. It continues to assist when you move in a different direction.
+It stops when activation is released, the target is lost, or input or capture
+becomes stale. The headless equivalent is
+`"humanization": {"enabled": true, "path": 6}`.
+
 ## Practice and checks
 
 The demo uses steady stationary simulated physical input by default. Start the launcher with `--cycle-motion` to cycle right, left, slowly right, then stationary every four seconds. Enable direction-based help and **Arm practice assistance** to see the last calculated multiplier. These are simulated mouse readings, not your local desktop cursor. Your actual mouse is never moved by the simulator.

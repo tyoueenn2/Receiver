@@ -174,6 +174,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME receiver_abcurves_pipeline COMMAND "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/abcurves_integration_test.py" $<TARGET_FILE:receiver_headless>)
     set_tests_properties(receiver_abcurves_pipeline PROPERTIES TIMEOUT 30 RESOURCE_LOCK receiver_loopback LABELS integration)
+    add_test(NAME receiver_abcurves_additive_pipeline COMMAND "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/abcurves_integration_test.py" $<TARGET_FILE:receiver_headless> --additive)
+    set_tests_properties(receiver_abcurves_additive_pipeline PROPERTIES TIMEOUT 30 RESOURCE_LOCK receiver_loopback LABELS integration)
     add_test(NAME receiver_calibration_pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/calibration_integration_test.py" $<TARGET_FILE:receiver_calibration_runner>)
     set_tests_properties(receiver_calibration_pipeline PROPERTIES TIMEOUT 160 RESOURCE_LOCK receiver_loopback LABELS integration)
     add_test(NAME receiver_color_pipeline COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/color_integration_test.py" $<TARGET_FILE:receiver_scenario_runner>)

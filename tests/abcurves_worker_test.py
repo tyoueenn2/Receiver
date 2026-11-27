@@ -54,6 +54,16 @@ class AbcurvesWorkerTests(unittest.TestCase):
         planner.advance.return_value = {'xy': straight + [(16 - 2 * (i - 16), 0) for i in range(17, 161)]}
         self.assertEqual(movement.advance(request)['directions'][5], [1, 0])
 
+    def test_additive_trajectory_returns_320_ms_of_positions(self):
+        movement, planner, prepare = self.make_movement()
+        planner.advance.return_value = {'xy': [(i / 2, -i) for i in range(1, 321)]}
+        result = movement.advance(dict(target=(19, -3), history=[(-1, 2)] * 164, trajectory=True))
+        planner.advance.assert_called_once_with(320000)
+        prepare.assert_called_once_with([(-1, -2)] * 164, current_xy=(0, 0))
+        self.assertEqual(len(result['positions']), 320)
+        self.assertEqual(result['positions'][0], [.5, 1])
+        self.assertEqual(result['positions'][-1], [160, 320])
+
     def test_invalid_history_does_not_drive_planner(self):
         movement, planner, prepare = self.make_movement()
         for history in ([], [(0, 0)] * 163, [(40000, 1)] * 164, [(0, .2)] * 164):

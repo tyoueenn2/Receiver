@@ -6,6 +6,7 @@ from worker_protocol import read_json, run_worker, send_json
 
 HISTORY_LENGTH = 164
 HORIZON_MS = 160
+TRAJECTORY_MS = 320
 MAX_PLAN_AGE_MS = 16
 VELOCITY_DECAY = 0.5 ** (1 / 40)
 
@@ -36,9 +37,13 @@ class Movement:
         start = self.prepare_history([(dx, -dy) for dx, dy in raw], current_xy=(0, 0))
         self.planner.reset(initial_xy=start.observed_xy, history=start.history)
         self.planner.update_target((x, -y), timestamp_us=0)
-        positions = self.planner.advance(HORIZON_MS * 1000)['xy']
-        if len(positions) != HORIZON_MS:
+        trajectory = request.get('trajectory', False)
+        horizon = TRAJECTORY_MS if trajectory else HORIZON_MS
+        positions = self.planner.advance(horizon * 1000)['xy']
+        if len(positions) != horizon:
             raise RuntimeError('Unexpected ABCurves forecast length')
+        if trajectory:
+            return {'status': 'result', 'positions': [[float(x), -float(y)] for x, y in positions]}
         directions = [None] * (MAX_PLAN_AGE_MS + 1)
         future_x = future_y = 0.0
         next_x, next_y = map(float, positions[-1])

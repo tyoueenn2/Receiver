@@ -34,13 +34,19 @@ class Planner:
         assert timestamp_us == 0
 
     def advance(self, timestamp_us):
-        assert timestamp_us == 160000
+        assert timestamp_us in (160000, 320000)
         if Path("fail").exists():
             raise RuntimeError("fixture planner failure")
         if Path("stall").exists():
             Path("entered").touch()
             while Path("stall").exists():
                 time.sleep(.005)
+        if timestamp_us == 320000:
+            # A reversed hand first goes left, then turns toward the target late in the forecast.
+            turn = 80 if self.vx < 0 else 0
+            vertical = 0.7 if self.vy < 0 else -0.7
+            return {"xy": [(-min(i, turn) + max(i - turn, 0), vertical * max(i - turn, 0))
+                           for i in range(1, 321)]}
         return {"xy": [(i * 2 * self.vx, i * 2 * self.vy - max(0, i - 20))
                        for i in range(1, 161)]}
 
@@ -49,11 +55,54 @@ def load(*, prewarm):
     return Planner()
 '''
 
+def check_additive(pi, sender, root, log, real_python):
+    def moves():
+        return [c for c in pi.commands.copy() if c['dx'] or c['dy']]
+
+    wait_for(lambda: any(c['dx'] > 0 for c in moves()),
+             'An away-going hand did not receive a targetward correction')
+    assert not any(e['angle'] for e in pi.steering_events), 'Additive mode sent a steering advisory'
+    assert all(abs(c['dx']) <= 5 and abs(c['dy']) <= 5 for c in moves()), 'Exceeded the configured step limit'
+    if not real_python:
+        assert all(c['dx'] > 0 and c['dy'] > 0 for c in moves()), 'Played the away-going forecast prefix'
+        count = len(moves())
+        pi.motion_y = 2000
+        wait_for(lambda: any(c['dy'] < 0 for c in moves()[count:]),
+                 'Recent physical movement did not change the generated path')
+
+    pi.history_enabled = False
+    time.sleep(.08)
+    count = len(moves())
+    time.sleep(.08)
+    assert len(moves()) == count, 'Additive motion continued without physical history'
+    pi.history_enabled = True
+    wait_for(lambda: len(moves()) > count, 'Additive movement did not resume with history')
+
+    sender.paused = True
+    time.sleep(.15)
+    count = len(moves())
+    time.sleep(.08)
+    assert len(moves()) == count, 'Additive movement used stale capture'
+    sender.paused = False
+    wait_for(lambda: len(moves()) > count, 'Additive movement did not resume with capture')
+
+    if not real_python:
+        (root / 'stall').touch()
+        wait_for((root / 'entered').exists, 'No outstanding additive forecast')
+    pi.physical = 0
+    wait_for(lambda: 'Armed - hold activation button' in log.read_text(), 'Activation release was ignored')
+    count = len(moves())
+    if not real_python:
+        (root / 'stall').unlink()
+    time.sleep(.16)
+    assert len(moves()) == count, 'Additive movement continued after activation release'
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('executable', type=lambda s: Path(s).resolve())
     parser.add_argument('--real-python', help='Use an interpreter with ABCurves installed')
+    parser.add_argument('--additive', action='store_true', help='Exercise additive trajectory playback')
     args = parser.parse_args()
     source_tools = Path(__file__).resolve().parents[1] / 'tools'
     with tempfile.TemporaryDirectory(prefix='receiver-abcurves-') as directory:
@@ -70,10 +119,13 @@ def main():
             pi_port = free_port()
         profile = root / 'profile.json'
         profile.write_text(json.dumps(dict(frame_port=frame_port, pi_port=pi_port,
-            gain_x=2, gain_y=2, max_age_ms=100,
-            omni_python=args.real_python or sys.executable, humanization=dict(enabled=True, path=5))))
+            gain_x=2, gain_y=2, max_age_ms=100, max_step=5 if args.additive else 32,
+            omni_python=args.real_python or sys.executable,
+            humanization=dict(enabled=True, path=6 if args.additive else 5))))
         pi = MockPi(pi_port)
         pi.history_enabled = True
+        if args.additive:
+            pi.motion_x = -2000
         pi.start()
         sender = Sender(port=frame_port, fps=90).start()
         log = root / 'receiver.log'
@@ -87,6 +139,9 @@ def main():
         try:
             wait_for(lambda: 'ABCurves ready' in log.read_text(), 'Hand history did not become ready',
                      timeout=120 if args.real_python else 8)
+            if args.additive:
+                check_additive(pi, sender, root, log, args.real_python)
+                return
             time.sleep(.12)
             assert not advice(), 'ABCurves engaged with a stationary mouse'
             pi.motion_x = 2000

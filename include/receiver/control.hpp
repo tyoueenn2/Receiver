@@ -16,6 +16,7 @@ struct ColorSettings {
 };
 struct HumanizationSettings {
     static constexpr int abcurves_path = 5;
+    static constexpr int abcurves_trajectory_path = 6;
     bool enabled = false;
     int path = 0;
     float curve = .2f, duration_ms = 150, exponent = 2, adaptive_distance = 100;
@@ -24,7 +25,10 @@ struct HumanizationSettings {
     float ema_alpha = .5f;
     float abcurves_range_px = 50, abcurves_inner_px = 15, abcurves_angle_deg = 30;
     bool uses_abcurves() const {
-        return enabled && path == abcurves_path;
+        return enabled && (path == abcurves_path || path == abcurves_trajectory_path);
+    }
+    bool uses_abcurves_trajectory() const {
+        return enabled && path == abcurves_trajectory_path;
     }
 };
 struct TrackingSettings {

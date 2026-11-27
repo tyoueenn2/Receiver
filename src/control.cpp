@@ -399,7 +399,8 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     if (h.uses_abcurves()) {
         Correction correction{0, 0, *best, x, y, strength};
         const double aim_dx = x - rx, aim_dy = y - ry;
-        if (h.abcurves_inner_px > 0 && std::hypot(aim_dx, aim_dy) <= h.abcurves_inner_px) {
+        if (!h.uses_abcurves_trajectory() && h.abcurves_inner_px > 0 &&
+            std::hypot(aim_dx, aim_dy) <= h.abcurves_inner_px) {
             correction.curve_target = CurveTarget{aim_dx * s.gain_x, aim_dy * s.gain_y, !same, true};
             correction.strength = 1;
         } else if (vx != 0 || vy != 0) {
