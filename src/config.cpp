@@ -51,8 +51,9 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(
     preview, persistence_iou, aim_x, aim_y, offset_x, offset_y, gain_x, gain_y, smoothing_ms, deadzone,
     max_step, activation_button, max_age_ms, humanization, direction, tracking, mouse_backend, makcu_port,
     secondary_button, inference_backend, omni_python, omni_source, omni_device, omni_worker,
-    selected_class_names, inference_fps, auto_size, constant_tracking, cursor_check, trigger, visual, ui,
-    collection, frame_source, capture_output, class_preference, color, calibration, return_action)
+    selected_class_names, inference_fps, tensorrt_pipeline, auto_size, constant_tracking, cursor_check,
+    trigger, visual, ui, collection, frame_source, capture_output, class_preference, color, calibration,
+    return_action)
 void validate(const Settings& s) {
     validate_calibration(s.calibration);
     const auto& ra = s.return_action;

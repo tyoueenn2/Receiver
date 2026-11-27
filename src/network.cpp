@@ -113,10 +113,12 @@ int UdpSocket::receive(std::span<uint8_t> b, Address& from, int timeout) {
     }
     return would_block ? 0 : n;
 }
-int UdpSocket::receive_now(std::span<uint8_t> b, Address& from, bool& would_block) {
+int UdpSocket::receive_now(std::span<uint8_t> b, Address& from, bool& would_block, bool* oversized) {
     const auto fd = Native(socket_);
     sockaddr_in sa{};
     would_block = false;
+    if (oversized)
+        *oversized = false;
 #ifdef _WIN32
     int len = sizeof(sa);
     const int n = recvfrom(fd, reinterpret_cast<char*>(b.data()), int(b.size()), 0,
@@ -124,6 +126,8 @@ int UdpSocket::receive_now(std::span<uint8_t> b, Address& from, bool& would_bloc
     if (n < 0) {
         const int error = WSAGetLastError();
         would_block = error == WSAEWOULDBLOCK;
+        if (oversized)
+            *oversized = error == WSAEMSGSIZE;
         return error == WSAEMSGSIZE ? 0 : n;
     }
 #else
@@ -131,8 +135,11 @@ int UdpSocket::receive_now(std::span<uint8_t> b, Address& from, bool& would_bloc
     const int n = int(recvfrom(fd, b.data(), b.size(), MSG_TRUNC, reinterpret_cast<sockaddr*>(&sa), &len));
     if (n < 0)
         would_block = errno == EAGAIN || errno == EWOULDBLOCK;
-    if (n > int(b.size()))
+    if (n > int(b.size())) {
+        if (oversized)
+            *oversized = true;
         return 0;
+    }
 #endif
     if (n >= 0)
         from = {sa.sin_addr.s_addr, ntohs(sa.sin_port)};

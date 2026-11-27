@@ -90,7 +90,7 @@ std::shared_ptr<Frame> acquire_frame(std::array<std::shared_ptr<Frame>, Count>& 
 }
 struct ReassemblyStats {
     uint64_t packets = 0, invalid = 0, duplicates = 0, expired = 0, evicted = 0, completed = 0, old = 0,
-             pool_drops = 0;
+             pool_drops = 0, oversized = 0;
 };
 class Reassembler {
     struct Slot {
@@ -110,6 +110,7 @@ class Reassembler {
     explicit Reassembler(const std::atomic<std::shared_ptr<FrameMemoryResource>>* memory = nullptr);
     void reset(uint64_t session);
     void expire(int64_t now);
+    int64_t next_expiry(int64_t fallback) const;
     std::shared_ptr<const Frame> accept(Bytes data, int64_t now);
 };
 // Sender clock minus receiver clock is bounded by [lower,upper].

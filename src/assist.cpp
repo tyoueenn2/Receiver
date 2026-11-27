@@ -6,6 +6,50 @@
 #include <fstream>
 #include <iomanip>
 namespace receiver {
+SampleCollector::SampleCollector(std::function<void(const std::string&)> completed)
+    : completed_(std::move(completed)), writer_([this] { run(); }) {}
+SampleCollector::~SampleCollector() {
+    {
+        std::lock_guard lock(mutex_);
+        stopping_ = true;
+    }
+    wake_.notify_one();
+    writer_.join();
+}
+bool SampleCollector::enqueue(const Frame& frame, const std::vector<Detection>& labels,
+                              const CollectionSettings& settings, std::string name) {
+    std::lock_guard lock(mutex_);
+    if (busy_ || stopping_)
+        return false;
+    auto& sample = sample_ ? *sample_ : sample_.emplace();
+    sample.frame.header = frame.header;
+    std::copy_n(frame.pixels.data(), frame.header.bytes, sample.frame.pixels.data());
+    sample.labels = settings.auto_label ? labels : std::vector<Detection>{};
+    sample.settings = settings;
+    sample.name = std::move(name);
+    busy_ = true;
+    wake_.notify_one();
+    return true;
+}
+void SampleCollector::run() {
+    for (;;) {
+        {
+            std::unique_lock lock(mutex_);
+            wake_.wait(lock, [&] { return stopping_ || busy_; });
+            if (!busy_)
+                return;
+        }
+        std::string error;
+        try {
+            collect_sample(sample_->frame, sample_->labels, sample_->settings, sample_->name);
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+        completed_(error);
+        std::lock_guard lock(mutex_);
+        busy_ = false;
+    }
+}
 bool activation_held(uint8_t physical, const Settings& s) {
     return s.constant_tracking || (physical & (1u << (s.activation_button - 1))) ||
            (s.secondary_button && (physical & (1u << (s.secondary_button - 1))));

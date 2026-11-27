@@ -8,7 +8,6 @@
 #include "receiver/model.hpp"
 #include <algorithm>
 #include <cmath>
-#include <future>
 #include <iostream>
 #ifdef _WIN32
 #include <windows.h>
@@ -44,6 +43,8 @@ void App::fail(const std::string& error, ReleaseReason reason) {
     ++epoch_;
     result_.reset();
     stop_ = true;
+    receive_wake_.notify();
+    inference_wake_.notify();
     injected_.release_all(reason, true);
     cv_.notify_all();
     control_wake_.notify();
@@ -139,6 +140,8 @@ void App::stop() {
         ++epoch_;
         result_.reset();
     }
+    receive_wake_.notify();
+    inference_wake_.notify();
     cv_.notify_all();
     control_wake_.notify();
     if (calibration_thread_.joinable())
@@ -238,6 +241,8 @@ void App::configure(const Settings& s, bool reload_model) {
         }
     }
     control_wake_.notify();
+    receive_wake_.notify();
+    inference_wake_.notify();
     cv_.notify_all();
     if (restart)
         throw std::runtime_error("Stop and restart to change frame source, capture display, or connections");
@@ -261,6 +266,7 @@ void App::benchmark(PerformanceGoal goal) {
     stats_.benchmarking = true;
     stats_.model_error.clear();
     stats_.benchmark = {};
+    inference_wake_.notify();
     cv_.notify_all();
     control_wake_.notify();
 }
@@ -434,6 +440,8 @@ void App::receive_loop() {
                             latest_ = std::move(frame);
                             stats_.video_complete_ns = latest_->complete_ns;
                         }
+                        if (pipelining_)
+                            inference_wake_.notify();
                         cv_.notify_one();
                     }
                 }
@@ -443,17 +451,18 @@ void App::receive_loop() {
 
     while (!stop_) {
         Address from;
-        bool would_block;
-        int n = socket.receive_now(data, from, would_block);
-        if (would_block && socket.wait_readable(2) > 0 && !stop_)
-            n = socket.receive_now(data, from, would_block);
+        bool would_block, oversized;
+        int n = socket.receive_now(data, from, would_block, &oversized);
         auto now = now_ns();
         const auto deadline = now + batch_ns;
         for (size_t count = 0; n >= 0 && !stop_; ++count) {
-            process_packet(n, from, now);
+            if (oversized)
+                ++reassembly.stats.oversized;
+            else
+                process_packet(n, from, now);
             if (count + 1 == max_batch || now_ns() >= deadline)
                 break;
-            n = socket.receive_now(data, from, would_block);
+            n = socket.receive_now(data, from, would_block, &oversized);
             now = now_ns();
         }
         now = now_ns();
@@ -509,6 +518,16 @@ void App::receive_loop() {
                 requested_size = size;
                 last_resolution = now;
             }
+        }
+        if (would_block && !stop_) {
+            // Packet readiness wakes immediately. The timer maintains receive
+            // housekeeping when the sender pauses, without a 2 ms idle poll.
+            int64_t wake_at = reassembly.next_expiry(now + 10'000'000);
+            if (seen && !sender_lost)
+                wake_at = std::min(wake_at, seen + 100'000'001);
+            if (session && !sender_lost && last_cursor_request + 20'000'000 > now)
+                wake_at = std::min(wake_at, last_cursor_request + 20'000'000);
+            receive_wake_.wait(&socket, false, wake_at);
         }
     }
     std::lock_guard lock(mutex_);
@@ -580,10 +599,47 @@ void App::inference_loop() {
     if (initial.frame_source == "local")
         capture = std::make_unique<LocalCapture>(initial.capture_output);
     const auto collection_session = std::to_string(random_id());
-    // The async task joins before its reusable buffer is destroyed. A slow writer
-    // can occupy this one slot without holding any of the live capture buffers.
-    std::optional<Frame> collection_frame;
-    std::future<void> collection_write;
+    std::unique_ptr<SampleCollector> collector;
+    struct FrameWork {
+        std::shared_ptr<const Frame> frame;
+        Settings settings;
+        uint64_t epoch;
+        int64_t deadline = 0;
+    };
+    std::array<std::optional<FrameWork>, 2> queued;
+    size_t queued_count = 0;
+    auto bind_pipeline = [this](Backend* candidate) {
+        auto* pipeline = candidate ? candidate->pipeline() : nullptr;
+        if (pipeline)
+            pipeline->set_wake([this] { inference_wake_.notify(); });
+        return pipeline;
+    };
+    auto* pipeline = bind_pipeline(backend.get());
+    pipelining_ = pipeline != nullptr;
+    receive_wake_.notify();
+    struct ResetPipelining {
+        std::atomic<bool>& enabled;
+        ~ResetPipelining() {
+            enabled = false;
+        }
+    } reset_pipelining{pipelining_};
+    // Called with the App mutex held.
+    auto select_latest = [&](int64_t at) -> std::optional<FrameWork> {
+        FrameWork work{std::move(latest_), settings_, epoch_};
+        next_inference = work.settings.inference_fps ? at + 1'000'000'000ll / work.settings.inference_fps : 0;
+        auto age = capture ? std::optional<int64_t>(std::max<int64_t>(0, at - work.frame->header.capture_ns))
+                           : clock_.age_upper(work.frame->header.capture_ns, at);
+        const int64_t horizon = int64_t(work.settings.max_age_ms) * 1'000'000;
+        if (age) {
+            stats_.frame_age_ms = double(*age) / 1e6;
+            work.deadline = at + horizon - *age - horizon / 5000;
+        }
+        if ((work.deadline && at > work.deadline) || at - work.frame->first_ns > horizon) {
+            ++stats_.stale;
+            return {};
+        }
+        return work;
+    };
     while (!stop_) {
         std::optional<Settings> requested;
         std::optional<PerformanceGoal> goal;
@@ -595,6 +651,11 @@ void App::inference_loop() {
             if (goal)
                 sample = latest_ ? latest_ : preview_.frame;
         }
+        if ((requested || goal) && pipeline) {
+            pipeline->discard();
+            queued = {};
+            queued_count = 0;
+        }
         if (requested) {
             try {
                 auto config = *requested;
@@ -602,8 +663,11 @@ void App::inference_loop() {
                 if (stop_)
                     break;
                 auto memory = replacement ? replacement->frame_memory_resource(session_memory) : nullptr;
+                auto* next_pipeline = bind_pipeline(replacement.get());
                 auto old = std::move(backend);
                 backend = std::move(replacement);
+                pipeline = next_pipeline;
+                pipelining_ = pipeline != nullptr;
                 {
                     std::lock_guard lock(mutex_);
                     publish(config, std::move(memory));
@@ -629,6 +693,7 @@ void App::inference_loop() {
                 result_.reset();
             }
             next_inference = 0;
+            receive_wake_.notify();
             control_wake_.notify();
             continue;
         }
@@ -699,11 +764,50 @@ void App::inference_loop() {
             cv_.wait_for(lock, std::chrono::milliseconds(5));
             continue;
         }
-        std::shared_ptr<const Frame> frame;
-        Settings cfg;
-        uint64_t epoch;
-        int64_t deadline = 0;
-        {
+        std::optional<FrameWork> work;
+        std::optional<Inference> completed_inference;
+        if (pipeline) {
+            const bool complete = queued_count && pipeline->ready();
+            const bool has_capacity = queued_count < queued.size();
+            int64_t wake_at = 0;
+            {
+                std::lock_guard lock(mutex_);
+                if (stop_ || pending_model_ || pending_benchmark_)
+                    continue;
+                const auto at = now_ns();
+                if (has_capacity && latest_) {
+                    if (at >= next_inference)
+                        work = select_latest(at);
+                    else
+                        wake_at = next_inference;
+                }
+            }
+            if (work) {
+                pipeline->submit(work->frame);
+                queued[queued_count++] = std::move(work);
+                if (!complete)
+                    continue;
+            } else if (!complete) {
+                inference_wake_.wait(nullptr, false, wake_at);
+                continue;
+            }
+            // Submit a fresh frame before decoding the previous result, while
+            // retaining only one frame beyond the work already running.
+            completed_inference = pipeline->take();
+            work = std::move(queued[0]);
+            queued[0] = std::move(queued[1]);
+            queued[1].reset();
+            --queued_count;
+            {
+                std::lock_guard lock(mutex_);
+                const auto at = now_ns();
+                if (work->epoch != epoch_ || (work->deadline && at > work->deadline) ||
+                    at - work->frame->first_ns > int64_t(work->settings.max_age_ms) * 1'000'000) {
+                    ++stats_.stale;
+                    continue;
+                }
+            }
+        } else {
             std::unique_lock lock(mutex_);
             cv_.wait_for(lock, std::chrono::milliseconds(10),
                          [&] { return stop_ || pending_model_ || pending_benchmark_ || bool(latest_); });
@@ -711,28 +815,17 @@ void App::inference_loop() {
                 break;
             if (pending_model_ || pending_benchmark_ || !latest_)
                 continue;
-            auto at = now_ns();
+            const auto at = now_ns();
             if (at < next_inference) {
                 cv_.wait_for(lock, std::chrono::nanoseconds(next_inference - at),
                              [&] { return stop_ || pending_model_ || pending_benchmark_; });
                 continue;
             }
-            frame = std::move(latest_);
-            cfg = settings_;
-            epoch = epoch_;
-            next_inference = cfg.inference_fps ? at + 1'000'000'000ll / cfg.inference_fps : 0;
-            auto age = capture ? std::optional<int64_t>(std::max<int64_t>(0, at - frame->header.capture_ns))
-                               : clock_.age_upper(frame->header.capture_ns, at);
-            if (age) {
-                stats_.frame_age_ms = double(*age) / 1e6;
-                const int64_t horizon = int64_t(cfg.max_age_ms) * 1'000'000;
-                deadline = at + horizon - *age - horizon / 5000;
-            }
-            if ((deadline && at > deadline) || at - frame->first_ns > int64_t(cfg.max_age_ms) * 1'000'000) {
-                ++stats_.stale;
+            work = select_latest(at);
+            if (!work)
                 continue;
-            }
         }
+        const auto& [frame, cfg, epoch, deadline] = *work;
         std::vector<Detection> detections;
         double upload = 0, infer = 0;
         auto post_start = now_ns();
@@ -742,7 +835,7 @@ void App::inference_loop() {
             detections.push_back({frame->header.width * .60f, frame->header.height * .4f,
                                   frame->header.width * .2f, frame->header.height * .2f, .95f, 0});
         } else {
-            auto result = backend->run(*frame);
+            auto result = completed_inference ? *completed_inference : backend->run(*frame);
             upload = result.upload_ms;
             infer = result.inference_ms;
             post_start = now_ns();
@@ -752,9 +845,7 @@ void App::inference_loop() {
         auto colors = cfg.color.mode ? color_matcher.build(*frame, cfg.color) : nullptr;
         auto done = now_ns();
         const bool collect = cfg.collection.enabled &&
-                             done - last_collection >= int64_t(cfg.collection.interval_ms) * 1'000'000 &&
-                             (!collection_write.valid() ||
-                              collection_write.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+                             done - last_collection >= int64_t(cfg.collection.interval_ms) * 1'000'000;
         auto labels = collect && cfg.collection.auto_label ? detections : std::vector<Detection>{};
         {
             std::lock_guard lock(mutex_);
@@ -772,28 +863,20 @@ void App::inference_loop() {
             }
         }
         if (collect) {
-            last_collection = done;
             try {
-                auto& sample = collection_frame ? *collection_frame : collection_frame.emplace();
-                sample.header = frame->header;
-                std::copy_n(frame->pixels.data(), frame->header.bytes, sample.pixels.data());
-                collection_write = std::async(
-                    std::launch::async,
-                    [this, sample = &sample, &collection_session, labels = std::move(labels),
-                     settings = std::move(cfg.collection)] {
-                        try {
-                            collect_sample(*sample, labels, settings,
-                                           collection_session + "-" + std::to_string(sample->header.session) +
-                                               "-" + std::to_string(sample->header.sequence));
-                            std::lock_guard lock(mutex_);
+                if (!collector)
+                    collector = std::make_unique<SampleCollector>([this](const std::string& error) {
+                        std::lock_guard lock(mutex_);
+                        if (error.empty())
                             ++stats_.collected_frames;
-                            stats_.collection_error.clear();
-                        } catch (const std::exception& e) {
-                            std::lock_guard lock(mutex_);
-                            stats_.collection_error = e.what();
-                        }
+                        stats_.collection_error = error;
                     });
+                const auto name = collection_session + "-" + std::to_string(frame->header.session) + "-" +
+                                  std::to_string(frame->header.sequence);
+                if (collector->enqueue(*frame, labels, cfg.collection, name))
+                    last_collection = done;
             } catch (const std::exception& e) {
+                last_collection = done;
                 std::lock_guard lock(mutex_);
                 stats_.collection_error = e.what();
             }
@@ -1799,10 +1882,11 @@ void App::export_metrics(const std::string& path) const {
                       {"capture_age_upper_at_submission", &s.capture_age}})
         f << pair.first << ',' << pair.second->count << ',' << pair.second->percentile(.5) << ','
           << pair.second->percentile(.95) << ',' << pair.second->percentile(.99) << '\n';
-    f << "# backend," << s.backend << "\n# frame_memory," << s.frame_memory << "\n# frames," << s.inferred << "\n# sent," << s.sent
-      << "\n# synthetic_snapshots," << s.synthetic_snapshots << "\n# release_snapshots,"
-      << s.release_snapshots << "\n# hold_heartbeats," << s.hold_heartbeats << "\n# persistent_injected_mask,"
-      << unsigned(s.injection.persistent_mask) << "\n# pending_click_commands," << s.injection.pending_clicks
+    f << "# backend," << s.backend << "\n# frame_memory," << s.frame_memory << "\n# frames," << s.inferred
+      << "\n# sent," << s.sent << "\n# synthetic_snapshots," << s.synthetic_snapshots
+      << "\n# release_snapshots," << s.release_snapshots << "\n# hold_heartbeats," << s.hold_heartbeats
+      << "\n# persistent_injected_mask," << unsigned(s.injection.persistent_mask)
+      << "\n# pending_click_commands," << s.injection.pending_clicks
       << "\n# click_commands_submitted_locally," << s.injection.click_submitted
       << "\n# click_commands_accepted_by_pi," << s.injection.click_accepted
       << "\n# click_commands_completed_by_usb_writer," << s.injection.click_completed
@@ -1827,9 +1911,10 @@ void App::export_metrics(const std::string& path) const {
       << s.injection.pi_superseded_synthetic << "\n# pi_usb_writer_failures,"
       << s.injection.pi_writer_failures << "\n# superseded," << s.replaced << "\n# stale," << s.stale
       << "\n# incomplete_expired," << s.network.expired << "\n# incomplete_evicted," << s.network.evicted
-      << "\n# invalid_packets," << s.network.invalid << "\n# duplicate_packets," << s.network.duplicates
-      << "\n# pool_drops," << s.network.pool_drops << "\n# host_frame_pool_mib,28\n# gpu_free_at_start_mib,"
-      << s.gpu_free_mib << "\n# gpu_total_mib," << s.gpu_total_mib << '\n';
+      << "\n# invalid_packets," << s.network.invalid << "\n# oversized_datagrams," << s.network.oversized
+      << "\n# duplicate_packets," << s.network.duplicates << "\n# pool_drops," << s.network.pool_drops
+      << "\n# host_frame_pool_mib,28\n# gpu_free_at_start_mib," << s.gpu_free_mib << "\n# gpu_total_mib,"
+      << s.gpu_total_mib << '\n';
     for (const auto& command : s.injection.commands)
         f << "# command," << command.id << ','
           << (command.operation == ClickOperation::release_all ? "ReleaseAll" : "Schedule") << ','

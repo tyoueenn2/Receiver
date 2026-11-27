@@ -1,0 +1,24 @@
+name: Receiver GPU smoke and performance
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 3 * * 1'
+permissions:
+  contents: read
+jobs:
+  tensorrt:
+    if: github.ref == 'refs/heads/main' && vars.RECEIVER_GPU_CI == 'true'
+    runs-on: [self-hosted, linux, x64, cuda]
+    timeout-minutes: 25
+    env:
+      RECEIVER_GPU_MAX_P95_MS: ${{ vars.RECEIVER_GPU_MAX_P95_MS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure for the runner's GPU
+        run: cmake --preset linux-cuda
+      - name: Build TensorRT and CUDA code
+        run: cmake --build --preset linux-cuda --target receiver_gpu_pipeline_check --parallel 2
+      - name: Check inference parity and latency at 640x640
+        run: build/linux-cuda/receiver_gpu_pipeline_check models/yolo11n.onnx

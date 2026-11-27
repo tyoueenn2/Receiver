@@ -119,6 +119,7 @@ struct Settings {
     std::vector<int> classes;
     std::vector<std::string> selected_class_names;
     int inference_fps = 0; // 0: process every available fresh frame.
+    bool tensorrt_pipeline = false; // Overlap GPU and CPU stages for the UDP frame source.
     bool auto_size = true;
     bool highest_confidence = false, persistence = false, preview = false;
     float persistence_iou = .2f, aim_x = .5f, aim_y = .5f, offset_x = 0, offset_y = 0;

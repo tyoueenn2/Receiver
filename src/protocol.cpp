@@ -76,12 +76,21 @@ void Reassembler::reset(uint64_t session) {
     session_ = session;
     have_completed_ = false;
 }
+namespace {
+constexpr int64_t frame_timeout_ns = 20'000'000;
+}
 void Reassembler::expire(int64_t now) {
     for (auto& s : slots_)
-        if (s.frame && now - s.frame->first_ns > 20'000'000) {
+        if (s.frame && now - s.frame->first_ns > frame_timeout_ns) {
             s = {};
             ++stats.expired;
         }
+}
+int64_t Reassembler::next_expiry(int64_t fallback) const {
+    for (const auto& slot : slots_)
+        if (slot.frame)
+            fallback = std::min(fallback, slot.frame->first_ns + frame_timeout_ns + 1);
+    return fallback;
 }
 std::shared_ptr<const Frame> Reassembler::accept(Bytes p, int64_t now) {
     ++stats.packets;

@@ -1247,6 +1247,10 @@ int run_gui(const std::string& options) {
                                                                 : "auto";
                     changed = true;
                 }
+                if (settings.frame_source == "udp" && settings.inference_backend != "yolo_omni") {
+                    changed |= ImGui::Checkbox("Overlap TensorRT frames", &settings.tensorrt_pipeline);
+                    hint("Allows two UDP frames in flight. Compare throughput and capture age on your GPU.");
+                }
                 hint("Python paths and the PyTorch device are configured in user-settings/setup.json. "
                      "Reload it from Connections after editing.");
                 input_string("Model metadata file", settings.metadata);
@@ -2308,6 +2312,8 @@ int run_gui(const std::string& options) {
                                 static_cast<unsigned long long>(stats.network.invalid),
                                 static_cast<unsigned long long>(stats.network.duplicates),
                                 static_cast<unsigned long long>(stats.network.pool_drops));
+                    ImGui::Text("Oversized datagrams: %llu",
+                                static_cast<unsigned long long>(stats.network.oversized));
                     if (ImGui::BeginTable("Timings", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                         for (auto label : {"Stage", "p50 ms", "p95 ms", "p99 ms"})
                             ImGui::TableSetupColumn(label);
