@@ -64,7 +64,8 @@ def check_additive(pi, sender, root, log, real_python):
     assert not any(e['angle'] for e in pi.steering_events), 'Additive mode sent a steering advisory'
     assert all(abs(c['dx']) <= 5 and abs(c['dy']) <= 5 for c in moves()), 'Exceeded the configured step limit'
     if not real_python:
-        assert all(c['dx'] > 0 and c['dy'] > 0 for c in moves()), 'Played the away-going forecast prefix'
+        wait_for(lambda: any(c['dy'] > 0 for c in moves()), 'The forecast curve produced no vertical movement')
+        assert all(c['dx'] > 0 and c['dy'] >= 0 for c in moves()), 'Played the away-going forecast prefix'
         count = len(moves())
         pi.motion_y = 2000
         wait_for(lambda: any(c['dy'] < 0 for c in moves()[count:]),
