@@ -388,7 +388,7 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
         vx = smooth_x_;
         vy = smooth_y_;
     }
-    double strength = direction_multiplier(ex, ey, motion, s.direction);
+    double strength = h.uses_abcurves_trajectory() ? 1 : direction_multiplier(ex, ey, motion, s.direction);
     vx *= strength;
     vy *= strength;
     if (strength == 0) {
@@ -398,8 +398,14 @@ Correction Controller::update(const std::vector<Detection>& ds, int width, int h
     last_ = now;
     if (h.uses_abcurves()) {
         Correction correction{0, 0, *best, x, y, strength};
-        if (vx != 0 || vy != 0)
+        const double aim_dx = x - rx, aim_dy = y - ry;
+        if (!h.uses_abcurves_trajectory() && h.abcurves_inner_px > 0 &&
+            std::hypot(aim_dx, aim_dy) <= h.abcurves_inner_px) {
+            correction.curve_target = CurveTarget{aim_dx * s.gain_x, aim_dy * s.gain_y, !same, true};
+            correction.strength = 1;
+        } else if (vx != 0 || vy != 0) {
             correction.curve_target = CurveTarget{vx, vy, !same};
+        }
         return correction;
     }
     const int minx = std::max(-s.max_step, limits.xmin), maxx = std::min(s.max_step, limits.xmax),

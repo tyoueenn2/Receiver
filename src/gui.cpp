@@ -1788,7 +1788,7 @@ int run_gui(const std::string& options) {
             ImGui::BeginDisabled(!h.enabled);
             changed |= combo("Path style", &h.path,
                              "Straight\0Curved (Bezier)\0Gradual acceleration\0Slower near the "
-                             "target\0Smooth random variation\0ABCurves\0");
+                             "target\0Smooth random variation\0ABCurves\0ABCurves (additive)\0");
             if (h.path == 1)
                 changed |= percent_slider("Curve strength", h.curve);
             if (h.path == 1 || h.path == 2)
@@ -1802,10 +1802,24 @@ int run_gui(const std::string& options) {
                 changed |= slider_float("Smooth variation interval", &h.noise_period_ms, 10, 1000, "%.0f ms");
             }
             if (h.path == receiver::HumanizationSettings::abcurves_path) {
-                changed |= slider_float("ABCurves target range", &h.abcurves_range_px, 1, 512, "%.0f px");
-                changed |= slider_float("ABCurves steering angle", &h.abcurves_angle_deg, .5f, 30, "%.1f deg");
-                hint("Steering stops when your hand leaves this angle from the target. The angle also caps the turn per report.");
-                hint("Install ABCurves 2 and use a Pi proxy with live mouse steering support.");
+                if (slider_float("ABCurves outer radius", &h.abcurves_range_px, 1, 512, "%.0f px")) {
+                    h.abcurves_inner_px = std::min(h.abcurves_inner_px, h.abcurves_range_px - 1);
+                    changed = true;
+                }
+                ImGui::BeginDisabled(h.abcurves_range_px <= 1);
+                changed |= slider_float("ABCurves inner radius", &h.abcurves_inner_px, 0,
+                                        h.abcurves_range_px - 1, "%.0f px");
+                ImGui::EndDisabled();
+                changed |= slider_float("ABCurves steering angle", &h.abcurves_angle_deg, .5f, 90, "%.1f deg");
+                hint("The angle applies between the two radii. Inside the inner radius, any "
+                     "movement is redirected toward the target. Set it to 0 px to disable.");
+                hint("Install ABCurves 2 and use a Pi proxy with two-radius steering support.");
+                if (!stats.movement_status.empty())
+                    ImGui::TextWrapped("%s", stats.movement_status.c_str());
+            } else if (h.path == receiver::HumanizationSettings::abcurves_trajectory_path) {
+                hint("Uses recent physical input to predict a 320 ms path and adds corrections "
+                     "while activation is held, including when the mouse is still.");
+                hint("Install ABCurves 2 and use a Pi proxy with live physical report history.");
                 if (!stats.movement_status.empty())
                     ImGui::TextWrapped("%s", stats.movement_status.c_str());
             } else if (ImGui::CollapsingHeader("Random jitter")) {
@@ -1816,13 +1830,16 @@ int run_gui(const std::string& options) {
             ImGui::EndDisabled();
             section("Directional assistance",
                     "Change correction strength based on your physical mouse movement.");
-            ImGui::BeginDisabled(settings.mouse_backend == 2);
+            const bool additive = h.uses_abcurves_trajectory();
+            ImGui::BeginDisabled(settings.mouse_backend == 2 || additive);
             changed |= ImGui::Checkbox("Adapt to my mouse direction", &d.enabled);
             ImGui::EndDisabled();
-            if (settings.mouse_backend == 2)
+            if (additive)
+                hint("ABCurves (additive) uses physical input in its own forecast.");
+            else if (settings.mouse_backend == 2)
                 hint("MAKCU reports buttons but no physical motion totals. Directional assistance is "
                      "unavailable; sensitivity, smoothing, prediction and dynamic search area still work.");
-            if (d.enabled) {
+            if (d.enabled && !additive) {
                 changed |= combo("Assistance behavior", &d.mode,
                                  "Stronger when moving away\0Stronger when moving toward\0Different strength "
                                  "for left and right\0");

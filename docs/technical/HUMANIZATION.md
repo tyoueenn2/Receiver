@@ -55,32 +55,57 @@ cd ABCurves
 python -m pip install -e .
 ```
 
-ABCurves uses Pi UDP output with live physical report history and steering support.
+ABCurves uses Pi UDP output with live physical report history and two-radius steering support.
 Use a USB mouse with a polling interval of 1 ms or faster. The proxy keeps a
 rolling history of 164 complete millisecond intervals in memory.
 
 In Receiver, open **Movement**, enable **Customize movement path**, and select
-**ABCurves**. Two controls appear directly under the style selector.
+**ABCurves**. Three controls appear directly under the style selector.
 
-- **ABCurves target range** limits steering to targets within 50 capture pixels of
-  the aim reference by default.
-- **ABCurves steering angle** defaults to 30 degrees. When your hand leaves that
-  angle from the target bearing, the Pi passes the same report through. A
-  slightly narrower angle is required to engage. The setting also caps the
-  change in direction per report, before HID integer rounding.
+- **ABCurves outer radius** defaults to 50 capture pixels from the aim reference.
+  Movement outside the outer radius passes through.
+- **ABCurves inner radius** defaults to 15 capture pixels. Inside it, the Pi uses
+  the magnitude of each physical report and redirects it along a targetward
+  forecast or directly toward the target. If the detection is centered, the Pi
+  holds XY at zero. Set this radius to 0 to disable full redirection.
+- **ABCurves steering angle** applies between the radii. It defaults to 30 degrees
+  and accepts up to 90 degrees. The Pi passes through reports outside the angle.
+  A slightly narrower angle is required to engage. The setting also caps the
+  change in direction per report in this ring.
 
 Wait for **ABCurves ready** before testing. The headless equivalent is
-`"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_angle_deg": 30}`.
+`"humanization": {"enabled": true, "path": 5, "abcurves_range_px": 50, "abcurves_inner_px": 15, "abcurves_angle_deg": 30}`.
 The existing activation conditions still apply.
 
-The Continuous Planner forecasts a tangent from your actual hand history.
-The Pi rotates each eligible physical XY report toward that tangent, preserving
+The Continuous Planner forecasts 160 ms of movement from your actual hand history.
+Predicted motion across the path guides each steering direction, with greater
+weight on the nearer part of the curve. The Pi rotates each eligible physical
+XY report toward that direction, preserving
 its magnitude before integer rounding, as well as its timing, wheel, and
 buttons. Zero input stays zero. A direction change outside the cone cancels
-steering on the Pi immediately. Receiver cancels steering when the target
-leaves range, changes, becomes stale, or activation is released. Each Pi
-steering update expires within 20 ms so dropped packets can only delay
-cancellation briefly.
+outer-ring steering on the Pi immediately. Receiver selects the zone from each
+fresh detection and cancels steering when the target leaves range, changes,
+becomes stale, or activation is released. Each Pi steering update expires
+within 20 ms so dropped packets can only delay cancellation briefly.
+
+### ABCurves additive mode
+
+Choose **ABCurves (additive)** under **Movement → Path style**. The planner uses
+the same rolling physical mouse history to generate a 320 ms path toward the
+current target. Receiver adds timed movement deltas along the path while your
+physical input continues to move the cursor. If the forecast starts by moving
+away, playback starts at the first targetward part of the path. Each fresh
+detection frame requests a forecast using the latest physical mouse history.
+When the planner is busy, Receiver keeps the newest pending frame.
+
+This mode uses the existing targeting, activation, dead zone, gain, and maximum
+step controls. It starts from a still mouse and continues to assist when you
+move in a different direction. For a still mouse, playback skips sub-count drift
+and uses a small targetward step if the forecast has no usable movement.
+Additive ABCurves uses physical input through its own forecast.
+It stops when activation is released, the target is lost, or input or capture
+becomes stale. The headless equivalent is
+`"humanization": {"enabled": true, "path": 6}`.
 
 ## Practice and checks
 

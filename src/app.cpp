@@ -828,20 +828,37 @@ void App::pi_loop() {
     };
     Controller controller;
     std::unique_ptr<AbcurvesWorker> curve_worker;
+    using CurveMode = mouse_history::SteeringMode;
     struct CurveFrame {
         uint64_t id;
         int64_t deadline;
+        int64_t first_ns;
         double x, y;
+        CurveMode mode;
     };
     struct CurvePlan {
         CurveFrame frame;
         uint64_t epoch, generation, end_ms;
         std::optional<AbcurvesWorker::Reply> reply;
     };
+    struct CurvePlayback {
+        CurveFrame frame;
+        std::vector<std::array<double, 2>> path;
+        uint64_t at_ms;
+        size_t position_ms;
+    };
     std::optional<CurveFrame> curve_next;
+    std::optional<CurveFrame> curve_inner;
     std::optional<CurvePlan> curve_plan;
+    std::optional<CurvePlayback> curve_playback;
+    double curve_residual_x = 0, curve_residual_y = 0;
     std::optional<mouse_history::Reply> curve_history;
     std::optional<mouse_history::Steering> steering_sent;
+    struct CurveTangent {
+        uint64_t through_ms;
+        std::array<int, 2> direction;
+    };
+    std::optional<CurveTangent> inner_tangent;
     uint64_t history_token = 0, last_curve_end = 0;
     int64_t history_issued = 0, history_received = 0, history_due = 0;
     constexpr int64_t history_period_ns = 5'000'000;
@@ -857,7 +874,11 @@ void App::pi_loop() {
             steering_sent.reset();
         }
         curve_next.reset();
+        curve_inner.reset();
         curve_plan.reset();
+        curve_playback.reset();
+        curve_residual_x = curve_residual_y = 0;
+        inner_tangent.reset();
     };
     auto reset_controller = [&] {
         controller.reset();
@@ -1005,8 +1026,11 @@ void App::pi_loop() {
                     const bool same_source = curve_history && history.epoch == curve_history->epoch &&
                                              history.generation == curve_history->generation;
                     if (!same_source || history.end_ms > curve_history->end_ms) {
-                        if (!same_source)
+                        if (!same_source) {
+                            if (curve_history)
+                                reset_curve();
                             last_curve_end = 0;
+                        }
                         curve_history = history;
                         history_received = now;
                     }
@@ -1315,7 +1339,6 @@ void App::pi_loop() {
         auto physical_motion = motion_tracker.estimate(now);
         stats_.motion_available = input_ok && physical_motion.available;
         stats_.mouse_speed = stats_.motion_available ? std::hypot(physical_motion.x, physical_motion.y) : 0;
-        bool motion_ok = !settings_.direction.enabled || stats_.motion_available;
         bool cursor_ok = true;
 #ifdef _WIN32
         if (local_mouse && settings_.cursor_check) {
@@ -1328,6 +1351,8 @@ void App::pi_loop() {
             calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status));
         const bool use_curve = !calibration_only_ && !settings_.return_action.enabled &&
                                settings_.humanization.uses_abcurves();
+        const bool use_trajectory = use_curve && settings_.humanization.uses_abcurves_trajectory();
+        const bool motion_ok = use_trajectory || !settings_.direction.enabled || stats_.motion_available;
         const bool use_hand_history = use_curve && pi_udp;
         if (use_hand_history && !curve_worker)
             curve_worker = std::make_unique<AbcurvesWorker>([this] { control_wake_.notify(); });
@@ -1453,58 +1478,85 @@ void App::pi_loop() {
                 return;
             }
             const auto& hand = *curve_history;
-            if (steering_sent && !abcurves_aligned(hand.trace, steering_sent->aim[0],
-                                                  steering_sent->aim[1], steering_angle)) {
+            if ((curve_inner && at >= curve_inner->deadline) ||
+                (steering_sent && steering_sent->mode == CurveMode::directional &&
+                 !abcurves_aligned(hand.trace, steering_sent->aim[0], steering_sent->aim[1], steering_angle))) {
                 reset_curve();
                 return;
             }
+            auto send_steering = [&](const CurveFrame& frame, std::array<int, 2> aim,
+                                     std::array<int, 2> tangent) {
+                const auto send_at = now_ns();
+                const auto remaining_ms = (frame.deadline - send_at) / 1'000'000;
+                if (remaining_ms <= 0 || !input_fresh(send_at))
+                    return false;
+                mouse_history::Steering advice;
+                advice.session = client;
+                advice.token = ++token;
+                advice.epoch = hand.epoch;
+                advice.generation = hand.generation;
+                advice.sample_ms = hand.end_ms;
+                advice.expires_ms = hand.end_ms + std::min(uint64_t(remaining_ms),
+                                                           mouse_history::steering_lifetime_ms);
+                advice.angle_cdeg = uint16_t(std::round(steering_angle * 100));
+                advice.mode = frame.mode;
+                advice.aim = aim;
+                advice.tangent = tangent;
+                if (socket.send(mouse_history::packet(advice), pi)) {
+                    steering_sent = advice;
+                    stats_.status = frame.mode == CurveMode::directional ? "Active - ABCurves steering update sent"
+                                                                        : "Active - ABCurves inner-radius steering";
+                }
+                return true;
+            };
             if (curve_plan && (at >= curve_plan->frame.deadline || curve_plan->epoch != hand.epoch ||
                                curve_plan->generation != hand.generation ||
-                               hand.end_ms > curve_plan->end_ms + abcurves_horizon_ms))
+                               hand.end_ms > curve_plan->end_ms + abcurves_max_plan_age_ms))
                 curve_plan.reset();
             if (curve_plan && curve_state.reply && curve_state.reply->id == curve_plan->frame.id)
-                curve_plan->reply = curve_state.reply;
+                curve_plan->reply = std::move(curve_state.reply);
             if (curve_plan && curve_plan->reply && hand.end_ms > curve_plan->end_ms) {
                 auto completed = std::move(*curve_plan);
                 curve_plan.reset();
                 const auto elapsed = size_t(hand.end_ms - completed.end_ms);
-                const auto& forecast = completed.reply->positions;
-                const auto& next = forecast[std::min(elapsed, forecast.size() - 1)];
-                const auto& previous = forecast[std::min(elapsed - 1, forecast.size() - 2)];
+                const auto [dx, dy] = completed.reply->directions[elapsed];
                 const auto& frame = completed.frame;
-                const auto dx = next[0] - previous[0], dy = next[1] - previous[1];
-                const auto aim = abcurves_wire_direction(frame.x, frame.y);
                 const auto tangent = abcurves_wire_direction(dx, dy);
-                const auto remaining_ms = (frame.deadline - at) / 1'000'000;
-                if (remaining_ms > 0 && input_fresh(at) &&
-                    abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle) &&
-                    aim != std::array<int, 2>{} && tangent != std::array<int, 2>{} &&
-                    int64_t(aim[0]) * tangent[0] + int64_t(aim[1]) * tangent[1] > 0) {
-                    mouse_history::Steering advice;
-                    advice.session = client;
-                    advice.token = ++token;
-                    advice.epoch = hand.epoch;
-                    advice.generation = hand.generation;
-                    advice.sample_ms = hand.end_ms;
-                    advice.expires_ms = hand.end_ms + std::min(uint64_t(remaining_ms),
-                                                               mouse_history::steering_lifetime_ms);
-                    advice.angle_cdeg = uint16_t(std::round(steering_angle * 100));
-                    advice.aim = aim;
-                    advice.tangent = tangent;
-                    if (socket.send(mouse_history::packet(advice), pi)) {
-                        steering_sent = advice;
-                        stats_.status = "Active - ABCurves steering update sent";
-                    }
+                if (frame.mode == CurveMode::inner) {
+                    inner_tangent = CurveTangent{completed.end_ms + abcurves_max_plan_age_ms, tangent};
                 } else {
-                    reset_curve();
-                    return;
+                    const auto aim = abcurves_wire_direction(frame.x, frame.y);
+                    if (!abcurves_targetward(aim, tangent) ||
+                        !abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle) ||
+                        !send_steering(frame, aim, tangent)) {
+                        reset_curve();
+                        return;
+                    }
+                }
+            }
+            if (curve_inner) {
+                const auto& frame = *curve_inner;
+                const auto aim = abcurves_wire_direction(frame.x, frame.y);
+                auto tangent = aim;
+                if (inner_tangent && hand.end_ms <= inner_tangent->through_ms &&
+                    abcurves_targetward(aim, inner_tangent->direction))
+                    tangent = inner_tangent->direction;
+                if (!steering_sent || steering_sent->sample_ms != hand.end_ms || steering_sent->aim != aim ||
+                    steering_sent->tangent != tangent) {
+                    if (!send_steering(frame, aim, tangent)) {
+                        reset_curve();
+                        return;
+                    }
                 }
             }
             if (!curve_plan && curve_next && at < curve_next->deadline && hand.end_ms > last_curve_end) {
                 const auto frame = *curve_next;
                 curve_next.reset();
                 const bool engaged = steering_sent && hand.end_ms < steering_sent->expires_ms;
-                if (!abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle * (engaged ? 1 : .9))) {
+                if (frame.mode == CurveMode::inner && current_hand_direction(hand.trace) == std::array<int, 2>{})
+                    return;
+                if (frame.mode == CurveMode::directional &&
+                    !abcurves_aligned(hand.trace, frame.x, frame.y, steering_angle * (engaged ? 1 : .9))) {
                     reset_curve();
                     return;
                 }
@@ -1513,8 +1565,82 @@ void App::pi_loop() {
                 last_curve_end = hand.end_ms;
             }
         };
+        auto service_trajectory = [&] {
+            if (!curve_state.ready || !have_history) {
+                reset_curve();
+                return;
+            }
+            const auto at = now_ns();
+            const auto& hand = *curve_history;
+            if (curve_playback && at >= curve_playback->frame.deadline) {
+                curve_playback.reset();
+                curve_residual_x = curve_residual_y = 0;
+            }
+            if (curve_playback && hand.end_ms > curve_playback->at_ms) {
+                auto& playing = *curve_playback;
+                const auto elapsed = hand.end_ms - playing.at_ms;
+                const auto consumed = std::min<uint64_t>(elapsed, playing.path.size() - playing.position_ms);
+                const auto to_ms = playing.position_ms + size_t(consumed);
+                const auto from_ms = to_ms - size_t(std::min(consumed, abcurves_trajectory_max_step_ms));
+                const auto from = abcurves_position(playing.path, from_ms);
+                const auto to = abcurves_position(playing.path, to_ms);
+                auto quantize = [&](double delta, double& residual, int minimum, int maximum) {
+                    const auto cap = settings_.max_step;
+                    const auto offset = std::clamp(delta + residual, double(std::max(-cap, minimum)),
+                                                   double(std::min(cap, maximum)));
+                    const auto counts = int(std::trunc(offset));
+                    residual = offset - counts;
+                    return counts;
+                };
+                if (elapsed > abcurves_trajectory_max_step_ms)
+                    curve_residual_x = curve_residual_y = 0;
+                const auto dx = quantize(to[0] - from[0], curve_residual_x, gate.state.xmin, gate.state.xmax);
+                const auto dy = quantize(to[1] - from[1], curve_residual_y, gate.state.ymin, gate.state.ymax);
+                playing.position_ms = to_ms;
+                playing.at_ms = hand.end_ms;
+                if (!submit_correction(dx, dy, playing.frame.deadline, playing.frame.first_ns))
+                    return;
+                if (to_ms == playing.path.size())
+                    curve_playback.reset();
+            }
+            if (curve_plan && (at >= curve_plan->frame.deadline || curve_plan->epoch != hand.epoch ||
+                               curve_plan->generation != hand.generation ||
+                               hand.end_ms > curve_plan->end_ms + abcurves_max_trajectory_age_ms))
+                curve_plan.reset();
+            if (curve_plan && curve_state.reply && curve_state.reply->id == curve_plan->frame.id) {
+                const auto& frame = curve_plan->frame;
+                auto& points = curve_state.reply->positions;
+                const auto elapsed = size_t(hand.end_ms - curve_plan->end_ms);
+                const bool stationary = abcurves_stationary(hand.trace);
+                const auto begin = abcurves_trajectory_start(points, elapsed, frame.x, frame.y, stationary);
+                if (begin < points.size()) {
+                    curve_playback = CurvePlayback{frame, std::move(points), hand.end_ms, begin};
+                } else if (stationary) {
+                    // A flat forecast can leave a still hand stuck on the same target forever.
+                    // Feed a bounded targetward step through the usual pacing and quantization.
+                    const auto scale = std::max({1., std::abs(frame.x), std::abs(frame.y)});
+                    std::vector<std::array<double, 2>> fallback(abcurves_stationary_fallback_ms);
+                    for (size_t i = 0; i < fallback.size(); ++i) {
+                        const auto progress = double(i + 1) / (double(fallback.size()) * scale);
+                        fallback[i] = {frame.x * progress, frame.y * progress};
+                    }
+                    curve_playback = CurvePlayback{frame, std::move(fallback), hand.end_ms, 0};
+                } else {
+                    curve_playback.reset();
+                }
+                curve_plan.reset();
+            }
+            if (!curve_plan && curve_next && at < curve_next->deadline) {
+                const auto frame = *curve_next;
+                curve_next.reset();
+                curve_worker->submit({frame.id, frame.x, frame.y, hand.trace, true});
+                curve_plan = CurvePlan{frame, hand.epoch, hand.generation, hand.end_ms, {}};
+            }
+        };
         if (result_->id == last_result) {
-            if (use_curve)
+            if (use_trajectory)
+                service_trajectory();
+            else if (use_curve)
                 service_curve();
             continue;
         }
@@ -1613,26 +1739,47 @@ void App::pi_loop() {
                 stats_.trigger_status = "Waiting for button or pending click";
         } else
             cancel_auto_trigger();
-        if (use_curve) {
+        if (!use_curve) {
+            submit_correction(correction.dx, correction.dy, r.deadline, r.frame->first_ns);
+            continue;
+        }
+        if (!correction.curve_target || !have_history) {
+            reset_curve();
+            continue;
+        }
+        const auto& goal = *correction.curve_target;
+        const auto first_ns = r.frame->first_ns;
+        const auto deadline = std::min(r.deadline, first_ns + int64_t(settings_.max_age_ms) * 1'000'000);
+        if (use_trajectory) {
+            const auto goal_changed_side = [&](const CurveFrame& frame) {
+                return goal.x * frame.x + goal.y * frame.y <= 0;
+            };
+            if (goal.new_target || (curve_playback && goal_changed_side(curve_playback->frame)) ||
+                (curve_plan && goal_changed_side(curve_plan->frame)))
+                reset_curve();
+            curve_next = CurveFrame{r.id, deadline, first_ns, goal.x, goal.y, CurveMode::directional};
+            service_trajectory();
+        } else {
             const auto rx = settings_.reference_x < 0 ? r.frame->header.width * .5 : settings_.reference_x;
             const auto ry = settings_.reference_y < 0 ? r.frame->header.height * .5 : settings_.reference_y;
             const auto distance = std::hypot(correction.aim_x - rx, correction.aim_y - ry);
-            if (!correction.curve_target || !have_history || settings_.gain_x <= 0 || settings_.gain_y <= 0 ||
+            if (settings_.gain_x <= 0 || settings_.gain_y <= 0 ||
                 distance > settings_.humanization.abcurves_range_px ||
-                !abcurves_aligned(curve_history->trace, correction.curve_target->x,
-                                  correction.curve_target->y, steering_angle)) {
+                (!goal.inner && !abcurves_aligned(curve_history->trace, goal.x, goal.y, steering_angle))) {
                 reset_curve();
                 continue;
             }
-            const auto& goal = *correction.curve_target;
-            if (goal.new_target)
+            const auto mode = !goal.inner                   ? CurveMode::directional
+                              : goal.x == 0 && goal.y == 0 ? CurveMode::hold
+                                                          : CurveMode::inner;
+            if (goal.new_target || bool(curve_inner) != goal.inner || (curve_inner && curve_inner->mode != mode))
                 reset_curve();
-            const auto deadline =
-                std::min(r.deadline, r.frame->first_ns + int64_t(settings_.max_age_ms) * 1'000'000);
-            curve_next = CurveFrame{r.id, deadline, goal.x, goal.y};
+            const CurveFrame frame{r.id, deadline, first_ns, goal.x, goal.y, mode};
+            if (goal.inner)
+                curve_inner = frame;
+            if (mode != CurveMode::hold)
+                curve_next = frame;
             service_curve();
-        } else {
-            submit_correction(correction.dx, correction.dy, r.deadline, r.frame->first_ns);
         }
     }
 }

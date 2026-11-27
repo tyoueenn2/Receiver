@@ -16,15 +16,19 @@ struct ColorSettings {
 };
 struct HumanizationSettings {
     static constexpr int abcurves_path = 5;
+    static constexpr int abcurves_trajectory_path = 6;
     bool enabled = false;
     int path = 0;
     float curve = .2f, duration_ms = 150, exponent = 2, adaptive_distance = 100;
     float jitter = 0, jitter_interval_ms = 30, noise = 1, noise_period_ms = 100;
     bool ema_enabled = false;
     float ema_alpha = .5f;
-    float abcurves_range_px = 50, abcurves_angle_deg = 30;
+    float abcurves_range_px = 50, abcurves_inner_px = 15, abcurves_angle_deg = 30;
     bool uses_abcurves() const {
-        return enabled && path == abcurves_path;
+        return enabled && (path == abcurves_path || path == abcurves_trajectory_path);
+    }
+    bool uses_abcurves_trajectory() const {
+        return enabled && path == abcurves_trajectory_path;
     }
 };
 struct TrackingSettings {
@@ -150,6 +154,7 @@ float iou(const Detection& a, const Detection& b);
 struct CurveTarget {
     double x, y;
     bool new_target;
+    bool inner = false;
 };
 struct Correction {
     int dx = 0, dy = 0;

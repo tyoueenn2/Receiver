@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace receiver {
 class AbcurvesWorker {
@@ -18,10 +19,12 @@ class AbcurvesWorker {
         uint64_t id;
         double x, y;
         mouse_history::Trace history;
+        bool trajectory = false;
     };
     struct Reply {
         uint64_t id;
-        std::array<std::array<double, 2>, abcurves_horizon_ms> positions{};
+        std::array<std::array<double, 2>, abcurves_max_plan_age_ms + 1> directions{};
+        std::vector<std::array<double, 2>> positions{};
     };
     struct State {
         bool ready = false;

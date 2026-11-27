@@ -188,30 +188,43 @@ int main() {
         s.humanization.jitter = 20;
         r = c.update(targets, 320, 320, s, limits, 311'000'000);
         CHECK(r.dx == 0 && r.dy == 0 && r.curve_target);
-        CHECK(std::abs(r.curve_target->x - 6) < 1e-6 && r.curve_target->y == 0);
+        CHECK(std::abs(r.curve_target->x - 6) < 1e-6 && r.curve_target->y == 0 && !r.curve_target->inner);
         CHECK(!r.curve_target->new_target);
         c.reset();
         r = c.update(targets, 320, 320, s, limits, 321'000'000);
         CHECK(r.curve_target && r.curve_target->new_target);
         auto centered = targets;
         centered[0].x = 150;
-        CHECK(!c.update(centered, 320, 320, s, limits, 331'000'000).curve_target);
+        r = c.update(centered, 320, 320, s, limits, 331'000'000);
+        CHECK(r.curve_target && r.curve_target->inner && r.curve_target->x == 0 && r.curve_target->y == 0);
+        s.humanization.abcurves_inner_px = 0;
+        CHECK(!c.update(centered, 320, 320, s, limits, 341'000'000).curve_target);
+        s.humanization.abcurves_inner_px = 15;
         auto file = std::filesystem::temp_directory_path() / "receiver-humanization-test.json";
         s.direction = d;
         CHECK(s.humanization.abcurves_range_px == 50 && s.humanization.abcurves_angle_deg == 30);
         s.humanization.abcurves_range_px = 42;
-        s.humanization.abcurves_angle_deg = 3.5;
+        s.humanization.abcurves_inner_px = 8;
+        s.humanization.abcurves_angle_deg = 60;
         save_settings(s, file.string());
         auto loaded = load_settings(file.string());
         CHECK(loaded.direction.mode == 2 && loaded.humanization.uses_abcurves());
-        CHECK(loaded.humanization.abcurves_range_px == 42 && loaded.humanization.abcurves_angle_deg == 3.5);
+        CHECK(loaded.humanization.abcurves_range_px == 42 && loaded.humanization.abcurves_inner_px == 8 &&
+              loaded.humanization.abcurves_angle_deg == 60);
         {
             std::ofstream f(file);
             f << "{\"version\":1,\"gain_x\":0.3}";
         }
         loaded = load_settings(file.string());
         CHECK(!loaded.direction.enabled && !loaded.humanization.enabled && loaded.gain_x == .3f);
-        CHECK(loaded.humanization.abcurves_range_px == 50 && loaded.humanization.abcurves_angle_deg == 30);
+        CHECK(loaded.humanization.abcurves_range_px == 50 && loaded.humanization.abcurves_inner_px == 15 &&
+              loaded.humanization.abcurves_angle_deg == 30);
+        {
+            std::ofstream f(file);
+            f << "{\"version\":1,\"humanization\":{\"abcurves_range_px\":10}}";
+        }
+        loaded = load_settings(file.string());
+        CHECK(loaded.humanization.abcurves_range_px == 10 && loaded.humanization.abcurves_inner_px == 9);
         std::filesystem::remove(file);
         s.direction.slow_speed = 0;
         bool invalid = false;
