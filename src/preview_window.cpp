@@ -143,7 +143,7 @@ bool PreviewWindow::update_options(const InterfaceSettings& settings) {
     return true;
 }
 void PreviewWindow::render(const PreviewImage& image, const Preview& picture, const Settings& settings,
-                           const Stats& stats, const std::vector<std::string>& names, bool simulated) {
+                           const AppStatus& stats, const std::vector<std::string>& names, bool simulated) {
     drawn_ = false;
     if (!window_ || IsIconic(window_))
         return;

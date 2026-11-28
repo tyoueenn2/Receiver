@@ -1,5 +1,6 @@
 """Exercise the actual C++ receiver over loopback, including fail-closed output."""
 import argparse
+import csv
 import json
 import socket
 import subprocess
@@ -90,6 +91,10 @@ def main():
             output = collect_logged_output(process, activity_log, timeout=10)
             assert process.returncode == 0 or (process.returncode == 1 and 'Pi: error not50' in output), output
             assert metrics.exists() and 'receiver_to_submission' in metrics.read_text()
+            measurements = {row[0]: row[1:] for row in csv.reader(metrics.read_text().splitlines()) if row}
+            synchronized_samples = int(measurements['capture_to_detection_upper'][0])
+            assert 0 < synchronized_samples <= int(measurements['# detection_frames'][0])
+            assert float(measurements['# detection_fps'][0]) > 0
             assert 'DEBUG network packets=' in output
             assert 'DEBUG output synthetic_snapshots=' in output
             print(output); print(f'Integration passed: {len(pi.commands)} commands, release, frame stall, telemetry expiry, old capture, restart, BGRA, readiness.')

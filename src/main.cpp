@@ -5,6 +5,7 @@
 #include <csignal>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string_view>
 
@@ -119,6 +120,7 @@ int main(int argc, char** argv) {
         receiver::Settings cfg;
         bool simulate = false, arm = false;
         int seconds = 10, log_interval_ms = 1000;
+        std::optional<int> detection_warmup;
         int hold_button = 0, release_after_ms = -1;
         LogLevel log_level = LogLevel::info;
         struct ClickOptions { int button = 0, count = 1, press_ms = 10, interval_ms = 10; } click;
@@ -177,6 +179,8 @@ int main(int argc, char** argv) {
                 arm = true;
             else if (a == "--seconds")
                 seconds = std::stoi(value());
+            else if (a == "--detection-warmup")
+                detection_warmup = std::stoi(value());
             else if (a == "--metrics")
                 metrics = value();
             else if (a == "--log-level")
@@ -205,12 +209,14 @@ int main(int argc, char** argv) {
                              "  [--frame-source udp|local] [--capture-output N] [--list-capture-outputs]\n"
                              "  [--mouse-backend pi|local|makcu] [--makcu-port COM3|/dev/ttyACM0]\n"
                              "  [--omni-python EXE] [--omni-source DIR] [--omni-device cuda:0|cpu]\n"
-                             "  [--metrics FILE] [--log-level quiet|error|info|debug|trace]\n"
+                             "  [--detection-warmup N] [--metrics FILE] [--log-level quiet|error|info|debug|trace]\n"
                              "  [--log-interval-ms N] [--quiet|--verbose|--trace]\n"
                              "  [--hold-button 1..8] [--release-after-ms N]\n"
                              "  [--click BUTTON COUNT PRESS_MS INTERVAL_MS]\n\n"
                              "Use --seconds 0 to run until SIGINT or SIGTERM. A zero log interval disables\n"
                              "periodic summaries; lifecycle and action logs still follow --log-level.\n"
+                             "--detection-warmup waits for synchronized inference, warms up for N seconds,\n"
+                             "then uses --seconds as the capture-to-detection measurement window.\n"
                              "Simulation is loopback-only. Synthetic input requires --arm and fresh\n"
                              "sender/Pi telemetry. MAKCU uses real hardware even with simulated pictures.\n";
                 return 0;
@@ -220,6 +226,9 @@ int main(int argc, char** argv) {
         log.set_level(log_level);
         if (seconds < 0 || seconds > 86400)
             throw std::runtime_error("Seconds must be 0..86400 (0 runs until interrupted)");
+        if (detection_warmup && (*detection_warmup < 0 || *detection_warmup > 300 ||
+                                 !seconds || arm || cfg.color.mode == 1))
+            throw std::runtime_error("Detection warmup requires a model, 0..300 warmup seconds, finite duration and disarmed output");
         if (log_interval_ms < 0 || log_interval_ms > 60000)
             throw std::runtime_error("Log interval must be 0..60000 milliseconds");
         if (hold_button < 0 || hold_button > 8 || release_after_ms < -1 ||
@@ -270,15 +279,20 @@ int main(int argc, char** argv) {
             log.write(LogLevel::info, "arming requested");
         }
         auto start = receiver::now_ns();
+        int64_t measurement_start = detection_warmup ? 0 : start;
+        int64_t warmup_start = 0;
+        bool detection_timeout = false;
         int64_t reported = 0, hold_started = 0;
         bool hold_sent = false, click_sent = false, released = false, observed_state = false,
              application_stopped = false;
         bool last_running = false, last_armed = false, last_active = false, last_pi_ready = false,
              last_synchronized = false;
         std::string last_backend, last_movement_status;
-        while (!interrupted &&
-               (!seconds || receiver::now_ns() - start < int64_t(seconds) * 1'000'000'000)) {
-            auto s = app.stats();
+        while (!interrupted) {
+            const auto now = receiver::now_ns();
+            if (seconds && measurement_start && now - measurement_start >= int64_t(seconds) * 1'000'000'000)
+                break;
+            const auto s = app.status();
             if (s.movement_status != last_movement_status) {
                 log.write(LogLevel::info, s.movement_status.empty() ? "ABCurves disabled" : s.movement_status);
                 last_movement_status = s.movement_status;
@@ -303,10 +317,27 @@ int main(int argc, char** argv) {
                 application_stopped = true;
                 break;
             }
-            auto now = receiver::now_ns();
+            if (detection_warmup && !measurement_start) {
+                if (!s.synchronized || !s.last_detection_ns ||
+                    now - s.last_detection_ns > 1'000'000'000) {
+                    warmup_start = 0;
+                } else {
+                    if (!warmup_start)
+                        warmup_start = now;
+                    if (now - warmup_start >= int64_t(*detection_warmup) * 1'000'000'000) {
+                        app.reset_detection_metrics();
+                        measurement_start = now;
+                        log.write(LogLevel::info, "capture-to-detection measurement started");
+                    }
+                }
+                if (!measurement_start && now - start >= int64_t(180 + *detection_warmup) * 1'000'000'000) {
+                    detection_timeout = true;
+                    break;
+                }
+            }
             if (log_interval_ms &&
                 (!reported || now - reported >= int64_t(log_interval_ms) * 1'000'000)) {
-                log_summary(log, s);
+                log_summary(log, app.stats());
                 reported = now;
             }
             if (arm && s.pi_ready && s.synchronized && !hold_sent && hold_button) {
@@ -342,6 +373,8 @@ int main(int argc, char** argv) {
         if (interrupted)
             log.write(LogLevel::info, "shutdown requested by signal=" +
                                           std::to_string(int(interrupted)));
+        else if (detection_timeout)
+            log.write(LogLevel::error, "Timed out waiting for synchronized detections after model startup");
         else if (application_stopped)
             log.write(LogLevel::info, "application worker requested shutdown");
         else if (seconds)
@@ -355,6 +388,8 @@ int main(int argc, char** argv) {
             log.write(LogLevel::error, s.error);
             return 1;
         }
+        if (detection_timeout || (detection_warmup && (!measurement_start || !s.capture_to_detection.count)))
+            return 1;
         log.write(LogLevel::info, "stopped cleanly");
         return 0;
     } catch (const std::exception& e) {

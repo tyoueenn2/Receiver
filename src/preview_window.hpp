@@ -15,7 +15,7 @@ struct PreviewImage {
     int width = 0, height = 0;
 };
 bool draw_preview_image(const PreviewImage& image, const Preview& picture, const Settings& settings,
-                        const Stats& stats, const std::vector<std::string>& names, bool simulated,
+                        const AppStatus& stats, const std::vector<std::string>& names, bool simulated,
                         ImVec2 available, float maximum_scale);
 #ifdef _WIN32
 // UI-thread owner. Borrows the app's D3D device and image texture; owns its window,
@@ -48,7 +48,7 @@ class PreviewWindow {
     void close();
     bool update_options(const InterfaceSettings& settings);
     void render(const PreviewImage& image, const Preview& picture, const Settings& settings,
-                const Stats& stats, const std::vector<std::string>& names, bool simulated);
+                const AppStatus& stats, const std::vector<std::string>& names, bool simulated);
     void present();
     bool close_requested() const {
         return close_requested_;
@@ -94,7 +94,7 @@ class PreviewWindow {
     bool update_options(const InterfaceSettings& settings);
     void process_event(const SDL_Event& event);
     void render(const PreviewImage& image, const Preview& picture, const Settings& settings,
-                const Stats& stats, const std::vector<std::string>& names, bool simulated);
+                const AppStatus& stats, const std::vector<std::string>& names, bool simulated);
     void present();
     void save_frame(const char* path);
     bool close_requested() const {

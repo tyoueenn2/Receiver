@@ -87,7 +87,7 @@ void PreviewWindow::process_event(const SDL_Event& event) {
     }
 }
 void PreviewWindow::render(const PreviewImage& image, const Preview& picture, const Settings& settings,
-                           const Stats& stats, const std::vector<std::string>& names, bool simulated) {
+                           const AppStatus& stats, const std::vector<std::string>& names, bool simulated) {
     drawn_ = false;
     if (!window_ || (SDL_GetWindowFlags(window_) & SDL_WINDOW_MINIMIZED))
         return;

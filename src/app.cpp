@@ -35,6 +35,15 @@ double Samples::percentile(double p) const {
     std::sort(sorted.begin(), sorted.begin() + n);
     return sorted[size_t(std::ceil(p * (n - 1)))];
 }
+std::array<double, 3> Samples::percentiles() const {
+    const auto n = size_t(std::min<uint64_t>(count, values.size()));
+    if (!n)
+        return {};
+    auto sorted = values;
+    std::sort(sorted.begin(), sorted.begin() + n);
+    const auto pick = [&](double p) { return sorted[size_t(std::ceil(p * (n - 1)))]; };
+    return {pick(.5), pick(.95), pick(.99)};
+}
 void App::fail(const std::string& error, ReleaseReason reason) {
     std::lock_guard lock(mutex_);
     stats_.error = error;
@@ -323,6 +332,22 @@ uint64_t App::click(int button, uint32_t count, std::chrono::microseconds press_
     if (calibration_state_.running || (move_request_ && !move_protocol::terminal(move_result_.status)))
         throw std::runtime_error("Calibration or move and return owns mouse output");
     return injected_.click(button, count, press_duration, interval);
+}
+AppStatus App::status() const {
+    auto injection = injected_.metrics();
+    std::lock_guard lock(mutex_);
+    AppStatus status = stats_;
+    status.injection = std::move(injection);
+    status.running = !stop_;
+    if (auto memory = frame_memory_.load())
+        status.frame_memory = frame_memory_status(memory);
+    return status;
+}
+void App::reset_detection_metrics() {
+    std::lock_guard lock(mutex_);
+    stats_.detection_frames = 0;
+    stats_.first_detection_ns = stats_.last_detection_ns = 0;
+    stats_.capture_to_detection.count = 0;
 }
 Stats App::stats() const {
     auto injection = injected_.metrics();
@@ -855,6 +880,17 @@ void App::inference_loop() {
             stats_.postprocess.add(double(done - post_start) / 1e6);
             if (epoch == epoch_ && !stop_) {
                 result_ = Result{frame, std::move(detections), epoch, ++result_id_, deadline, done, colors};
+                if (cfg.color.mode != 1) {
+                    const auto published_at = now_ns();
+                    if (!stats_.detection_frames++)
+                        stats_.first_detection_ns = published_at;
+                    stats_.last_detection_ns = published_at;
+                    const auto age = capture
+                        ? std::optional<int64_t>(std::max<int64_t>(0, published_at - frame->header.capture_ns))
+                        : clock_.age_upper(frame->header.capture_ns, published_at);
+                    if (age)
+                        stats_.capture_to_detection.add(double(*age) / 1e6);
+                }
                 control_wake_.notify();
                 if (cfg.preview && done - last_preview >= 33'333'333) {
                     preview_ = {frame, result_->detections, {}, colors};
@@ -1446,7 +1482,8 @@ void App::pi_loop() {
             if (use_hand_history)
                 curve_state = curve_worker->poll();
         }
-        const bool have_history = use_hand_history && curve_history && gate.state.has_motion &&
+        const bool can_request_history = use_hand_history && curve_state.ready && gate.state.has_motion;
+        const bool have_history = can_request_history && curve_history &&
                                   curve_history->epoch == gate.state.server &&
                                   curve_history->generation == gate.state.motion_generation &&
                                   now - history_received <= history_fresh_ns;
@@ -1459,7 +1496,7 @@ void App::pi_loop() {
         bool active = !exclusive && !calibration_only_ && stats_.armed && !stats_.model_loading &&
                       !stats_.benchmarking && !proxy_error && sender_ok && input_ok && motion_ok &&
                       cursor_ok && activation_held(gate.state.physical, settings_);
-        if (active && use_hand_history && gate.state.has_motion && curve_state.ready) {
+        if (active && can_request_history) {
             if (now >= history_due) {
                 const auto query_token = ++token;
                 if (socket.send(mouse_history::query(client, query_token), pi)) {
@@ -1879,9 +1916,16 @@ void App::export_metrics(const std::string& path) const {
                       {"postprocess", &s.postprocess},
                       {"command_submission", &s.submit},
                       {"receiver_to_submission", &s.receiver_total},
-                      {"capture_age_upper_at_submission", &s.capture_age}})
-        f << pair.first << ',' << pair.second->count << ',' << pair.second->percentile(.5) << ','
-          << pair.second->percentile(.95) << ',' << pair.second->percentile(.99) << '\n';
+                      {"capture_age_upper_at_submission", &s.capture_age},
+                      {"capture_to_detection_upper", &s.capture_to_detection}}) {
+        const auto [p50, p95, p99] = pair.second->percentiles();
+        f << pair.first << ',' << pair.second->count << ',' << p50 << ',' << p95 << ',' << p99 << '\n';
+    }
+    const double detection_seconds = double(s.last_detection_ns - s.first_detection_ns) / 1e9;
+    const double detection_fps = detection_seconds > 0 ? double(s.detection_frames - 1) / detection_seconds : 0;
+    f << "# detection_frames," << s.detection_frames << "\n# detection_seconds," << detection_seconds
+      << "\n# detection_fps," << detection_fps << "\n# capture_width," << s.width
+      << "\n# capture_height," << s.height << '\n';
     f << "# backend," << s.backend << "\n# frame_memory," << s.frame_memory << "\n# frames," << s.inferred
       << "\n# sent," << s.sent << "\n# synthetic_snapshots," << s.synthetic_snapshots
       << "\n# release_snapshots," << s.release_snapshots << "\n# hold_heartbeats," << s.hold_heartbeats
